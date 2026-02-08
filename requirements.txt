@@ -9,8 +9,8 @@ PyGithub>=2.1.1
 # Bitbucket API (uses Atlassian REST API)
 atlassian-python-api>=3.41.0
 
-# OpenAI for code analysis and generation
-openai>=1.12.0
+# LLM: multi-provider (OpenAI, Anthropic, Gemini) via LiteLLM
+litellm>=1.30.0
 
 # Configuration parsing
 # configparser is built-in for .ini files

@@ -32,6 +32,11 @@ sequenceDiagram
     Main->>Repo: grep (optional patterns)
     Main->>Consciousness: build_or_load (structure, conventions, samples)
     Consciousness-->>Main: project context
+    opt Framework repo in changes.txt
+        Main->>Git: clone framework repo
+        Main->>Consciousness: build framework consciousness
+        Consciousness-->>Main: framework context (REFERENCE ONLY)
+    end
     opt Reference PR
         Main->>PR: fetch reference PR diff
         PR-->>Main: template content
@@ -101,8 +106,9 @@ export GITHUB_TOKEN=your_personal_access_token
 # For Bitbucket
 export BITBUCKET_APP_PASSWORD=your_app_password
 
-# For AI (required)
+# For AI (required) - use the key for your provider
 export OPENAI_API_KEY=your_openai_api_key
+# Or: ANTHROPIC_API_KEY, GEMINI_API_KEY for anthropic/gemini
 ```
 
 ### 3. Define requirements
@@ -171,6 +177,15 @@ Edit `changes.txt` before running to specify what to implement.
 
 The system fetches that PR's diff and description and uses it as a template.
 
+**Framework repo (external reference):** When your app uses a custom framework in a separate repo, add at the top of `changes.txt`:
+
+```
+# Framework repo: https://github.com/your-org/acme-platform.git
+# Framework branch: main
+```
+
+The tool clones the framework repo, builds consciousness from it, and injects it into the AI prompt as **REFERENCE ONLY** – the AI is instructed that framework code cannot be changed. Only application files are modified.
+
 The script will:
 1. Fork the repo to your GitHub account
 2. Clone your fork
@@ -204,8 +219,11 @@ For script execution and output verification, use `src.code_executor`:
 | repository | feature_branch | Optional; auto-generated if empty |
 | github_config | auth_token | Token; can use env vars instead |
 | github_config | use_env | Use `GITHUB_TOKEN` / `BITBUCKET_APP_PASSWORD` |
-| ai | api_key | OpenAI key; or `OPENAI_API_KEY` env |
-| ai | model | Model (default: gpt-4o) |
+| ai | provider | LLM provider: openai, anthropic, gemini (default: openai) |
+| ai | api_key | API key; or use api_key_env (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY) |
+| ai | api_key_env | Env var for API key (optional override) |
+| ai | model | Model (gpt-4o, claude-3-5-sonnet-20241022, gemini-1.5-pro, etc.) |
+| ai | base_url | Optional: custom endpoint (Azure, proxy) |
 | workflow | work_dir | Clone directory (default: ./workspace) |
 | workflow | cleanup_after_pr | Delete workspace after PR |
 | workflow | grep_patterns | Comma-separated patterns to search before AI |
@@ -224,6 +242,20 @@ For script execution and output verification, use `src.code_executor`:
 Plain text requirements. Be specific: file names, function names, and behavior help the AI produce better changes.
 
 **Testing strategy (Java):** Add `# Testing strategy: bdd` (or `contract`, `integration`, `unit`, `e2e`, `soap`) at the top to guide AI-generated tests.
+
+**Framework repo:** Add `# Framework repo: https://github.com/org/repo.git` (and optionally `# Framework branch: main`) to clone an external framework and use it as reference. Framework code is REFERENCE ONLY – the AI will not modify it.
+
+### Multi-provider LLM (OpenAI, Anthropic, Gemini)
+
+The LLM layer (`src/llm_client.py`) supports multiple providers via [LiteLLM](https://docs.litellm.ai/):
+
+| Provider | config.ini | Model examples | Env var |
+|----------|------------|----------------|---------|
+| OpenAI | `provider = openai` | gpt-4o, gpt-4o-mini | OPENAI_API_KEY |
+| Anthropic | `provider = anthropic` | claude-3-5-sonnet-20241022 | ANTHROPIC_API_KEY |
+| Google | `provider = gemini` | gemini-1.5-pro, gemini-1.5-flash | GEMINI_API_KEY |
+
+Set `api_key` in config or the corresponding env var. Use `base_url` for Azure or custom endpoints.
 
 ## GitHub Setup
 
@@ -255,6 +287,7 @@ code-autonomy/
 │   ├── config_loader.py
 │   ├── git_ops.py
 │   ├── pr_platform.py      # GitHub + Bitbucket
+│   ├── llm_client.py       # Multi-provider LLM (OpenAI, Anthropic, Gemini via LiteLLM)
 │   ├── code_analyzer.py    # AI changes + error regeneration
 │   ├── agent_analyzer.py   # Agent loop with tool use
 │   ├── agent_tools.py      # read_file, grep, list_dir, find_files

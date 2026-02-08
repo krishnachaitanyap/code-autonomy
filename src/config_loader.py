@@ -45,7 +45,16 @@ def load_config(config_path: str = "config.ini") -> dict:
     api_key = get("ai", "api_key")
     if api_key and api_key.startswith("<") and api_key.endswith(">"):
         api_key = ""  # Treat placeholder as empty
-    api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+    provider = get("ai", "provider", "openai").lower() or "openai"
+    api_key_env = get("ai", "api_key_env", "")
+    if not api_key_env:
+        api_key_env = {
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "gemini": "GEMINI_API_KEY",
+            "google": "GEMINI_API_KEY",
+        }.get(provider, "OPENAI_API_KEY")
+    api_key = api_key or os.environ.get(api_key_env, "")
 
     return {
         "repository": {
@@ -58,8 +67,11 @@ def load_config(config_path: str = "config.ini") -> dict:
             "auth_token": auth_token,
         },
         "ai": {
+            "provider": provider,
             "api_key": api_key,
+            "api_key_env": api_key_env,
             "model": get("ai", "model", "gpt-4o"),
+            "base_url": get("ai", "base_url", ""),
             "verbose": get_bool("ai", "verbose", False),
         },
         "workflow": {
@@ -106,6 +118,43 @@ def _parse_reference_pr_from_content(content: str) -> tuple[str, str]:
     return content, ""
 
 
+def parse_framework_repo_from_changes(content: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Parse framework repo URL and branch from changes content.
+    Supports:
+      # Framework repo: https://github.com/org/framework.git
+      # Framework: https://github.com/org/framework.git
+      # Framework branch: main
+    Returns (framework_repo_url, framework_branch). Either can be None.
+    """
+    import re
+    url = None
+    branch = None
+    for line in content.splitlines():
+        m = re.search(r"^(?:#\s*)?(?:Framework\s+repo|Framework)\s*:\s*(https?://[^\s#]+\.git)", line, re.I)
+        if m:
+            url = m.group(1).rstrip(")").strip()
+            continue
+        m = re.search(r"^(?:#\s*)?Framework\s+branch\s*:\s*(\w[\w\-/]*)", line, re.I)
+        if m:
+            branch = m.group(1).strip()
+    return url, (branch or "main") if url else None
+
+
+def _strip_framework_lines(content: str) -> str:
+    """Remove framework meta lines from content."""
+    import re
+    lines = []
+    for line in content.splitlines():
+        if re.search(r"^(?:#\s*)?(?:Framework\s+repo|Framework)\s*:\s*https?://", line, re.I):
+            continue
+        if re.search(r"^(?:#\s*)?Framework\s+branch\s*:\s*\w", line, re.I):
+            continue
+        lines.append(line)
+    result = "\n".join(lines).strip()
+    return re.sub(r"\n{3,}", "\n\n", result)
+
+
 def parse_testing_strategy_from_changes(content: str) -> Optional[str]:
     """
     Parse # Testing strategy: bdd|contract|integration|unit|e2e from changes content.
@@ -127,10 +176,13 @@ def load_changes(changes_path: str = "changes.txt") -> str:
     return changes_path.read_text(encoding="utf-8")
 
 
-def load_changes_with_reference(changes_path: str = "changes.txt") -> tuple[str, str]:
+def load_changes_with_reference(changes_path: str = "changes.txt") -> tuple[str, str, Optional[str], Optional[str]]:
     """
-    Load changes.txt and parse optional reference PR from it.
-    Returns (requirements, reference_pr_url). reference_pr_url is empty if not specified.
+    Load changes.txt and parse optional reference PR and framework repo.
+    Returns (requirements, reference_pr_url, framework_repo_url, framework_branch).
     """
     raw = load_changes(changes_path)
-    return _parse_reference_pr_from_content(raw)
+    content, reference_pr = _parse_reference_pr_from_content(raw)
+    framework_url, framework_branch = parse_framework_repo_from_changes(content)
+    content = _strip_framework_lines(content)
+    return content, reference_pr, framework_url, framework_branch

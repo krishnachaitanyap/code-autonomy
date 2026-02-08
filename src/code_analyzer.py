@@ -1,6 +1,6 @@
 """
 AI-powered code analysis and generation.
-Uses OpenAI to understand requirements and generate code changes.
+Uses LLM (OpenAI, Anthropic, Gemini via LiteLLM) to understand requirements and generate code changes.
 Supports Python and Java with error analysis and regeneration.
 """
 
@@ -58,20 +58,18 @@ def load_codebase_context(repo_path: str, max_files: int = 30, max_chars_per_fil
 def generate_changes(
     requirements: str,
     codebase_context: str,
-    api_key: str,
-    model: str = "gpt-4o",
+    llm_config: dict,
     verbose: bool = False,
     reference_pr_content: str = "",
+    framework_context: str = "",
     testing_strategy: str = "auto",
     build_tool: Optional[str] = None,
 ) -> list[dict]:
     """
     Use AI to generate file changes based on requirements.
     Returns list of {"path": str, "content": str, "action": "create"|"modify"}.
+    llm_config: provider, model, api_key, base_url, api_key_env from config.
     """
-    from openai import OpenAI
-
-    client = OpenAI(api_key=api_key)
 
     system_prompt = """You are an expert software engineer. Your task is to analyze requirements and produce concrete code changes.
 You support both Python and Java (and Kotlin). Follow the existing project's language and conventions.
@@ -93,6 +91,7 @@ Rules:
 - Preserve existing code style, imports, and structure when modifying.
 - If the requirement cannot be fulfilled with the given context, still provide your best attempt.
 - Adapt to project structure and conventions (see project context when provided).
+- When framework context is provided: it is REFERENCE ONLY. Do NOT modify framework code or propose changes to framework files. Only modify files in the application repo.
 - Output format: {"changes": [{"path": "...", "content": "...", "action": "modify"|"create"}, ...]}"""
 
     from src.testing_strategies import get_testing_strategy_context
@@ -114,25 +113,31 @@ Rules:
 ## Reference PR (use as template for similar changes)
 {reference_pr_content}
 """
+    framework_section = ""
+    if framework_context:
+        framework_section = f"""
+{framework_context}
+"""
     user_prompt = f"""## Requirements
 {requirements}
 {reference_section}
+{framework_section}
 {testing_section}
 ## Current Codebase
 {codebase_context}
 
 Produce the JSON array of file changes to implement the requirements (adapt paths and packages to match the current codebase)."""
 
-    response = client.chat.completions.create(
-        model=model,
+    from src.llm_client import chat_completion
+
+    content, _ = chat_completion(
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
+        config=llm_config,
         temperature=0.2,
     )
-
-    content = response.choices[0].message.content.strip()
     if verbose:
         print("AI Response (raw):", content[:500], "...")
 
@@ -166,20 +171,18 @@ def regenerate_with_error_analysis(
     codebase_context: str,
     error_output: str,
     previous_changes: list[dict],
-    api_key: str,
-    model: str = "gpt-4o",
+    llm_config: dict,
     verbose: bool = False,
     reference_pr_content: str = "",
+    framework_context: str = "",
     testing_strategy: str = "auto",
     build_tool: Optional[str] = None,
 ) -> list[dict]:
     """
     Given test/execution failure, analyze error and regenerate fixes.
     Returns new list of changes.
+    llm_config: provider, model, api_key, base_url, api_key_env from config.
     """
-    from openai import OpenAI
-
-    client = OpenAI(api_key=api_key)
 
     system_prompt = """You are an expert software engineer. Tests or execution failed. Your task is to FIX the code based on the error output.
 
@@ -199,6 +202,7 @@ Rules:
 - For "modify": provide the COMPLETE corrected file content.
 - Focus on fixing the specific errors shown in the error output.
 - Preserve working parts of the code; only fix what's broken.
+- When framework context is provided: it is REFERENCE ONLY. Do NOT modify framework code. Only modify files in the application repo.
 - Output format: {"changes": [{"path": "...", "content": "...", "action": "modify"|"create"}, ...]}"""
 
     from src.testing_strategies import get_testing_strategy_context
@@ -210,9 +214,11 @@ Rules:
             testing_section = f"\n## Testing strategy (follow when fixing tests)\n{ctx}\n"
 
     reference_section = f"\n## Reference PR (if relevant for style/conventions)\n{reference_pr_content}\n" if reference_pr_content else ""
+    framework_section = f"\n{framework_context}\n" if framework_context else ""
     user_prompt = f"""## Original Requirements
 {requirements}
 {reference_section}
+{framework_section}
 {testing_section}
 ## Current Codebase (after previous changes)
 {codebase_context}
@@ -225,16 +231,16 @@ Rules:
 
 Produce the JSON array of file changes to FIX these errors."""
 
-    response = client.chat.completions.create(
-        model=model,
+    from src.llm_client import chat_completion
+
+    content, _ = chat_completion(
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
+        config=llm_config,
         temperature=0.2,
     )
-
-    content = response.choices[0].message.content.strip()
     if verbose:
         print("AI regeneration response:", content[:300], "...")
 

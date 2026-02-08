@@ -74,7 +74,7 @@ def main() -> int:
     # Load config and requirements
     try:
         config = load_config(args.config)
-        requirements, reference_pr_from_file = load_changes_with_reference(args.changes)
+        requirements, reference_pr_from_file, framework_repo_url, framework_branch = load_changes_with_reference(args.changes)
     except FileNotFoundError as e:
         print(f"Error: {e}")
         return 1
@@ -95,8 +95,9 @@ def main() -> int:
         print("Error: Set auth_token in config.ini or GITHUB_TOKEN/BITBUCKET_APP_PASSWORD env var")
         return 1
 
-    if not ai_cfg["api_key"]:
-        print("Error: Set OPENAI_API_KEY environment variable or api_key in config.ini")
+    if not ai_cfg.get("api_key"):
+        env_var = ai_cfg.get("api_key_env", "OPENAI_API_KEY")
+        print(f"Error: Set {env_var} environment variable or api_key in config.ini [ai] section")
         return 1
 
     work_dir = Path(workflow["work_dir"]).resolve()
@@ -140,6 +141,41 @@ def main() -> int:
 
     with step("Creating feature branch", feature_branch):
         checkout_branch(repo, feature_branch, create=True)
+
+    # Clone framework repo if specified in changes.txt
+    framework_path = None
+    framework_context = ""
+    if framework_repo_url:
+        try:
+            framework_name = get_repo_name(framework_repo_url).replace("/", "-")
+            framework_dir = work_dir / ".framework-ref" / framework_name
+            if framework_dir.exists():
+                shutil.rmtree(framework_dir)
+            framework_dir.parent.mkdir(parents=True, exist_ok=True)
+            with spinner(f"Cloning framework: {framework_repo_url}"):
+                clone_repo(
+                    framework_repo_url,
+                    str(framework_dir),
+                    branch=framework_branch or "main",
+                    auth_token=auth_token if auth_token else None,
+                )
+            framework_path = framework_dir
+            framework_consciousness = build_or_load_consciousness(
+                str(framework_path),
+                config,
+                repo_url=framework_repo_url,
+                force_rebuild=getattr(args, "rebuild_consciousness", False),
+            )
+            framework_context = framework_consciousness.to_context_string()
+            if framework_context:
+                framework_context = (
+                    "\n\n## Framework context (REFERENCE ONLY – do NOT modify)\n"
+                    "Use this to understand patterns, conventions, and APIs. You MUST NOT propose any changes to framework files.\n\n"
+                    + framework_context
+                )
+                log_info("Included framework consciousness as reference")
+        except Exception as e:
+            log_warning(f"Could not clone/build framework: {e}. Proceeding without framework context.")
 
     with step("Analyzing codebase"):
         context = load_codebase_context(str(clone_path))
@@ -197,23 +233,23 @@ def main() -> int:
                     changes = generate_changes_with_agent(
                         requirements,
                         str(clone_path),
-                        api_key=ai_cfg["api_key"],
-                        model=ai_cfg["model"],
+                        llm_config=ai_cfg,
                         reference_pr_content=reference_pr_content,
                         verbose=ai_cfg["verbose"],
                         testing_strategy=testing_strategy,
                         build_tool=build_tool,
                         consciousness_context=consciousness_str or "",
+                        framework_context=framework_context,
                     )
             else:
                 with spinner("Generating changes with AI"):
                     changes = generate_changes(
                         requirements,
                         context,
-                        api_key=ai_cfg["api_key"],
-                        model=ai_cfg["model"],
+                        llm_config=ai_cfg,
                         verbose=ai_cfg["verbose"],
                         reference_pr_content=reference_pr_content,
+                        framework_context=framework_context,
                         testing_strategy=testing_strategy,
                         build_tool=build_tool,
                     )
@@ -224,10 +260,10 @@ def main() -> int:
                     context,
                     error_output=error_output,
                     previous_changes=changes or [],
-                    api_key=ai_cfg["api_key"],
-                    model=ai_cfg["model"],
+                    llm_config=ai_cfg,
                     verbose=ai_cfg["verbose"],
                     reference_pr_content=reference_pr_content,
+                    framework_context=framework_context,
                     testing_strategy=testing_strategy,
                     build_tool=build_tool,
                 )
