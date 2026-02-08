@@ -1,0 +1,16 @@
+# Testing strategy: contract
+# Add contract tests for the REST API
+
+Add contract tests for the user/order API endpoints:
+
+1. Create consumer contract (Pact) or provider contract (Spring Cloud Contract):
+   - Define expected request: method, path, headers, body
+   - Define expected response: status code, body with matchers
+
+2. For Pact (consumer-driven):
+   - Consumer test that defines the contract
+   - Provider verification test that runs against the API
+
+3. For Spring Cloud Contract:
+   - Create contract in src/test/resources/contracts/ (Groovy or YAML)
+   - Provider base test class for verification

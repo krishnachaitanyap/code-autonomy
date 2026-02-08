@@ -1,0 +1,18 @@
+# Testing strategy: soap
+# Add SOAP web service tests for legacy project
+
+Add SOAP web service tests:
+
+1. For Spring WS projects:
+   - Use MockWebServiceServer to mock SOAP client calls
+   - expect(payload(...)).andRespond(withPayload(...))
+   - Add spring-ws-test dependency
+
+2. For JAX-WS / legacy projects:
+   - Create client test using Service.create() and port
+   - Assert XML response (envelope, body, namespaces)
+   - Use JUnit 4 if project uses older JUnit
+   - Consider WireMock for mocking SOAP endpoint
+
+3. Place test in src/test/java/.../soap/ or *SoapTest.java
+4. Preserve WSDL namespace and SOAP envelope structure

@@ -1,0 +1,16 @@
+# Add StringUtils with email validation to maven-demo (Java)
+# Reference PR: https://github.com/owner/repo/pull/123
+
+Add a new utility class to the demo package:
+
+1. Create src/main/java/demo/StringUtils.java with:
+   - A static method: public static boolean isValidEmail(String email)
+   - Use a simple regex pattern to validate email format (local@domain.tld)
+   - Return true if valid, false if null/empty or invalid format
+   - Handle common cases: user@example.com, name.surname@domain.co.uk
+
+2. Create src/test/java/demo/StringUtilsTest.java with:
+   - Unit tests for isValidEmail using JUnit 4 (already in pom.xml)
+   - Test valid emails: test@example.com, user.name@domain.com
+   - Test invalid: null, empty string, "missing@", "@nodomain.com", "no-at-sign"
+   - Test edge case: "a@b.co" (minimal valid)

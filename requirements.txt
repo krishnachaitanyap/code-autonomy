@@ -1,0 +1,22 @@
+# Autonomous Code Generation - Dependencies
+
+# Git operations
+GitPython>=3.1.40
+
+# GitHub API
+PyGithub>=2.1.1
+
+# Bitbucket API (uses Atlassian REST API)
+atlassian-python-api>=3.41.0
+
+# OpenAI for code analysis and generation
+openai>=1.12.0
+
+# Configuration parsing
+# configparser is built-in for .ini files
+
+# HTTP requests
+requests>=2.31.0
+
+# Activity indicators (spinner, progress, status)
+rich>=13.7.0

@@ -1,0 +1,15 @@
+# Testing strategy: bdd
+# Add BDD-style tests for user validation
+
+Add Cucumber BDD tests for the user/email validation feature:
+
+1. Create src/test/resources/features/user_validation.feature with:
+   - Feature: User email validation
+   - Scenarios: valid email accepted, invalid email rejected
+   - Use Given/When/Then format
+
+2. Create step definitions in src/test/java/.../steps/UserValidationSteps.java:
+   - Implement the Gherkin steps
+   - Use Cucumber annotations (@Given, @When, @Then)
+
+3. Add Cucumber dependencies to pom.xml if not present (cucumber-java, cucumber-junit-platform-engine)

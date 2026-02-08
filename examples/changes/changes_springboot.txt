@@ -1,0 +1,12 @@
+# Add API health endpoint to Spring Petclinic
+
+Add a simple REST API health check endpoint to the existing Spring Petclinic application:
+
+1. Create a new REST controller in org.springframework.samples.petclinic.system (or appropriate package):
+   - Class name: HealthController
+   - Endpoint: GET /api/health
+   - Returns JSON: {"status": "UP", "application": "petclinic"}
+   - Use @RestController, @RequestMapping("/api")
+   - Follow existing controller patterns in the codebase (e.g., in owner or vet package)
+
+2. Ensure the controller is in a package that gets component-scanned by PetClinicApplication (org.springframework.samples.petclinic and subpackages)

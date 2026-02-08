@@ -1,0 +1,17 @@
+# Fix GitHub Issue: Add factorial.py
+# Repository: Dext3r-Morgan/beginner-friendly
+# Issue: Add factorial.py to calculate factorial of a number (feature request)
+
+Create python/factorial.py following the existing patterns in this repo (see even_odd.py, fibonacci.py):
+
+1. Add a function factorial(n) that returns the factorial of a non-negative integer n
+   - factorial(0) = 1, factorial(1) = 1
+   - Use iterative approach (loop), not recursion
+   - Handle invalid input (negative numbers) - return None or raise ValueError
+
+2. Add if __name__ == "__main__": block that:
+   - Prompts user to enter a number with input()
+   - Calls factorial() and prints the result
+   - Matches the style of other files (e.g., even_odd.py)
+
+3. Keep code simple, well-commented, and consistent with python/ folder style

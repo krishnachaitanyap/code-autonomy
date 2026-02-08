@@ -1,0 +1,13 @@
+# Testing strategy: integration
+# Add integration tests with Spring Boot Test and TestContainers
+
+Add integration tests for the application:
+
+1. Create *IT.java integration test(s) in src/test/java/.../integration/:
+   - Use @SpringBootTest for full application context
+   - Use @Testcontainers with PostgreSQLContainer or MySQLContainer for DB tests
+   - Use REST Assured for API calls: given().when().get(...).then().statusCode(200)
+
+2. Add dependencies if needed: spring-boot-starter-test, testcontainers, rest-assured
+
+3. Use @ActiveProfiles("test") for test configuration

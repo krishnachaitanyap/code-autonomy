@@ -1,0 +1,30 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Workspace (cloned repos)
+workspace/
+
+# Local config (contains secrets - use config.example.ini as template)
+config.ini
+
+# Project consciousness cache
+.consciousness/
+
+# Secrets
+.env
+*.pem
