@@ -34,14 +34,13 @@ from src.git_ops import (
 )
 from src.pr_platform import get_pr_platform
 from src.code_analyzer import (
-    load_codebase_context,
     generate_changes,
     apply_changes,
     regenerate_with_error_analysis,
 )
+from src.context import build_context
 from src.project_consciousness import build_or_load_consciousness
 from src.agent_analyzer import generate_changes_with_agent
-from src.code_search import grep, format_grep_results
 from src.code_executor import run_tests, detect_project_type, detect_build_tool
 from src.activity import (
     header,
@@ -178,15 +177,15 @@ def main() -> int:
             log_warning(f"Could not clone/build framework: {e}. Proceeding without framework context.")
 
     with step("Analyzing codebase"):
-        context = load_codebase_context(str(clone_path))
         grep_patterns = workflow.get("grep_patterns") or []
         if isinstance(grep_patterns, str) and grep_patterns.strip():
             grep_patterns = [p.strip() for p in grep_patterns.split(",") if p.strip()]
-        if grep_patterns:
-            for pattern in grep_patterns[:5]:
-                results = grep(str(clone_path), pattern, context_lines=2)
-                if results:
-                    context += f"\n\n## Grep results for '{pattern}':\n{format_grep_results(results)[:4000]}"
+        context = build_context(
+            str(clone_path),
+            requirements=requirements,
+            config=config,
+            grep_patterns=grep_patterns,
+        )
         # Build or load project consciousness (structure, conventions, samples)
         consciousness = build_or_load_consciousness(
             str(clone_path),
@@ -298,7 +297,12 @@ def main() -> int:
             break
 
         # Refresh context after changes for regeneration (include consciousness)
-        context = load_codebase_context(str(clone_path))
+        context = build_context(
+            str(clone_path),
+            requirements=requirements,
+            config=config,
+            grep_patterns=grep_patterns,
+        )
         consciousness = build_or_load_consciousness(str(clone_path), config, repo_url=repo_url)
         consciousness_str = consciousness.to_context_string()
         if consciousness_str:

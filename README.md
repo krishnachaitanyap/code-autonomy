@@ -236,6 +236,11 @@ For script execution and output verification, use `src.code_executor`:
 | consciousness | backend | Storage: file or opensearch (default: file) |
 | consciousness | cache_dir | Cache path relative to work_dir (default: .consciousness) |
 | consciousness | max_age_hours | Rebuild cache when older (default: 24, 0 = always rebuild) |
+| context | use_pipeline | Use modular context pipeline (default: false) |
+| context | grep_enricher | Grep from requirements + config (default: true) |
+| context | grep_from_requirements | Extract # Grep: and identifiers from requirements |
+| context | similarity_enricher | Local embedding search (default: false) |
+| context | call_graph_enricher | Include call-graph-related code (default: false) |
 
 ### changes.txt
 
@@ -244,6 +249,20 @@ Plain text requirements. Be specific: file names, function names, and behavior h
 **Testing strategy (Java):** Add `# Testing strategy: bdd` (or `contract`, `integration`, `unit`, `e2e`, `soap`) at the top to guide AI-generated tests.
 
 **Framework repo:** Add `# Framework repo: https://github.com/org/repo.git` (and optionally `# Framework branch: main`) to clone an external framework and use it as reference. Framework code is REFERENCE ONLY – the AI will not modify it.
+
+**Grep hints:** Add `# Grep: pattern1, pattern2` at the top to prioritize files matching those patterns (when `use_pipeline=true`).
+
+### Context pipeline (modular context building)
+
+Set `use_pipeline = true` in `[context]` to enable the modular pipeline:
+
+| Enricher | Config | Description |
+|----------|--------|-------------|
+| Grep | `grep_enricher = true` | Grep from `# Grep:` in changes.txt, config `grep_patterns`, and auto-extracted identifiers |
+| Similarity | `similarity_enricher = true` | Local embedding search (requires `sentence-transformers`) |
+| Call graph | `call_graph_enricher = true` | Traverse call graph from seed files (Python; Java needs `javalang`) |
+
+Optional deps: `pip install sentence-transformers` for similarity, `pip install javalang` for Java call graph.
 
 ### Multi-provider LLM (OpenAI, Anthropic, Gemini)
 
@@ -288,6 +307,8 @@ code-autonomy/
 │   ├── git_ops.py
 │   ├── pr_platform.py      # GitHub + Bitbucket
 │   ├── llm_client.py       # Multi-provider LLM (OpenAI, Anthropic, Gemini via LiteLLM)
+│   ├── context/           # Modular context pipeline (grep, similarity, call graph)
+│   ├── embeddings/        # Local embeddings for similarity search (optional)
 │   ├── code_analyzer.py    # AI changes + error regeneration
 │   ├── agent_analyzer.py   # Agent loop with tool use
 │   ├── agent_tools.py      # read_file, grep, list_dir, find_files

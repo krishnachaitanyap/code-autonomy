@@ -20,3 +20,9 @@ requests>=2.31.0
 
 # Activity indicators (spinner, progress, status)
 rich>=13.7.0
+
+# Optional: similarity search (pip install sentence-transformers)
+# sentence-transformers>=2.2.0
+
+# Optional: Java call graph (pip install javalang)
+# javalang>=0.13.0

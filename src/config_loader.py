@@ -94,6 +94,17 @@ def load_config(config_path: str = "config.ini") -> dict:
             "opensearch_url": get("consciousness", "opensearch_url", "") if parser.has_section("consciousness") else "",
             "opensearch_index": get("consciousness", "opensearch_index", "code_consciousness") if parser.has_section("consciousness") else "code_consciousness",
         },
+        "context": {
+            "use_pipeline": get_bool("context", "use_pipeline", False) if parser.has_section("context") else False,
+            "grep_enricher": get_bool("context", "grep_enricher", True) if parser.has_section("context") else True,
+            "grep_from_requirements": get_bool("context", "grep_from_requirements", True) if parser.has_section("context") else True,
+            "similarity_enricher": get_bool("context", "similarity_enricher", False) if parser.has_section("context") else False,
+            "similarity_top_k": int(get("context", "similarity_top_k", "5") or "5") if parser.has_section("context") else 5,
+            "call_graph_enricher": get_bool("context", "call_graph_enricher", False) if parser.has_section("context") else False,
+            "call_graph_depth": int(get("context", "call_graph_depth", "2") or "2") if parser.has_section("context") else 2,
+            "max_files": int(get("context", "max_files", "30") or "30") if parser.has_section("context") else 30,
+            "max_chars_per_file": int(get("context", "max_chars_per_file", "4000") or "4000") if parser.has_section("context") else 4000,
+        },
     }
 
 
