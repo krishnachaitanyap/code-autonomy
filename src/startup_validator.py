@@ -6,6 +6,7 @@ or making API calls. Fatal errors abort immediately; warnings are logged but
 do not block execution.
 """
 
+import json
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -46,20 +47,48 @@ def validate_startup(
     creds = config.get("github_config", {})
     workflow = config.get("workflow", {})
 
-    # 1. API key present
+    provider = (ai_cfg.get("provider") or "openai").lower()
+    is_bedrock = provider in ("bedrock", "cdao")
     api_key = ai_cfg.get("api_key", "")
-    if not api_key:
-        env_var = ai_cfg.get("api_key_env", "OPENAI_API_KEY")
-        result.errors.append(
-            f"No API key found. Set {env_var} environment variable or api_key in config.ini [ai] section."
-        )
-
-    # 2. Model name non-empty
     model = ai_cfg.get("model", "")
-    if not model:
-        result.errors.append(
-            "No model specified. Set model in config.ini [ai] section."
-        )
+
+    # 1. API key or Bedrock config present
+    if is_bedrock:
+        try:
+            import cdao  # noqa: F401
+        except ImportError:
+            result.errors.append(
+                "cdao is required for provider=bedrock/cdao. Install the org cdao package."
+            )
+        acc = (ai_cfg.get("aws_account_number") or "").strip()
+        region = (ai_cfg.get("aws_region") or "").strip()
+        ws_id = (ai_cfg.get("workspace_id") or "").strip()
+        if not acc:
+            result.errors.append(
+                "For provider=bedrock/cdao set aws_account_number in config.ini [ai]."
+            )
+        if not region:
+            result.errors.append(
+                "For provider=bedrock/cdao set aws_region in config.ini [ai]."
+            )
+        if not ws_id:
+            result.errors.append(
+                "For provider=bedrock/cdao set workspace_id in config.ini [ai]."
+            )
+        if not model:
+            result.errors.append(
+                "For provider=bedrock/cdao set model (Bedrock ARN) in config.ini [ai]."
+            )
+    else:
+        if not api_key:
+            env_var = ai_cfg.get("api_key_env", "OPENAI_API_KEY")
+            result.errors.append(
+                f"No API key found. Set {env_var} environment variable or api_key in config.ini [ai] section."
+            )
+        if not model:
+            result.errors.append(
+                "No model specified. Set model in config.ini [ai] section."
+            )
 
     # 3. repo_url valid (unless --repo-path)
     if not using_local_repo:
@@ -98,7 +127,33 @@ def validate_startup(
         )
 
     # 7. LLM API reachable (warning only)
-    if api_key and model:
+    if is_bedrock and model and not result.errors:
+        try:
+            import cdao
+            data = {
+                "AWSAccountNumber": (ai_cfg.get("aws_account_number") or "").strip(),
+                "AWSRegion": (ai_cfg.get("aws_region") or "us-east-1").strip(),
+                "WorkspaceID": (ai_cfg.get("workspace_id") or "").strip(),
+                "isExecutionRole": ai_cfg.get("is_execution_role", False),
+            }
+            body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}],
+            })
+            resp = cdao.bedrock_byoa_invoke_model(data, {
+                "modelId": model,
+                "body": body,
+                "contentType": "application/json",
+                "accept": "application/json",
+            })
+            if resp.get("body"):
+                resp["body"].read().decode("utf-8")
+        except Exception as e:
+            result.warnings.append(
+                f"Bedrock/cdao ping failed (non-fatal): {e}"
+            )
+    elif api_key and model:
         try:
             import litellm
             from src.llm_client import _build_model_string, _resolve_api_key

@@ -371,6 +371,23 @@ _TASK_COMPLETE_SCHEMA = _tool("task_complete",
                        "description": "List of file paths created, modified, or deleted"}},
     required=["summary", "files_changed"])
 
+# --- Plan tool schemas ---
+
+_PROPOSE_CHANGE_SCHEMA = _tool("propose_change",
+    "Propose a file change without writing to disk. Use this in plan mode to accumulate changes for review.\n"
+    "Actions: 'create' (new file), 'modify' (edit existing), 'delete' (remove file).\n"
+    "For 'create': provide content (full file content).\n"
+    "For 'modify': provide old_string + new_string for a surgical edit, or content for full replacement.\n"
+    "For 'delete': only path and action are needed.",
+    {"path": {"type": "string", "description": "Relative file path"},
+     "action": {"type": "string", "enum": ["create", "modify", "delete"],
+                "description": "Change action: create, modify, or delete"},
+     "description": {"type": "string", "description": "Brief description of what this change does"},
+     "content": {"type": "string", "description": "Full file content (for create, or full replacement on modify)"},
+     "old_string": {"type": "string", "description": "Exact string to find (for modify with surgical edit)"},
+     "new_string": {"type": "string", "description": "Replacement string (for modify with surgical edit)"}},
+    required=["path", "action", "description"])
+
 # --- Memory tool schemas ---
 
 _UPDATE_MEMORY_SCHEMA = _tool("update_memory",
@@ -398,6 +415,7 @@ WRITE_TOOLS = [_WRITE_FILE_SCHEMA, _EDIT_FILE_SCHEMA, _DELETE_FILE_SCHEMA]
 EXECUTION_TOOLS = [_RUN_COMMAND_SCHEMA]
 COMPLETION_TOOLS = [_TASK_COMPLETE_SCHEMA]
 MEMORY_TOOLS = [_UPDATE_MEMORY_SCHEMA, _READ_MEMORY_SCHEMA]
+PLAN_TOOLS = [_PROPOSE_CHANGE_SCHEMA]
 
 # Backward-compatible read-only tool list (used by old code paths)
 AGENT_TOOLS = list(READ_TOOLS)
@@ -409,6 +427,16 @@ def build_agent_tools(agent_config: Optional[dict] = None) -> list[dict]:
     tools.extend(READ_TOOLS)
     tools.extend(WRITE_TOOLS)
     tools.extend(EXECUTION_TOOLS)
+    tools.extend(MEMORY_TOOLS)
+    tools.extend(COMPLETION_TOOLS)
+    return tools
+
+
+def build_plan_tools(agent_config: Optional[dict] = None) -> list[dict]:
+    """Build the tool list for plan mode (read-only + propose_change + memory + completion)."""
+    tools: list[dict] = []
+    tools.extend(READ_TOOLS)
+    tools.extend(PLAN_TOOLS)
     tools.extend(MEMORY_TOOLS)
     tools.extend(COMPLETION_TOOLS)
     return tools
@@ -479,3 +507,116 @@ def execute_tool(
         return run_command(repo, args.get("command", ""), args.get("timeout", 120), agent_config)
 
     return f"Unknown tool: {tool_name}"
+
+
+# ===================================================================
+# Plan-mode tool dispatcher
+# ===================================================================
+
+_BLOCKED_IN_PLAN = {"write_file", "edit_file", "delete_file", "run_command"}
+
+
+def execute_plan_tool(
+    repo_root: Path,
+    tool_name: str,
+    args: dict,
+    change_plan: "ChangePlan",
+    working_memory: Optional[WorkingMemory] = None,
+) -> str:
+    """Execute a tool in plan mode.
+
+    - propose_change: validates and adds to the ChangePlan
+    - read/memory/completion tools: delegated to execute_tool
+    - write/exec tools: blocked with a helpful message
+    """
+    from src.agent.plan import ChangePlan, ChangeAction, ProposedChange
+
+    repo = Path(repo_root)
+
+    # --- Block write/exec tools ---
+    if tool_name in _BLOCKED_IN_PLAN:
+        return (
+            f"Error: {tool_name} is not available in plan mode. "
+            "Use propose_change to propose modifications instead."
+        )
+
+    # --- propose_change ---
+    if tool_name == "propose_change":
+        path = args.get("path", "").strip()
+        action_str = args.get("action", "").strip().lower()
+        description = args.get("description", "")
+        content = args.get("content")
+        old_string = args.get("old_string")
+        new_string = args.get("new_string")
+
+        if not path:
+            return "Error: path is required"
+        if action_str not in ("create", "modify", "delete"):
+            return f"Error: action must be create, modify, or delete (got '{action_str}')"
+
+        action = ChangeAction(action_str)
+
+        if action == ChangeAction.create:
+            if content is None:
+                return "Error: content is required for create action"
+            change = ProposedChange(
+                path=path, action=action, description=description,
+                new_content=content,
+            )
+            change_plan.add_change(change)
+            return f"Proposed: CREATE {path} ({len(content)} chars)"
+
+        elif action == ChangeAction.delete:
+            # Verify file exists
+            target = _safe_path(repo, path)
+            if not target or not target.exists():
+                return f"Error: File not found: {path}"
+            change = ProposedChange(path=path, action=action, description=description)
+            change_plan.add_change(change)
+            return f"Proposed: DELETE {path}"
+
+        elif action == ChangeAction.modify:
+            # Verify file exists
+            target = _safe_path(repo, path)
+            if not target or not target.exists():
+                return f"Error: File not found: {path}"
+
+            if content is not None:
+                # Full replacement
+                change = ProposedChange(
+                    path=path, action=action, description=description,
+                    new_content=content,
+                )
+                change_plan.add_change(change)
+                return f"Proposed: MODIFY {path} (full replacement, {len(content)} chars)"
+
+            if old_string:
+                # Surgical edit — validate old_string exists exactly once
+                try:
+                    file_content = target.read_text(encoding="utf-8", errors="replace")
+                except Exception as e:
+                    return f"Error reading file: {e}"
+
+                count = file_content.count(old_string)
+                if count == 0:
+                    return (
+                        f"Error: old_string not found in {path}. "
+                        "Make sure it matches exactly (including whitespace and indentation)."
+                    )
+                if count > 1:
+                    return (
+                        f"Error: old_string found {count} times in {path}. "
+                        "Include more surrounding context lines to make it unique."
+                    )
+
+                change = ProposedChange(
+                    path=path, action=action, description=description,
+                    edits=[{"old_string": old_string, "new_string": new_string or ""}],
+                )
+                change_plan.add_change(change)
+                return f"Proposed: MODIFY {path} (surgical edit, {len(old_string)} -> {len(new_string or '')} chars)"
+
+            return "Error: modify action requires either content (full replacement) or old_string+new_string (surgical edit)"
+
+    # --- Delegate read/memory/completion tools to existing dispatcher ---
+    return execute_tool(repo, tool_name, args, working_memory=working_memory)

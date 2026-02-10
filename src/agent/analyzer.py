@@ -6,13 +6,27 @@ agentic loop.  Supports OpenAI, Anthropic, Gemini via the unified LLM client.
 """
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from src.agent.tools import build_agent_tools, execute_tool, AGENT_TOOLS
-from src.agent.knowledge import WorkingMemory, load_knowledge, save_knowledge
+from src.agent.tools import build_agent_tools, build_plan_tools, execute_tool, execute_plan_tool, AGENT_TOOLS
+from src.agent.knowledge import WorkingMemory, load_knowledge, save_knowledge, compute_repo_id
 from src.agent.ai_utils import parse_ai_changes
+from src.agent.tracing import (
+    TraceCollector,
+    FileTraceStore,
+    get_trace_store,
+    is_tracing_enabled,
+    _sanitize_tool_args,
+    _summarize_output,
+    SPAN_LLM_CALL,
+    SPAN_TOOL_CALL,
+    SPAN_CONTEXT_MGMT,
+    SPAN_STUCK_DETECT,
+    SPAN_SESSION,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +45,19 @@ class AgentResult:
     # Backward-compat: populated only when the agent falls back to legacy
     # JSON-output mode (no write tools used).
     changes: list[dict] = field(default_factory=list)
+    # Execution trace ID (for retrieving the full trace from the store)
+    trace_id: str = ""
+
+
+@dataclass
+class PlanResult:
+    """Result from the plan-mode agent loop."""
+
+    success: bool = False
+    plan: "ChangePlan | None" = None
+    summary: str = ""
+    turns_used: int = 0
+    trace_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +105,126 @@ You are an expert software engineer with tools to explore AND modify the codebas
 - When generating Java tests, follow the testing strategy guidance when provided."""
 
 
+_PLAN_SYSTEM_PROMPT = """\
+You are an expert software engineer in PLAN mode. You can explore the codebase \
+(read-only) and propose changes, but you CANNOT write files or run commands directly.
+
+## Read tools (explore the codebase)
+- read_file(path, start_line?, end_line?): Read file contents
+- grep(pattern, path_filter?, context_lines?): Search for a pattern across code files
+- list_dir(path): List directory contents (use "" for repo root)
+- find_files(extension?, pattern?): Find files by extension or glob
+
+## Plan tool (propose changes)
+- propose_change(path, action, description, content?, old_string?, new_string?):
+  Propose a change without writing to disk.
+  Actions: 'create' (new file — provide content), 'modify' (edit existing — provide old_string+new_string for surgical edit, or content for full replacement), 'delete' (remove file).
+  The old_string must match exactly once in the file (same as edit_file). You get immediate feedback if the match fails.
+
+## Memory tools
+- update_memory(key, content): Write a note to working memory.
+- read_memory(): Read all notes from working memory and prior knowledge.
+
+## Completion
+- task_complete(summary, files_changed): Call when you have proposed ALL necessary changes.
+
+## Workflow
+1. **EXPLORE** — Use read tools to understand the codebase structure, conventions, and relevant files.
+2. **RECORD** — Use update_memory to record what you learn.
+3. **PROPOSE** — Use propose_change for every file you want to create, modify, or delete.
+   - For new files: action='create', provide full content.
+   - For existing files: action='modify', provide old_string+new_string for surgical edits.
+   - For deletions: action='delete'.
+4. **COMPLETE** — Call task_complete with a summary and list of files affected.
+
+## Rules
+- ALWAYS explore before proposing. Read existing files first.
+- Do NOT attempt to use write_file, edit_file, delete_file, or run_command — they are blocked in plan mode.
+- Propose ALL changes needed. The user will review diffs and approve/reject the plan.
+- Be precise with old_string — it must match exactly (whitespace, indentation)."""
+
+
+# ---------------------------------------------------------------------------
+# Shared context builder
+# ---------------------------------------------------------------------------
+
+def _build_agent_context(
+    requirements: str,
+    repo_path: str,
+    llm_config: dict,
+    reference_pr_content: str = "",
+    testing_strategy: str = "auto",
+    build_tool: Optional[str] = None,
+    consciousness_context: str = "",
+    framework_context: str = "",
+    config: Optional[dict] = None,
+    repo_url: str = "",
+    instruction_suffix: str = "",
+) -> tuple[str, str]:
+    """Build the user message and knowledge context for both agent and plan modes.
+
+    Returns (user_message, knowledge_context).
+    """
+    from pathlib import Path
+    repo_root = Path(repo_path)
+
+    # Load persistent knowledge
+    knowledge_context = ""
+    try:
+        prior = load_knowledge(config, repo_path, repo_url)
+        if prior:
+            knowledge_context = prior.to_context_string()
+    except Exception:
+        pass
+
+    # Initial context (consciousness)
+    initial_context = ""
+    try:
+        from src.agent.context import build_smart_initial_context
+        from src.consciousness.core import ProjectConsciousness
+        if consciousness_context:
+            initial_context = consciousness_context
+    except ImportError:
+        initial_context = consciousness_context or ""
+
+    # Testing strategy
+    testing_section = ""
+    try:
+        from src.code.testing_strategies import get_testing_strategy_context
+        from src.code.executor import detect_build_tool as _detect_bt
+        bt = build_tool or _detect_bt(str(repo_root))
+        ctx = get_testing_strategy_context(testing_strategy, bt, requirements)
+        if ctx:
+            testing_section = f"\n## Testing strategy (for tests)\n{ctx}\n"
+    except Exception:
+        pass
+
+    framework_section = f"\n{framework_context}\n" if framework_context else ""
+    ref_section = (
+        f"\n\n## Reference PR (use as template)\n{reference_pr_content}"
+        if reference_pr_content
+        else ""
+    )
+    knowledge_section = f"\n\n{knowledge_context}\n" if knowledge_context else ""
+
+    suffix = instruction_suffix or (
+        "Start by listing the repo root with list_dir, then explore relevant files "
+        "before making any changes."
+    )
+
+    user_msg = (
+        f"## Requirements\n{requirements}\n"
+        f"{initial_context}\n"
+        f"{framework_section}"
+        f"{testing_section}"
+        f"{ref_section}"
+        f"{knowledge_section}\n\n"
+        f"{suffix}"
+    )
+
+    return user_msg, knowledge_context
+
+
 # ---------------------------------------------------------------------------
 # Agent entry point
 # ---------------------------------------------------------------------------
@@ -117,63 +264,33 @@ def generate_changes_with_agent(
     # Working memory (survives context compression)
     working_memory = WorkingMemory()
 
-    # Load persistent knowledge from previous runs
-    knowledge_context = ""
-    try:
-        prior = load_knowledge(config, repo_path, repo_url)
-        if prior:
-            knowledge_context = prior.to_context_string()
-    except Exception:
-        pass  # non-fatal
+    # --- Execution tracing (Agent Lightning-inspired) ---
+    tracing_enabled = is_tracing_enabled(config)
+    collector: Optional[TraceCollector] = None
+    if tracing_enabled:
+        _repo_id = compute_repo_id(repo_path, repo_url)
+        collector = TraceCollector(
+            repo_id=_repo_id,
+            repo_url=repo_url,
+            model=llm_config.get("model", "gpt-4o"),
+            requirements=requirements,
+        )
 
     # Build the full tool list (read + write + exec + memory + complete)
     all_tools = build_agent_tools(agent_cfg)
 
-    # ------------------------------------------------------------------ #
-    # Build initial context (requirement-aware)
-    # ------------------------------------------------------------------ #
-    initial_context = ""
-    try:
-        from src.agent.context import build_smart_initial_context
-        from src.consciousness.core import ProjectConsciousness
-
-        if consciousness_context:
-            # Try to build the smart version; fall back to raw string
-            initial_context = consciousness_context
-    except ImportError:
-        initial_context = consciousness_context or ""
-
-    # Testing strategy context
-    testing_section = ""
-    try:
-        from src.code.testing_strategies import get_testing_strategy_context
-        from src.code.executor import detect_build_tool as _detect_bt
-
-        bt = build_tool or _detect_bt(str(repo_root))
-        ctx = get_testing_strategy_context(testing_strategy, bt, requirements)
-        if ctx:
-            testing_section = f"\n## Testing strategy (for tests)\n{ctx}\n"
-    except Exception:
-        pass
-
-    framework_section = f"\n{framework_context}\n" if framework_context else ""
-    ref_section = (
-        f"\n\n## Reference PR (use as template)\n{reference_pr_content}"
-        if reference_pr_content
-        else ""
-    )
-
-    knowledge_section = f"\n\n{knowledge_context}\n" if knowledge_context else ""
-
-    user_msg = (
-        f"## Requirements\n{requirements}\n"
-        f"{initial_context}\n"
-        f"{framework_section}"
-        f"{testing_section}"
-        f"{ref_section}"
-        f"{knowledge_section}\n\n"
-        "Start by listing the repo root with list_dir, then explore relevant files "
-        "before making any changes."
+    # Build shared context
+    user_msg, _knowledge_ctx = _build_agent_context(
+        requirements=requirements,
+        repo_path=repo_path,
+        llm_config=llm_config,
+        reference_pr_content=reference_pr_content,
+        testing_strategy=testing_strategy,
+        build_tool=build_tool,
+        consciousness_context=consciousness_context,
+        framework_context=framework_context,
+        config=config,
+        repo_url=repo_url,
     )
 
     messages: list[dict] = [
@@ -192,19 +309,44 @@ def generate_changes_with_agent(
 
     for turn in range(max_turns):
         # --- Context management (token-aware) ---
+        ctx_span_id = None
+        if collector:
+            ctx_span_id = collector.start_span(
+                SPAN_CONTEXT_MGMT, "manage_context", turn,
+                inputs={"message_count": len(messages)},
+            )
         try:
             from src.agent.context import manage_conversation_context
 
+            prev_count = len(messages)
             messages = manage_conversation_context(
                 messages,
                 model=model_name,
                 llm_config=llm_config,
                 smart_summarization=smart_summarization,
             )
+            if collector and ctx_span_id:
+                collector.end_span(
+                    ctx_span_id,
+                    output_summary=f"{prev_count} -> {len(messages)} messages",
+                    metadata={"messages_before": prev_count, "messages_after": len(messages)},
+                )
+                ctx_span_id = None
         except ImportError:
             pass  # graceful degradation
+        if collector and ctx_span_id:
+            collector.end_span(ctx_span_id, output_summary="skipped (no context module)")
 
         # --- LLM call ---
+        llm_span_id = None
+        if collector:
+            tokens_est = sum(len(m.get("content", "") or "") // 4 for m in messages)
+            llm_span_id = collector.start_span(
+                SPAN_LLM_CALL, model_name, turn,
+                inputs={"message_count": len(messages), "tokens_est": tokens_est},
+                metadata={"model": model_name, "temperature": 0.2},
+            )
+
         content, msg = chat_completion(
             messages=messages,
             config=llm_config,
@@ -215,6 +357,16 @@ def generate_changes_with_agent(
 
         tool_calls = getattr(msg, "tool_calls", None)
 
+        if collector and llm_span_id:
+            n_tool_calls = len(tool_calls) if tool_calls else 0
+            content_len = len(content) if content else 0
+            collector.end_span(
+                llm_span_id,
+                output_summary=f"{n_tool_calls} tool calls, {content_len} chars content",
+                output_chars=content_len,
+                metadata={"tool_call_count": n_tool_calls, "tokens_est": sum(len(m.get("content", "") or "") // 4 for m in messages)},
+            )
+
         # ---- No tool calls: LLM is either done or confused ----
         if not tool_calls or len(tool_calls) == 0:
             if task_complete_data:
@@ -223,12 +375,23 @@ def generate_changes_with_agent(
             # Backward compat: try parsing legacy JSON changes
             parsed = parse_ai_changes(content)
             if parsed:
-                return AgentResult(
+                legacy_result = AgentResult(
                     success=True,
                     changes=parsed,
                     turns_used=turn + 1,
                     summary="Legacy JSON output mode",
                 )
+                if collector:
+                    try:
+                        trace = collector.finalize(
+                            success=True, turns_used=turn + 1,
+                            files_changed=[], summary="Legacy JSON output mode",
+                        )
+                        legacy_result.trace_id = trace.trace_id
+                        get_trace_store(config).save(trace)
+                    except Exception:
+                        pass
+                return legacy_result
 
             # Nudge the agent to use tools
             messages.append({"role": "assistant", "content": content})
@@ -265,6 +428,14 @@ def generate_changes_with_agent(
             except json.JSONDecodeError:
                 args = {}
 
+            # --- Start tool span ---
+            tool_span_id = None
+            if collector:
+                tool_span_id = collector.start_span(
+                    SPAN_TOOL_CALL, name, turn,
+                    inputs=_sanitize_tool_args(name, args),
+                )
+
             # --- task_complete: signal termination + save knowledge ---
             if name == "task_complete":
                 task_complete_data = args
@@ -280,6 +451,14 @@ def generate_changes_with_agent(
                         )
                 except Exception:
                     pass
+                if collector and tool_span_id:
+                    collector.end_span(
+                        tool_span_id,
+                        output_summary=_summarize_output(result),
+                        output_chars=len(result),
+                        success=True,
+                        reward=1.0,
+                    )
             else:
                 result = execute_tool(
                     repo_root, name, args,
@@ -287,6 +466,30 @@ def generate_changes_with_agent(
                     agent_config=agent_cfg,
                     working_memory=working_memory,
                 )
+                # --- End tool span with reward ---
+                if collector and tool_span_id:
+                    is_error = result.startswith("Error:")
+                    # Reward heuristics
+                    reward = 0.0
+                    if is_error:
+                        reward = -1.0
+                    elif name == "run_command":
+                        reward = 1.0 if "exit code: 0]" in result else -0.5
+                    elif name in ("write_file", "edit_file", "delete_file"):
+                        reward = 1.0
+                    elif name in ("read_file", "grep", "list_dir", "find_files"):
+                        reward = 0.5
+                    elif name == "update_memory":
+                        reward = 0.5
+
+                    collector.end_span(
+                        tool_span_id,
+                        output_summary=_summarize_output(result),
+                        output_chars=len(result),
+                        success=not is_error,
+                        error=result[:200] if is_error else "",
+                        reward=reward,
+                    )
 
             # Intelligent summarization for large outputs
             if len(result) > truncation_limit:
@@ -324,6 +527,12 @@ def generate_changes_with_agent(
                     last_error_hash = err_hash
                     stuck_count = 1
                 if stuck_count >= 3:
+                    if collector:
+                        collector.add_event(
+                            SPAN_STUCK_DETECT, "stuck_3x_same_error", turn,
+                            inputs={"error_hash": err_hash},
+                            reward=-1.0,
+                        )
                     messages.append({
                         "role": "user",
                         "content": (
@@ -338,21 +547,311 @@ def generate_changes_with_agent(
             break
 
     # ------------------------------------------------------------------ #
-    # Build result
+    # Build result + finalize trace
     # ------------------------------------------------------------------ #
     if task_complete_data:
-        return AgentResult(
+        result_obj = AgentResult(
             success=True,
             files_changed=sorted(changes_tracker),
             summary=task_complete_data.get("summary", ""),
             turns_used=turn + 1,
             tests_passed=True,
         )
+    else:
+        # Agent exhausted turns without completing
+        result_obj = AgentResult(
+            success=False,
+            files_changed=sorted(changes_tracker),
+            summary=f"Agent did not call task_complete within {max_turns} turns",
+            turns_used=max_turns,
+        )
 
-    # Agent exhausted turns without completing
-    return AgentResult(
-        success=False,
-        files_changed=sorted(changes_tracker),
-        summary=f"Agent did not call task_complete within {max_turns} turns",
-        turns_used=max_turns,
+    # --- Save execution trace ---
+    if collector:
+        try:
+            trace = collector.finalize(
+                success=result_obj.success,
+                turns_used=result_obj.turns_used,
+                files_changed=result_obj.files_changed,
+                summary=result_obj.summary,
+            )
+            result_obj.trace_id = trace.trace_id
+            store = get_trace_store(config)
+            trace_path = store.save(trace)
+            if verbose:
+                print(f"  Trace saved: {trace_path} ({trace.metrics.get('total_spans', 0)} spans)")
+        except Exception:
+            pass  # tracing is non-fatal
+
+    return result_obj
+
+
+# ---------------------------------------------------------------------------
+# Plan-mode entry point
+# ---------------------------------------------------------------------------
+
+def generate_plan_with_agent(
+    requirements: str,
+    repo_path: str,
+    llm_config: dict,
+    reference_pr_content: str = "",
+    max_turns: int = 30,
+    verbose: bool = False,
+    testing_strategy: str = "auto",
+    build_tool: Optional[str] = None,
+    consciousness_context: str = "",
+    framework_context: str = "",
+    agent_config: Optional[dict] = None,
+    config: Optional[dict] = None,
+    repo_url: str = "",
+) -> "PlanResult":
+    """Run the agent in plan mode: explore → propose changes → complete.
+
+    Returns a :class:`PlanResult` with the accumulated :class:`ChangePlan`.
+    No files are written to disk.
+    """
+    from src.llm_client import chat_completion
+    from src.agent.plan import ChangePlan
+
+    repo_root = Path(repo_path)
+    agent_cfg = agent_config or {}
+    max_turns = agent_cfg.get("plan_max_turns", agent_cfg.get("max_turns", max_turns))
+    smart_summarization = agent_cfg.get("smart_summarization", True)
+    truncation_limit = agent_cfg.get("truncation_limit", 30_000)
+
+    working_memory = WorkingMemory()
+    change_plan = ChangePlan()
+
+    # --- Execution tracing ---
+    tracing_enabled = is_tracing_enabled(config)
+    collector: Optional[TraceCollector] = None
+    if tracing_enabled:
+        _repo_id = compute_repo_id(repo_path, repo_url)
+        collector = TraceCollector(
+            repo_id=_repo_id,
+            repo_url=repo_url,
+            model=llm_config.get("model", "gpt-4o"),
+            requirements=requirements,
+        )
+
+    # Build plan-mode tool list (read + propose + memory + completion)
+    all_tools = build_plan_tools(agent_cfg)
+
+    # Build shared context
+    user_msg, _knowledge_ctx = _build_agent_context(
+        requirements=requirements,
+        repo_path=repo_path,
+        llm_config=llm_config,
+        reference_pr_content=reference_pr_content,
+        testing_strategy=testing_strategy,
+        build_tool=build_tool,
+        consciousness_context=consciousness_context,
+        framework_context=framework_context,
+        config=config,
+        repo_url=repo_url,
+        instruction_suffix=(
+            "Start by listing the repo root with list_dir, then explore relevant files. "
+            "Once you understand the codebase, use propose_change to propose ALL needed changes. "
+            "When done proposing, call task_complete."
+        ),
     )
+
+    messages: list[dict] = [
+        {"role": "system", "content": _PLAN_SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ]
+
+    task_complete_data: Optional[dict] = None
+    model_name = llm_config.get("model", "gpt-4o")
+
+    for turn in range(max_turns):
+        # --- Context management ---
+        ctx_span_id = None
+        if collector:
+            ctx_span_id = collector.start_span(
+                SPAN_CONTEXT_MGMT, "manage_context", turn,
+                inputs={"message_count": len(messages)},
+            )
+        try:
+            from src.agent.context import manage_conversation_context
+            prev_count = len(messages)
+            messages = manage_conversation_context(
+                messages, model=model_name, llm_config=llm_config,
+                smart_summarization=smart_summarization,
+            )
+            if collector and ctx_span_id:
+                collector.end_span(
+                    ctx_span_id,
+                    output_summary=f"{prev_count} -> {len(messages)} messages",
+                    metadata={"messages_before": prev_count, "messages_after": len(messages)},
+                )
+                ctx_span_id = None
+        except ImportError:
+            pass
+        if collector and ctx_span_id:
+            collector.end_span(ctx_span_id, output_summary="skipped (no context module)")
+
+        # --- LLM call ---
+        llm_span_id = None
+        if collector:
+            tokens_est = sum(len(m.get("content", "") or "") // 4 for m in messages)
+            llm_span_id = collector.start_span(
+                SPAN_LLM_CALL, model_name, turn,
+                inputs={"message_count": len(messages), "tokens_est": tokens_est},
+                metadata={"model": model_name, "temperature": 0.2},
+            )
+
+        content, msg = chat_completion(
+            messages=messages,
+            config=llm_config,
+            tools=all_tools,
+            tool_choice="auto",
+            temperature=0.2,
+        )
+
+        tool_calls = getattr(msg, "tool_calls", None)
+
+        if collector and llm_span_id:
+            n_tool_calls = len(tool_calls) if tool_calls else 0
+            content_len = len(content) if content else 0
+            collector.end_span(
+                llm_span_id,
+                output_summary=f"{n_tool_calls} tool calls, {content_len} chars content",
+                output_chars=content_len,
+                metadata={"tool_call_count": n_tool_calls},
+            )
+
+        # ---- No tool calls ----
+        if not tool_calls or len(tool_calls) == 0:
+            if task_complete_data:
+                break
+            messages.append({"role": "assistant", "content": content})
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Please use the tools to explore the codebase and propose changes. "
+                    "When all changes are proposed, call task_complete."
+                ),
+            })
+            continue
+
+        # ---- Process tool calls ----
+        messages.append({
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments or "{}",
+                    },
+                }
+                for tc in tool_calls
+            ],
+        })
+
+        for tc in tool_calls:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+            except json.JSONDecodeError:
+                args = {}
+
+            tool_span_id = None
+            if collector:
+                tool_span_id = collector.start_span(
+                    SPAN_TOOL_CALL, name, turn,
+                    inputs=_sanitize_tool_args(name, args),
+                )
+
+            if name == "task_complete":
+                task_complete_data = args
+                result = f"Plan complete. Summary: {args.get('summary', '')}"
+                if collector and tool_span_id:
+                    collector.end_span(
+                        tool_span_id,
+                        output_summary=_summarize_output(result),
+                        output_chars=len(result),
+                        success=True,
+                        reward=1.0,
+                    )
+            else:
+                result = execute_plan_tool(
+                    repo_root, name, args,
+                    change_plan=change_plan,
+                    working_memory=working_memory,
+                )
+                if collector and tool_span_id:
+                    is_error = result.startswith("Error:")
+                    reward = -1.0 if is_error else (0.8 if name == "propose_change" else 0.5)
+                    collector.end_span(
+                        tool_span_id,
+                        output_summary=_summarize_output(result),
+                        output_chars=len(result),
+                        success=not is_error,
+                        error=result[:200] if is_error else "",
+                        reward=reward,
+                    )
+
+            # Truncation
+            if len(result) > truncation_limit:
+                try:
+                    from src.agent.context import summarize_large_output
+                    if smart_summarization:
+                        result = summarize_large_output(result, name, llm_config)
+                    else:
+                        result = result[:truncation_limit] + f"\n...(truncated, {len(result)} total chars)"
+                except ImportError:
+                    result = result[:truncation_limit] + f"\n...(truncated, {len(result)} total chars)"
+
+            if verbose:
+                print(f"  Plan turn {turn + 1}: {name}({list(args.keys())}) -> {len(result)} chars")
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result,
+            })
+
+            # Working memory protection
+            if name == "update_memory" and not working_memory.is_empty():
+                wm_block = working_memory.to_message_block()
+                messages[0] = {"role": "system", "content": _PLAN_SYSTEM_PROMPT + "\n" + wm_block}
+
+        if task_complete_data:
+            break
+
+    # ---- Build result ----
+    if task_complete_data:
+        plan_result = PlanResult(
+            success=True,
+            plan=change_plan,
+            summary=task_complete_data.get("summary", ""),
+            turns_used=turn + 1,
+        )
+    else:
+        plan_result = PlanResult(
+            success=not change_plan.is_empty,
+            plan=change_plan,
+            summary=f"Agent did not call task_complete within {max_turns} turns",
+            turns_used=max_turns,
+        )
+
+    # --- Save trace ---
+    if collector:
+        try:
+            trace = collector.finalize(
+                success=plan_result.success,
+                turns_used=plan_result.turns_used,
+                files_changed=change_plan.files_affected if change_plan else [],
+                summary=plan_result.summary,
+            )
+            plan_result.trace_id = trace.trace_id
+            store = get_trace_store(config)
+            store.save(trace)
+        except Exception:
+            pass
+
+    return plan_result

@@ -92,6 +92,11 @@ def load_config(config_path: str = "config.ini") -> dict:
             "model": get("ai", "model", "gpt-4o"),
             "base_url": get("ai", "base_url", ""),
             "verbose": get_bool("ai", "verbose", False),
+            # Bedrock/cdao (when provider is bedrock or cdao)
+            "aws_account_number": get("ai", "aws_account_number", ""),
+            "aws_region": get("ai", "aws_region", "us-east-1"),
+            "workspace_id": get("ai", "workspace_id", ""),
+            "is_execution_role": get_bool("ai", "is_execution_role", False),
         },
         "workflow": {
             "work_dir": get("workflow", "work_dir", "./workspace"),
