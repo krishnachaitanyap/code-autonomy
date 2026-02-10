@@ -94,7 +94,7 @@ Rules:
 - When framework context is provided: it is REFERENCE ONLY. Do NOT modify framework code or propose changes to framework files. Only modify files in the application repo.
 - Output format: {"changes": [{"path": "...", "content": "...", "action": "modify"|"create"}, ...]}"""
 
-    from src.testing_strategies import get_testing_strategy_context
+    from src.code.testing_strategies import get_testing_strategy_context
 
     testing_section = ""
     if testing_strategy and testing_strategy != "auto":
@@ -141,7 +141,7 @@ Produce the JSON array of file changes to implement the requirements (adapt path
     if verbose:
         print("AI Response (raw):", content[:500], "...")
 
-    from src.ai_utils import parse_ai_changes
+    from src.agent.ai_utils import parse_ai_changes
     return parse_ai_changes(content)
 
 
@@ -205,7 +205,7 @@ Rules:
 - When framework context is provided: it is REFERENCE ONLY. Do NOT modify framework code. Only modify files in the application repo.
 - Output format: {"changes": [{"path": "...", "content": "...", "action": "modify"|"create"}, ...]}"""
 
-    from src.testing_strategies import get_testing_strategy_context
+    from src.code.testing_strategies import get_testing_strategy_context
 
     testing_section = ""
     if testing_strategy and ".java" in codebase_context:
@@ -244,5 +244,5 @@ Produce the JSON array of file changes to FIX these errors."""
     if verbose:
         print("AI regeneration response:", content[:300], "...")
 
-    from src.ai_utils import parse_ai_changes
+    from src.agent.ai_utils import parse_ai_changes
     return parse_ai_changes(content)

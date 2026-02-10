@@ -5,7 +5,7 @@ Always runs first in the pipeline.
 
 from typing import Optional
 
-from src.code_analyzer import load_codebase_context
+from src.code.analyzer import load_codebase_context
 from src.context.base import ContextEnricher, EnrichmentResult
 
 

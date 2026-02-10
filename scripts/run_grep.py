@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from src.code_search import grep, format_grep_results
+from src.code.search import grep, format_grep_results
 
 
 def main() -> int:

@@ -2,9 +2,11 @@
 Unified LLM client for multi-provider support.
 Supports OpenAI, Anthropic (Claude), Google (Gemini) via LiteLLM.
 Uses config and env for flexible authentication.
+Includes retry logic for transient API errors.
 """
 
 import os
+import time
 from typing import Any, Optional
 
 # Provider-specific env var defaults when api_key not in config
@@ -14,6 +16,9 @@ DEFAULT_API_KEY_ENV: dict[str, str] = {
     "gemini": "GEMINI_API_KEY",
     "google": "GEMINI_API_KEY",
 }
+
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 2  # seconds
 
 
 def _resolve_api_key(config: dict) -> str:
@@ -35,6 +40,20 @@ def _build_model_string(config: dict) -> str:
     return f"{provider}/{model}"  # "anthropic/claude-3-5-sonnet", "gemini/gemini-1.5-pro"
 
 
+def get_model_name(config: dict) -> str:
+    """Return the model name from config (without provider prefix)."""
+    return (config.get("model") or "gpt-4o").strip()
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Check if the error is transient and worth retrying."""
+    err = str(exc).lower()
+    return any(
+        k in err
+        for k in ("rate limit", "rate_limit", "429", "timeout", "500", "502", "503", "overloaded")
+    )
+
+
 def chat_completion(
     messages: list[dict],
     config: dict,
@@ -44,6 +63,9 @@ def chat_completion(
 ) -> tuple[str, Any]:
     """
     Unified chat completion across OpenAI, Anthropic, Gemini.
+
+    Includes automatic retry with exponential backoff for transient errors
+    (rate limits, timeouts, 5xx).
 
     Args:
         messages: List of dicts with role and content (OpenAI format).
@@ -87,8 +109,21 @@ def chat_completion(
         kwargs["tools"] = tools
         kwargs["tool_choice"] = tool_choice
 
-    response = litellm.completion(**kwargs)
+    # Retry loop for transient errors
+    last_exc: Optional[Exception] = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = litellm.completion(**kwargs)
+            msg = response.choices[0].message
+            content = (msg.content or "").strip()
+            return content, msg
+        except Exception as exc:
+            last_exc = exc
+            if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                time.sleep(delay)
+                continue
+            raise
 
-    msg = response.choices[0].message
-    content = (msg.content or "").strip()
-    return content, msg
+    # Should not reach here, but just in case
+    raise last_exc  # type: ignore[misc]

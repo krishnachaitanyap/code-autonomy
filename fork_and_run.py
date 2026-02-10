@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.activity import step, spinner, log_info, log_success, log_error
+from src.agent.activity import step, spinner, log_info, log_success, log_error
 
 
 def fork_repo(upstream: str, token: str) -> str | None:

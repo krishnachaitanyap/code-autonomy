@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from src.code_executor import run_tests, detect_project_type
+from src.code.executor import run_tests, detect_project_type
 
 
 def main() -> int:

@@ -1,0 +1,481 @@
+"""
+Agent tools for Claude-Code-like capabilities.
+
+Read tools  : read_file, grep, list_dir, find_files
+Write tools : write_file, edit_file, delete_file
+Exec tools  : run_command
+Control     : task_complete
+
+AI can call these iteratively to explore, modify, test, and fix code.
+"""
+
+import os
+import subprocess
+from pathlib import Path
+from typing import Any, Optional
+
+from src.code.search import grep, format_grep_results
+from src.constants import SEARCH_EXTENSIONS, SKIP_DIRS
+from src.agent.knowledge import WorkingMemory
+
+
+# ---------------------------------------------------------------------------
+# Path safety
+# ---------------------------------------------------------------------------
+
+def _safe_path(repo_root: Path, requested: str) -> Optional[Path]:
+    """Resolve path, ensure it stays within repo (no path traversal)."""
+    requested = requested.strip().lstrip("/")
+    if not requested:
+        return repo_root
+    full = (repo_root / requested).resolve()
+    try:
+        full.relative_to(repo_root.resolve())
+    except ValueError:
+        return None
+    return full
+
+
+# ===================================================================
+# READ TOOLS (unchanged from original)
+# ===================================================================
+
+def run_read_file(
+    repo_root: Path,
+    path: str,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
+) -> str:
+    """Read file content, optionally a line range (1-based inclusive)."""
+    target = _safe_path(repo_root, path)
+    if not target or not target.exists():
+        return f"Error: File not found or outside repo: {path}"
+    if not target.is_file():
+        return f"Error: Not a file: {path}"
+    try:
+        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception as e:
+        return f"Error reading file: {e}"
+    if start_line is not None or end_line is not None:
+        s = max(0, (start_line or 1) - 1)
+        e = end_line or len(lines)
+        lines = lines[s:e]
+    return "\n".join(lines)
+
+
+def run_grep(
+    repo_root: Path,
+    pattern: str,
+    path_filter: Optional[str] = None,
+    context_lines: int = 2,
+    max_results: int = 100,
+) -> str:
+    """Search for pattern in code files."""
+    results = grep(
+        str(repo_root),
+        pattern,
+        file_pattern=path_filter,
+        context_lines=context_lines,
+        max_results=max_results,
+    )
+    return format_grep_results(results)
+
+
+def run_list_dir(repo_root: Path, path: str) -> str:
+    """List directory contents (files and subdirs)."""
+    target = _safe_path(repo_root, path)
+    if not target or not target.exists():
+        return f"Error: Directory not found or outside repo: {path}"
+    if not target.is_dir():
+        return f"Error: Not a directory: {path}"
+    items = []
+    for p in sorted(target.iterdir()):
+        name = p.name
+        if name.startswith(".") and name not in (".gitignore",):
+            continue
+        if p.is_dir():
+            items.append(f"  [dir]  {name}/")
+        else:
+            items.append(f"  [file] {name}")
+    return "\n".join(items) if items else "(empty)"
+
+
+def run_find_files(
+    repo_root: Path,
+    extension: Optional[str] = None,
+    pattern: Optional[str] = None,
+) -> str:
+    """Find files by extension (.java, .py) or name pattern (glob)."""
+    target = Path(repo_root)
+    if not target.exists():
+        return "Error: Repo path not found"
+    found = []
+    for f in target.rglob("*"):
+        if not f.is_file():
+            continue
+        if any(p in SKIP_DIRS for p in f.relative_to(target).parts):
+            continue
+        if extension and f.suffix != extension:
+            continue
+        if not extension and f.suffix not in SEARCH_EXTENSIONS:
+            continue
+        rel = str(f.relative_to(target))
+        if pattern:
+            import fnmatch
+            if not fnmatch.fnmatch(rel, pattern):
+                continue
+        found.append(rel)
+    found.sort()
+    return "\n".join(found[:200]) if found else "No files found"
+
+
+# ===================================================================
+# WRITE TOOLS (new)
+# ===================================================================
+
+def run_write_file(repo_root: Path, path: str, content: str) -> str:
+    """Create a new file or completely overwrite an existing one."""
+    if not path:
+        return "Error: path is required"
+    target = _safe_path(repo_root, path)
+    if not target:
+        return f"Error: Path outside repo: {path}"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return f"Wrote {len(content)} chars to {path}"
+    except Exception as e:
+        return f"Error writing file: {e}"
+
+
+def run_edit_file(
+    repo_root: Path,
+    path: str,
+    old_string: str,
+    new_string: str,
+) -> str:
+    """Surgical search-and-replace edit.
+
+    *old_string* must appear exactly once in the file.
+    It is replaced with *new_string* (use empty string to delete).
+    """
+    if not path:
+        return "Error: path is required"
+    target = _safe_path(repo_root, path)
+    if not target or not target.exists():
+        return f"Error: File not found: {path}"
+    if not target.is_file():
+        return f"Error: Not a file: {path}"
+    if not old_string:
+        return "Error: old_string is required (cannot be empty)"
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return f"Error reading file: {e}"
+
+    count = content.count(old_string)
+    if count == 0:
+        return (
+            f"Error: old_string not found in {path}. "
+            "Make sure it matches exactly (including whitespace and indentation)."
+        )
+    if count > 1:
+        return (
+            f"Error: old_string found {count} times in {path}. "
+            "Include more surrounding context lines to make it unique."
+        )
+
+    new_content = content.replace(old_string, new_string, 1)
+    try:
+        target.write_text(new_content, encoding="utf-8")
+    except Exception as e:
+        return f"Error writing file: {e}"
+    return f"Edited {path}: replaced {len(old_string)} chars with {len(new_string)} chars"
+
+
+def run_delete_file(repo_root: Path, path: str) -> str:
+    """Delete a file from the repository."""
+    if not path:
+        return "Error: path is required"
+    target = _safe_path(repo_root, path)
+    if not target or not target.exists():
+        return f"Error: File not found: {path}"
+    if not target.is_file():
+        return f"Error: Not a file: {path}"
+    try:
+        target.unlink()
+        return f"Deleted {path}"
+    except Exception as e:
+        return f"Error deleting file: {e}"
+
+
+# ===================================================================
+# EXECUTION TOOLS (new)
+# ===================================================================
+
+COMMAND_BLOCKLIST = {
+    "rm -rf /",
+    "rm -rf ~",
+    "rm -rf .",
+    "mkfs",
+    "dd if=",
+    "curl | sh",
+    "curl |sh",
+    "wget | sh",
+    "wget |sh",
+    "> /dev/sd",
+    "shutdown",
+    "reboot",
+    "halt",
+}
+
+DEFAULT_ALLOWED_PREFIXES = [
+    "pytest", "python -m pytest", "python -m unittest",
+    "python", "pip install", "pip list",
+    "mvn", "./mvnw", "gradle", "./gradlew",
+    "npm test", "npm run", "npx",
+    "java", "javac",
+    "cat", "ls", "find", "grep", "wc", "head", "tail",
+    "git status", "git diff", "git log",
+]
+
+
+def run_command(
+    repo_root: Path,
+    command: str,
+    timeout: int = 120,
+    agent_config: Optional[dict] = None,
+) -> str:
+    """Run a shell command sandboxed to the repository directory."""
+    if not command or not command.strip():
+        return "Error: command is required"
+
+    timeout = min(timeout or 120, 300)
+    cfg = agent_config or {}
+
+    # Safety: blocklist
+    cmd_lower = command.lower().strip()
+    for blocked in COMMAND_BLOCKLIST:
+        if blocked in cmd_lower:
+            return f"Error: Command blocked for safety: {command}"
+
+    # Safety: optional allowlist
+    if cfg.get("command_allowlist_only"):
+        allowed = cfg.get("allowed_command_prefixes") or DEFAULT_ALLOWED_PREFIXES
+        if not any(cmd_lower.startswith(p.lower()) for p in allowed):
+            return f"Error: Command not in allowlist. Allowed prefixes: {allowed}"
+
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={**os.environ, "TERM": "dumb"},
+        )
+        output = ""
+        if result.stdout:
+            output += result.stdout
+        if result.stderr:
+            if output:
+                output += "\n"
+            output += "[stderr]\n" + result.stderr
+        output += f"\n[exit code: {result.returncode}]"
+        return output.strip()
+    except subprocess.TimeoutExpired:
+        return f"Error: Command timed out after {timeout}s"
+    except Exception as e:
+        return f"Error running command: {e}"
+
+
+# ===================================================================
+# TOOL SCHEMAS (OpenAI function-calling format)
+# ===================================================================
+
+def _tool(name: str, description: str, params: dict, required: list[str] | None = None) -> dict:
+    """Build an OpenAI function-calling tool schema."""
+    schema = {"type": "function", "function": {"name": name, "description": description,
+              "parameters": {"type": "object", "properties": params}}}
+    if required:
+        schema["function"]["parameters"]["required"] = required
+    return schema
+
+# --- Read tool schemas ---
+
+_READ_FILE_SCHEMA = _tool("read_file",
+    "Read the contents of a file. Use path relative to repo root. Optionally specify start_line and end_line (1-based) to read a range.",
+    {"path": {"type": "string", "description": "Relative file path (e.g., src/main/java/demo/App.java)"},
+     "start_line": {"type": "integer", "description": "Optional start line (1-based)"},
+     "end_line": {"type": "integer", "description": "Optional end line (1-based)"}},
+    required=["path"])
+
+_GREP_SCHEMA = _tool("grep",
+    "Search for a regex pattern across code files. Returns matching lines with context.",
+    {"pattern": {"type": "string", "description": "Regex pattern to search for"},
+     "path_filter": {"type": "string", "description": "Optional file path filter (regex)"},
+     "context_lines": {"type": "integer", "description": "Lines of context around matches (default 2)"}},
+    required=["pattern"])
+
+_LIST_DIR_SCHEMA = _tool("list_dir",
+    "List contents of a directory. Use path relative to repo root. Use empty string for repo root.",
+    {"path": {"type": "string", "description": "Relative directory path (empty for repo root)"}},
+    required=["path"])
+
+_FIND_FILES_SCHEMA = _tool("find_files",
+    "Find files by extension or name pattern. Returns list of relative paths.",
+    {"extension": {"type": "string", "description": "File extension (e.g., .java, .py)"},
+     "pattern": {"type": "string", "description": "Optional glob pattern for file name"}})
+
+# --- Write tool schemas ---
+
+_WRITE_FILE_SCHEMA = _tool("write_file",
+    "Create a new file or completely overwrite an existing file. Use for new files. For modifying existing files, prefer edit_file.",
+    {"path": {"type": "string", "description": "Relative file path (e.g., src/utils.py)"},
+     "content": {"type": "string", "description": "Complete file content to write"}},
+    required=["path", "content"])
+
+_EDIT_FILE_SCHEMA = _tool("edit_file",
+    "Make a surgical edit to an existing file. Finds old_string (must appear exactly once) "
+    "and replaces it with new_string. Include enough surrounding context lines in old_string "
+    "to make the match unique. Whitespace and indentation must match exactly.",
+    {"path": {"type": "string", "description": "Relative file path to edit"},
+     "old_string": {"type": "string", "description": "Exact string to find (must appear exactly once)"},
+     "new_string": {"type": "string", "description": "Replacement string (empty string to delete)"}},
+    required=["path", "old_string", "new_string"])
+
+_DELETE_FILE_SCHEMA = _tool("delete_file",
+    "Delete a file from the repository.",
+    {"path": {"type": "string", "description": "Relative file path to delete"}},
+    required=["path"])
+
+# --- Execution tool schemas ---
+
+_RUN_COMMAND_SCHEMA = _tool("run_command",
+    "Run a shell command in the repository directory. "
+    "Use for running tests (pytest, mvn test), builds, linting, or inspecting output. "
+    "Commands are sandboxed to the repo directory.",
+    {"command": {"type": "string", "description": "Shell command (e.g., 'pytest -v', 'mvn test')"},
+     "timeout": {"type": "integer", "description": "Timeout in seconds (default 120, max 300)"}},
+    required=["command"])
+
+# --- Completion tool schema ---
+
+_TASK_COMPLETE_SCHEMA = _tool("task_complete",
+    "Signal that all changes are done and verified. "
+    "Call this when you have finished implementing, tested the changes, "
+    "and are confident the task is complete.",
+    {"summary": {"type": "string", "description": "Brief summary of changes made"},
+     "files_changed": {"type": "array", "items": {"type": "string"},
+                       "description": "List of file paths created, modified, or deleted"}},
+    required=["summary", "files_changed"])
+
+# --- Memory tool schemas ---
+
+_UPDATE_MEMORY_SCHEMA = _tool("update_memory",
+    "Write a note to working memory. Notes survive context compression and are "
+    "saved to persistent knowledge when you call task_complete. "
+    "Use well-known keys for structured knowledge:\n"
+    "- 'project_overview': language, build tool, framework, test framework\n"
+    "- 'key_patterns': naming conventions, architecture patterns, common idioms\n"
+    "- 'file_notes': important files and what they contain\n"
+    "Use any other key for ad-hoc notes.",
+    {"key": {"type": "string", "description": "Note key (e.g., 'project_overview', 'key_patterns', 'file_notes')"},
+     "content": {"type": "string", "description": "Note content (Markdown supported)"}},
+    required=["key", "content"])
+
+_READ_MEMORY_SCHEMA = _tool("read_memory",
+    "Read all notes from working memory and any prior knowledge from previous runs.",
+    {})
+
+# ===================================================================
+# Tool list builders
+# ===================================================================
+
+READ_TOOLS = [_READ_FILE_SCHEMA, _GREP_SCHEMA, _LIST_DIR_SCHEMA, _FIND_FILES_SCHEMA]
+WRITE_TOOLS = [_WRITE_FILE_SCHEMA, _EDIT_FILE_SCHEMA, _DELETE_FILE_SCHEMA]
+EXECUTION_TOOLS = [_RUN_COMMAND_SCHEMA]
+COMPLETION_TOOLS = [_TASK_COMPLETE_SCHEMA]
+MEMORY_TOOLS = [_UPDATE_MEMORY_SCHEMA, _READ_MEMORY_SCHEMA]
+
+# Backward-compatible read-only tool list (used by old code paths)
+AGENT_TOOLS = list(READ_TOOLS)
+
+
+def build_agent_tools(agent_config: Optional[dict] = None) -> list[dict]:
+    """Build the full tool list for the new agent mode."""
+    tools: list[dict] = []
+    tools.extend(READ_TOOLS)
+    tools.extend(WRITE_TOOLS)
+    tools.extend(EXECUTION_TOOLS)
+    tools.extend(MEMORY_TOOLS)
+    tools.extend(COMPLETION_TOOLS)
+    return tools
+
+
+# ===================================================================
+# Tool dispatcher
+# ===================================================================
+
+def execute_tool(
+    repo_root: Path,
+    tool_name: str,
+    args: dict,
+    changes_tracker: Optional[set] = None,
+    agent_config: Optional[dict] = None,
+    working_memory: Optional[WorkingMemory] = None,
+) -> str:
+    """Execute a tool and return the result string.
+
+    *changes_tracker*: if provided, paths of written/edited/deleted files
+    are added to this set.
+    *working_memory*: if provided, used by memory tools.
+    """
+    repo = Path(repo_root)
+
+    # --- Memory tools ---
+    if tool_name == "update_memory":
+        if working_memory is None:
+            return "Error: working memory not available"
+        return working_memory.update(args.get("key", ""), args.get("content", ""))
+
+    if tool_name == "read_memory":
+        if working_memory is None:
+            return "(no working memory available)"
+        return working_memory.read_all()
+
+    # --- Read tools ---
+    if tool_name == "read_file":
+        return run_read_file(repo, args.get("path", ""), args.get("start_line"), args.get("end_line"))
+    if tool_name == "grep":
+        return run_grep(repo, args.get("pattern", ""), args.get("path_filter"), args.get("context_lines", 2))
+    if tool_name == "list_dir":
+        return run_list_dir(repo, args.get("path", ""))
+    if tool_name == "find_files":
+        return run_find_files(repo, args.get("extension"), args.get("pattern"))
+
+    # --- Write tools ---
+    if tool_name == "write_file":
+        result = run_write_file(repo, args.get("path", ""), args.get("content", ""))
+        if changes_tracker is not None and not result.startswith("Error"):
+            changes_tracker.add(args.get("path", ""))
+        return result
+
+    if tool_name == "edit_file":
+        result = run_edit_file(repo, args.get("path", ""), args.get("old_string", ""), args.get("new_string", ""))
+        if changes_tracker is not None and not result.startswith("Error"):
+            changes_tracker.add(args.get("path", ""))
+        return result
+
+    if tool_name == "delete_file":
+        result = run_delete_file(repo, args.get("path", ""))
+        if changes_tracker is not None and not result.startswith("Error"):
+            changes_tracker.add(args.get("path", ""))
+        return result
+
+    # --- Execution tools ---
+    if tool_name == "run_command":
+        return run_command(repo, args.get("command", ""), args.get("timeout", 120), agent_config)
+
+    return f"Unknown tool: {tool_name}"

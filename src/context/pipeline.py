@@ -4,8 +4,8 @@ Context building pipeline: orchestrates enrichers.
 
 from typing import Optional
 
-from src.code_analyzer import load_codebase_context
-from src.code_search import grep, format_grep_results
+from src.code.analyzer import load_codebase_context
+from src.code.search import grep, format_grep_results
 from src.context.enrichers import get_enabled_enrichers
 
 

@@ -3,7 +3,6 @@ Project consciousness: automatic indexing of project structure and conventions.
 Stored in file or OpenSearch; consumed as context for AI without explicit "learn from" instructions.
 """
 
-import hashlib
 import json
 import re
 import time
@@ -13,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.constants import CODE_EXTENSIONS, SKIP_DIRS
+from src.agent.knowledge import compute_repo_id
 
 
 @dataclass
@@ -68,7 +68,7 @@ class ProjectConsciousness:
         return "\n".join(lines) if len(lines) > 1 else ""
 
 
-def _format_structure(tree: dict, indent: int, max_depth: int) -> str:
+def _format_structure(tree: dict, indent: int = 0, max_depth: int = 3) -> str:
     if indent > max_depth:
         return ""
     lines = []
@@ -81,12 +81,6 @@ def _format_structure(tree: dict, indent: int, max_depth: int) -> str:
     for f in sorted(files)[:12]:
         lines.append(f"{prefix}{f}")
     return "\n".join(lines)
-
-
-def _compute_repo_id(repo_path: str, repo_url: str = "") -> str:
-    """Stable ID for cache key."""
-    raw = (repo_url or repo_path).strip()
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 def _build_structure_tree(repo: Path) -> dict:
@@ -174,14 +168,14 @@ def build_consciousness(repo_path: str, repo_url: str = "") -> ProjectConsciousn
     repo = Path(repo_path)
     if not repo.exists():
         return ProjectConsciousness(
-            repo_id=_compute_repo_id(repo_path, repo_url),
+            repo_id=compute_repo_id(repo_path, repo_url),
             indexed_at=time.time(),
             structure={},
             conventions={},
             implementation_samples=[],
             signatures=[],
         )
-    repo_id = _compute_repo_id(repo_path, repo_url)
+    repo_id = compute_repo_id(repo_path, repo_url)
     structure = _build_structure_tree(repo)
     conventions = _detect_conventions(repo)
     samples: list = []
@@ -273,7 +267,7 @@ def get_store(backend: str, cache_dir: str, opensearch_url: str = "", opensearch
     """Factory: file or opensearch."""
     if backend == "opensearch" and opensearch_url:
         try:
-            from src.consciousness_opensearch import OpenSearchConsciousnessStore
+            from src.consciousness.opensearch import OpenSearchConsciousnessStore
             return OpenSearchConsciousnessStore(url=opensearch_url, index=opensearch_index)
         except ImportError:
             return FileConsciousnessStore(cache_dir)
@@ -296,7 +290,7 @@ def build_or_load_consciousness(
     opensearch_url = cfg.get("opensearch_url", "")
     opensearch_index = cfg.get("opensearch_index", "code_consciousness")
     store = get_store(backend, str(cache_path), opensearch_url=opensearch_url, opensearch_index=opensearch_index)
-    repo_id = _compute_repo_id(repo_path, repo_url or config.get("repository", {}).get("repo_url", ""))
+    repo_id = compute_repo_id(repo_path, repo_url or config.get("repository", {}).get("repo_url", ""))
     if not force_rebuild:
         cached = store.load(repo_id)
         if cached:

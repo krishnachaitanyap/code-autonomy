@@ -5,7 +5,7 @@ Grep enricher: requirement-based and config-based grep for better context.
 import re
 from typing import Optional
 
-from src.code_search import grep, format_grep_results
+from src.code.search import grep, format_grep_results
 from src.context.base import ContextEnricher, EnrichmentResult
 
 

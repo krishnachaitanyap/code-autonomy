@@ -5,7 +5,7 @@ Autonomous code generation and feature building that integrates with **GitHub** 
 - Checkout code from a repository
 - **Analyze** codebase (Python, Java) with optional grep search
 - **Generate** changes based on requirements (using AI)
-- **Agent mode** (optional): AI iteratively explores with `read_file`, `grep`, `list_dir`, `find_files` before generating
+- **Agent mode** (Claude-Code-like): AI iteratively explores, edits, tests, and fixes code in a single agentic loop
 - **Run tests** (pytest/unittest for Python, Maven/Gradle for Java)
 - **Error analysis → regenerate** when tests fail (up to N retries)
 - Commit and push changes
@@ -21,15 +21,14 @@ sequenceDiagram
     participant Git
     participant Repo as Cloned Repo
     participant Consciousness
-    participant AI as OpenAI
+    participant AI as LLM (OpenAI / Anthropic / Gemini)
     participant Tests
     participant PR as PR Platform
 
-    User->>Main: python main.py (or fork_and_run)
+    User->>Main: python main.py --agent
     Main->>Config: load config.ini, changes.txt
     Main->>Git: clone repo, checkout feature branch
     Main->>Repo: load_codebase_context
-    Main->>Repo: grep (optional patterns)
     Main->>Consciousness: build_or_load (structure, conventions, samples)
     Consciousness-->>Main: project context
     opt Framework repo in changes.txt
@@ -41,25 +40,33 @@ sequenceDiagram
         Main->>PR: fetch reference PR diff
         PR-->>Main: template content
     end
-    alt Agent mode
-        Main->>AI: generate_changes_with_agent (tools: read_file, grep, list_dir)
-        loop Until done
-            AI->>Repo: read_file / grep / list_dir
+    alt Agent mode (--agent)
+        Main->>AI: generate_changes_with_agent (9 tools)
+        loop EXPLORE → IMPLEMENT → VERIFY → FIX → COMPLETE
+            AI->>Repo: read_file / grep / list_dir / find_files
             Repo-->>AI: file content, search results
+            AI->>Repo: write_file / edit_file / delete_file
+            AI->>Tests: run_command (pytest / mvn test)
+            Tests-->>AI: exit code, stdout, stderr
+            alt Tests failed
+                AI->>Repo: read errors, edit_file to fix
+                AI->>Tests: run_command (re-run tests)
+            end
         end
+        AI->>AI: task_complete(summary, files_changed)
     else Standard mode
         Main->>AI: generate_changes (requirements + context)
-    end
-    AI-->>Main: JSON changes
-    Main->>Repo: apply_changes (write files)
-    loop Tests enabled
-        Main->>Tests: run_tests (pytest / mvn / gradle)
-        Tests-->>Main: exit_code, stdout, stderr
-        alt Tests failed
-            Main->>AI: regenerate_with_error_analysis (error + previous changes)
-            AI-->>Main: fixed JSON changes
-            Main->>Repo: apply_changes
-            Note over Main,Tests: Retry up to max_regenerate_attempts
+        AI-->>Main: JSON changes
+        Main->>Repo: apply_changes (write files)
+        loop Tests enabled
+            Main->>Tests: run_tests (pytest / mvn / gradle)
+            Tests-->>Main: exit_code, stdout, stderr
+            alt Tests failed
+                Main->>AI: regenerate_with_error_analysis
+                AI-->>Main: fixed JSON changes
+                Main->>Repo: apply_changes
+                Note over Main,Tests: Retry up to max_regenerate_attempts
+            end
         end
     end
     alt Not dry-run
@@ -128,14 +135,17 @@ Edit **changes.txt** with your feature/code change requirements:
 ### 4. Run
 
 ```bash
-# Dry run (analyze + generate, no push/PR)
-python main.py --dry-run
+# Agent mode (recommended): AI explores, edits, tests, and fixes in a single loop
+python main.py --agent
 
-# Full run (includes test → regenerate loop)
+# Agent mode with dry run (no push/PR)
+python main.py --agent --dry-run
+
+# Standard mode (one-shot generation + external test/retry loop)
 python main.py
 
-# Agent mode: AI explores codebase with read_file, grep, list_dir before generating
-python main.py --agent
+# Dry run (analyze + generate, no push/PR)
+python main.py --dry-run
 
 # Skip tests (no test run, no regeneration)
 python main.py --skip-tests
@@ -158,7 +168,7 @@ python fork_and_run.py davidmoten/maven-demo --changes examples/changes/changes_
 # Generate BDD tests (Cucumber)
 python fork_and_run.py owner/repo --changes examples/changes/changes_bdd.txt --testing-strategy bdd
 
-# Use agent mode to explore codebase before generating
+# Use agent mode to explore, edit, test, and fix in a single loop
 python fork_and_run.py owner/repo --agent
 
 # Use a reference PR as template (for repetitive changes)
@@ -202,7 +212,7 @@ python scripts/run_grep.py ./workspace/my-repo "validate_email"
 python scripts/run_tests.py ./workspace/my-repo
 ```
 
-For script execution and output verification, use `src.code_executor`:
+For script execution and output verification, use `src.code.executor`:
 - `run_python_script(path, cwd, timeout)` – run Python script, returns (exit_code, stdout, stderr)
 - `run_java_main(repo_path, main_class)` – run Java main via Maven/Gradle
 - `verify_output(actual, expected, exact)` – compare output
@@ -222,17 +232,23 @@ For script execution and output verification, use `src.code_executor`:
 | ai | provider | LLM provider: openai, anthropic, gemini (default: openai) |
 | ai | api_key | API key; or use api_key_env (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY) |
 | ai | api_key_env | Env var for API key (optional override) |
-| ai | model | Model (gpt-4o, claude-3-5-sonnet-20241022, gemini-1.5-pro, etc.) |
+| ai | model | Model (gpt-4o, claude-sonnet-4-5, gemini-1.5-pro, etc.) |
 | ai | base_url | Optional: custom endpoint (Azure, proxy) |
 | workflow | work_dir | Clone directory (default: ./workspace) |
 | workflow | cleanup_after_pr | Delete workspace after PR |
 | workflow | grep_patterns | Comma-separated patterns to search before AI |
 | workflow | reference_pr | GitHub PR URL to use as template for repetitive changes |
-| workflow | use_agent | Agent mode: AI explores with read_file, grep, list_dir (default: false) |
+| workflow | use_agent | Enable agent mode by default (default: false) |
 | testing | run_tests | Run tests after changes (default: true) |
 | testing | max_regenerate_attempts | Retries on test failure (default: 3) |
 | testing | test_timeout | Test timeout in seconds (default: 120) |
 | testing | testing_strategy | Java testing strategy: bdd, contract, integration, unit, e2e, soap, auto (default: auto) |
+| **agent** | **max_turns** | **Max turns in the agent loop, each turn = one LLM call (default: 50)** |
+| **agent** | **smart_summarization** | **Summarize large tool outputs with a fast LLM call instead of blind truncation (default: true)** |
+| **agent** | **truncation_limit** | **Char limit per tool result before summarization kicks in (default: 30000)** |
+| **agent** | **command_allowlist_only** | **Restrict shell commands to allowlist prefixes only (default: false)** |
+| **agent** | **allowed_command_prefixes** | **Comma-separated allowed commands when allowlist mode is on (default: pytest,python,mvn,gradle,npm,npx)** |
+| **agent** | **blocked_commands** | **Always-blocked dangerous commands (default: rm -rf /,mkfs,dd if=,shutdown,reboot)** |
 | consciousness | backend | Storage: file or opensearch (default: file) |
 | consciousness | cache_dir | Cache path relative to work_dir (default: .consciousness) |
 | consciousness | max_age_hours | Rebuild cache when older (default: 24, 0 = always rebuild) |
@@ -266,12 +282,12 @@ Optional deps: `pip install sentence-transformers` for similarity, `pip install 
 
 ### Multi-provider LLM (OpenAI, Anthropic, Gemini)
 
-The LLM layer (`src/llm_client.py`) supports multiple providers via [LiteLLM](https://docs.litellm.ai/):
+The LLM layer (`src/llm_client.py`) supports multiple providers via [LiteLLM](https://docs.litellm.ai/) with automatic retry (3 retries, exponential backoff) for transient errors (rate limits, timeouts, 5xx):
 
 | Provider | config.ini | Model examples | Env var |
 |----------|------------|----------------|---------|
 | OpenAI | `provider = openai` | gpt-4o, gpt-4o-mini | OPENAI_API_KEY |
-| Anthropic | `provider = anthropic` | claude-3-5-sonnet-20241022 | ANTHROPIC_API_KEY |
+| Anthropic | `provider = anthropic` | claude-sonnet-4-5, claude-3-5-haiku | ANTHROPIC_API_KEY |
 | Google | `provider = gemini` | gemini-1.5-pro, gemini-1.5-flash | GEMINI_API_KEY |
 
 Set `api_key` in config or the corresponding env var. Use `base_url` for Azure or custom endpoints.
@@ -299,48 +315,117 @@ code-autonomy/
 ├── scripts/            # Standalone tools (run_grep, run_tests)
 ├── main.py             # Orchestrator
 ├── fork_and_run.py     # Fork repo → run main → create PR
-├── run_grep.py         # Grep/search tool (standalone)
-├── run_tests.py        # Test runner (standalone)
 ├── requirements.txt
 ├── src/
-│   ├── config_loader.py
-│   ├── git_ops.py
-│   ├── pr_platform.py      # GitHub + Bitbucket
-│   ├── llm_client.py       # Multi-provider LLM (OpenAI, Anthropic, Gemini via LiteLLM)
-│   ├── context/           # Modular context pipeline (grep, similarity, call graph)
-│   ├── embeddings/        # Local embeddings for similarity search (optional)
-│   ├── code_analyzer.py    # AI changes + error regeneration
-│   ├── agent_analyzer.py   # Agent loop with tool use
-│   ├── agent_tools.py      # read_file, grep, list_dir, find_files
-│   ├── code_search.py      # Grep across files
-│   ├── code_executor.py    # Run Python/Java tests in isolation
-│   ├── reference_pr.py     # Fetch reference PR for template
-│   ├── project_consciousness.py # Project model, indexing, file/OpenSearch storage
-│   ├── consciousness_opensearch.py # OpenSearch backend (optional)
-│   ├── testing_strategies.py # BDD, Contract, Integration, Unit, E2E guidance
-│   └── activity.py        # Spinners, status messages
+│   ├── __init__.py
+│   ├── constants.py         # Shared constants (extensions, skip dirs)
+│   ├── config_loader.py     # Config loading and parsing
+│   ├── llm_client.py        # Multi-provider LLM with retry logic (OpenAI, Anthropic, Gemini via LiteLLM)
+│   │
+│   ├── agent/               # Agent loop infrastructure
+│   │   ├── analyzer.py      # Agent loop: explore → edit → test → fix → complete
+│   │   ├── tools.py         # 9 agent tools (read, write, edit, delete, grep, list, find, run, complete)
+│   │   ├── knowledge.py     # Persistent knowledge system (working memory, cross-run knowledge)
+│   │   ├── context.py       # Smart context management (token-aware, summarization, compression)
+│   │   ├── activity.py      # Spinners, status messages
+│   │   └── ai_utils.py      # AI response parsing utilities
+│   │
+│   ├── code/                # Code analysis, search, and execution
+│   │   ├── analyzer.py      # AI changes + error regeneration (standard mode)
+│   │   ├── search.py        # Grep across files
+│   │   ├── executor.py      # Run Python/Java tests in isolation
+│   │   └── testing_strategies.py  # BDD, Contract, Integration, Unit, E2E, SOAP guidance
+│   │
+│   ├── consciousness/       # Project understanding and indexing
+│   │   ├── core.py          # Project model, indexing, file storage
+│   │   └── opensearch.py    # OpenSearch backend (optional)
+│   │
+│   ├── platform/            # VCS and PR integration
+│   │   ├── git_ops.py       # Clone, checkout, commit, push
+│   │   ├── pr_platform.py   # GitHub + Bitbucket PR creation
+│   │   └── reference_pr.py  # Fetch reference PR for template
+│   │
+│   ├── context/             # Modular context pipeline (grep, similarity, call graph)
+│   └── embeddings/          # Local embeddings for similarity search (optional)
 └── workspace/          # Cloned repos (created at runtime)
 ```
 
-## Workflow: Analyze → Change → Test → Regenerate
+## Workflow
+
+### Standard Mode: Analyze → Change → Test → Regenerate
 
 1. **Analyze** – Load codebase context, optionally run grep for patterns
-2. **Change** – AI generates file changes from requirements (or in agent mode: explore with tools first, then generate)
+2. **Change** – AI generates file changes from requirements as JSON
 3. **Apply** – Write changes to disk
 4. **Test** – Run pytest (Python) or mvn test / gradle test (Java)
 5. **On failure** – AI analyzes error output, regenerates fixes, retry (up to `max_regenerate_attempts`)
 6. **On success** – Commit, push, create PR
 
-### Agent Mode
+### Agent Mode (Claude-Code-like)
 
-With `--agent` or `use_agent = true`, the AI uses tools before generating:
+With `--agent` or `use_agent = true`, the AI operates in an autonomous agentic loop with 9 tools, directly exploring, editing, testing, and fixing code:
 
-- **read_file** – Read file contents (optionally a line range)
-- **grep** – Search for regex pattern across code files
-- **list_dir** – List directory contents
-- **find_files** – Find files by extension or glob pattern
+**Read tools (explore):**
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read file contents (optionally a line range) |
+| `grep` | Search for regex pattern across code files |
+| `list_dir` | List directory contents |
+| `find_files` | Find files by extension or glob pattern |
 
-This Cursor-like flow lets the model explore the codebase iteratively before producing changes.
+**Write tools (modify):**
+| Tool | Description |
+|------|-------------|
+| `write_file` | Create a new file or overwrite completely |
+| `edit_file` | Surgical search-and-replace — find exact `old_string` (must be unique) and replace with `new_string` |
+| `delete_file` | Delete a file |
+
+**Execution tools:**
+| Tool | Description |
+|------|-------------|
+| `run_command` | Run shell commands (tests, builds) sandboxed to the repo directory |
+
+**Completion:**
+| Tool | Description |
+|------|-------------|
+| `task_complete` | Signal that all changes are done and verified |
+
+**Agent workflow:**
+1. **EXPLORE** – Use read tools to understand the codebase structure, conventions, and relevant files
+2. **IMPLEMENT** – Use `edit_file` for surgical edits to existing files, `write_file` for new files
+3. **VERIFY** – Run tests with `run_command` (e.g., `pytest -v`, `mvn test`)
+4. **FIX** – If tests fail, read error output, edit files, re-run tests
+5. **COMPLETE** – Call `task_complete` with summary and list of changed files
+
+**Key differences from standard mode:**
+- Agent writes files **directly** during the loop — no external `apply_changes()` step
+- Tests run **inside** the agent loop — no external test/retry loop needed
+- Agent fixes errors **iteratively** — reads failures, edits code, re-runs tests
+- **Stuck detection** — if the same test failure appears 3 times, the agent is nudged to try a different approach
+
+### Smart Context Management
+
+The agent uses intelligent context management (`src/agent/context.py`) to maximize the effectiveness of each LLM call:
+
+**Token-aware context limits:**
+- Per-model context windows: GPT-4o (128K), Claude (200K), Gemini (1M)
+- Uses 80% of context window as safe limit
+- Compresses conversation when approaching 70% capacity
+
+**Intelligent summarization:**
+- Large tool outputs (exceeding `truncation_limit`) are summarized by a fast/cheap LLM call instead of blindly truncated
+- Uses fast models from the same provider (gpt-4o-mini, claude-3-5-haiku, gemini-1.5-flash)
+- Preserves error messages, file paths, test results, and actionable information
+
+**Context compression (for long conversations):**
+- Always keeps: system prompt + initial user message + last 12 messages
+- Middle messages: large tool results (>2KB) get intelligently summarized
+- Progressive drop: oldest middle messages removed if still over limit
+
+**Requirement-aware initial context:**
+- Parses identifiers from `changes.txt` requirements (CamelCase, snake_case symbols)
+- Uses grep to find files containing those identifiers
+- Provides focused project overview (language, build tool, test framework, relevant files) instead of dumping raw code samples
 
 ### Java Testing Strategies
 

@@ -5,7 +5,7 @@ Optional: requires opensearch-py. Falls back to file store if unavailable.
 
 from typing import Optional
 
-from src.project_consciousness import ConsciousnessStore, ProjectConsciousness
+from src.consciousness.core import ConsciousnessStore, ProjectConsciousness
 
 
 class OpenSearchConsciousnessStore(ConsciousnessStore):

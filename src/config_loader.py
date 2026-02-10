@@ -5,6 +5,7 @@ Reads config.ini and provides typed access to settings.
 
 import configparser
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +28,24 @@ def load_config(config_path: str = "config.ini") -> dict:
     def get_bool(section: str, key: str, fallback: bool = False) -> bool:
         val = get(section, key, str(fallback)).lower()
         return val in ("true", "yes", "1", "on")
+
+    def get_int(section: str, key: str, fallback: int = 0) -> int:
+        raw = get(section, key, str(fallback))
+        try:
+            return int(raw) if raw else fallback
+        except ValueError:
+            return fallback
+
+    def get_float(section: str, key: str, fallback: float = 0.0) -> float:
+        raw = get(section, key, str(fallback))
+        try:
+            return float(raw) if raw else fallback
+        except ValueError:
+            return fallback
+
+    def get_list(section: str, key: str, fallback: str = "") -> list[str]:
+        raw = get(section, key, fallback)
+        return [p.strip() for p in raw.split(",") if p.strip()]
 
     # Resolve credentials from env if configured
     cred_section = "github_config" if parser.has_section("github_config") else "credentials"
@@ -82,28 +101,43 @@ def load_config(config_path: str = "config.ini") -> dict:
             "use_agent": get_bool("workflow", "use_agent", False),
         },
         "testing": {
-            "run_tests": get_bool("testing", "run_tests", True) if parser.has_section("testing") else True,
-            "max_regenerate_attempts": int(get("testing", "max_regenerate_attempts", "3") or "3") if parser.has_section("testing") else 3,
-            "test_timeout": int(get("testing", "test_timeout", "120") or "120") if parser.has_section("testing") else 120,
-            "testing_strategy": get("testing", "testing_strategy", "auto").lower().strip() or "auto" if parser.has_section("testing") else "auto",
+            "run_tests": get_bool("testing", "run_tests", True),
+            "max_regenerate_attempts": get_int("testing", "max_regenerate_attempts", 3),
+            "test_timeout": get_int("testing", "test_timeout", 120),
+            "testing_strategy": get("testing", "testing_strategy", "auto").lower().strip() or "auto",
         },
         "consciousness": {
-            "backend": get("consciousness", "backend", "file").lower() if parser.has_section("consciousness") else "file",
-            "cache_dir": get("consciousness", "cache_dir", ".consciousness") if parser.has_section("consciousness") else ".consciousness",
-            "max_age_hours": float(get("consciousness", "max_age_hours", "24") or "24") if parser.has_section("consciousness") else 24.0,
-            "opensearch_url": get("consciousness", "opensearch_url", "") if parser.has_section("consciousness") else "",
-            "opensearch_index": get("consciousness", "opensearch_index", "code_consciousness") if parser.has_section("consciousness") else "code_consciousness",
+            "backend": get("consciousness", "backend", "file").lower(),
+            "cache_dir": get("consciousness", "cache_dir", ".consciousness"),
+            "max_age_hours": get_float("consciousness", "max_age_hours", 24.0),
+            "opensearch_url": get("consciousness", "opensearch_url", ""),
+            "opensearch_index": get("consciousness", "opensearch_index", "code_consciousness"),
         },
         "context": {
-            "use_pipeline": get_bool("context", "use_pipeline", False) if parser.has_section("context") else False,
-            "grep_enricher": get_bool("context", "grep_enricher", True) if parser.has_section("context") else True,
-            "grep_from_requirements": get_bool("context", "grep_from_requirements", True) if parser.has_section("context") else True,
-            "similarity_enricher": get_bool("context", "similarity_enricher", False) if parser.has_section("context") else False,
-            "similarity_top_k": int(get("context", "similarity_top_k", "5") or "5") if parser.has_section("context") else 5,
-            "call_graph_enricher": get_bool("context", "call_graph_enricher", False) if parser.has_section("context") else False,
-            "call_graph_depth": int(get("context", "call_graph_depth", "2") or "2") if parser.has_section("context") else 2,
-            "max_files": int(get("context", "max_files", "30") or "30") if parser.has_section("context") else 30,
-            "max_chars_per_file": int(get("context", "max_chars_per_file", "4000") or "4000") if parser.has_section("context") else 4000,
+            "use_pipeline": get_bool("context", "use_pipeline", False),
+            "grep_enricher": get_bool("context", "grep_enricher", True),
+            "grep_from_requirements": get_bool("context", "grep_from_requirements", True),
+            "similarity_enricher": get_bool("context", "similarity_enricher", False),
+            "similarity_top_k": get_int("context", "similarity_top_k", 5),
+            "call_graph_enricher": get_bool("context", "call_graph_enricher", False),
+            "call_graph_depth": get_int("context", "call_graph_depth", 2),
+            "max_files": get_int("context", "max_files", 30),
+            "max_chars_per_file": get_int("context", "max_chars_per_file", 4000),
+        },
+        "agent": {
+            "max_turns": get_int("agent", "max_turns", 50),
+            "smart_summarization": get_bool("agent", "smart_summarization", True),
+            "truncation_limit": get_int("agent", "truncation_limit", 30000),
+            "command_allowlist_only": get_bool("agent", "command_allowlist_only", False),
+            "allowed_command_prefixes": get_list("agent", "allowed_command_prefixes"),
+            "blocked_commands": get_list("agent", "blocked_commands"),
+        },
+        "knowledge": {
+            "backend": get("knowledge", "backend", "file").lower(),
+            "storage_dir": get("knowledge", "storage_dir", ""),
+            "opensearch_url": get("knowledge", "opensearch_url", ""),
+            "opensearch_index": get("knowledge", "opensearch_index", "agent_knowledge"),
+            "aws_region": get("knowledge", "aws_region", ""),
         },
     }
 
@@ -114,7 +148,6 @@ def _parse_reference_pr_from_content(content: str) -> tuple[str, str]:
     Returns (content_without_reference_line, reference_pr_url).
     Supports: # Reference PR: https://..., reference_pr: https://...
     """
-    import re
     # Match: # Reference PR: url, reference_pr: url, Reference PR: url
     pattern = r"^(?:#\s*)?(?:reference_pr|Reference\s+PR)\s*:\s*(https?://[^\s#]+)"
     for line in content.splitlines():
@@ -138,7 +171,6 @@ def parse_framework_repo_from_changes(content: str) -> tuple[Optional[str], Opti
       # Framework branch: main
     Returns (framework_repo_url, framework_branch). Either can be None.
     """
-    import re
     url = None
     branch = None
     for line in content.splitlines():
@@ -154,7 +186,6 @@ def parse_framework_repo_from_changes(content: str) -> tuple[Optional[str], Opti
 
 def _strip_framework_lines(content: str) -> str:
     """Remove framework meta lines from content."""
-    import re
     lines = []
     for line in content.splitlines():
         if re.search(r"^(?:#\s*)?(?:Framework\s+repo|Framework)\s*:\s*https?://", line, re.I):
@@ -171,7 +202,6 @@ def parse_testing_strategy_from_changes(content: str) -> Optional[str]:
     Parse # Testing strategy: bdd|contract|integration|unit|e2e from changes content.
     Returns strategy string or None if not specified.
     """
-    import re
     for line in content.splitlines():
         m = re.search(r"#\s*Testing\s+strategy\s*:\s*(\w+)", line, re.I)
         if m:
