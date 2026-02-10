@@ -3,11 +3,14 @@ Unified LLM client for multi-provider support.
 Supports OpenAI, Anthropic (Claude), Google (Gemini) via LiteLLM.
 Uses config and env for flexible authentication.
 Includes retry logic for transient API errors.
+Supports circuit breaker and rate limiting when configured.
 """
 
 import os
 import time
 from typing import Any, Optional
+
+from src.resiliency import CircuitBreaker, TokenBucketRateLimiter
 
 # Provider-specific env var defaults when api_key not in config
 DEFAULT_API_KEY_ENV: dict[str, str] = {
@@ -19,6 +22,38 @@ DEFAULT_API_KEY_ENV: dict[str, str] = {
 
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 2  # seconds
+
+# Resiliency singletons — None = disabled (backward compatible)
+_circuit_breaker: Optional[CircuitBreaker] = None
+_rate_limiter: Optional[TokenBucketRateLimiter] = None
+
+
+def configure_resiliency(
+    circuit_breaker_threshold: int = 5,
+    circuit_breaker_timeout: float = 60.0,
+    rate_limit_max_tokens: float = 10.0,
+    rate_limit_refill_rate: float = 1.0,
+) -> None:
+    """Initialize resiliency singletons. Call once at startup."""
+    global _circuit_breaker, _rate_limiter
+    _circuit_breaker = CircuitBreaker(
+        failure_threshold=circuit_breaker_threshold,
+        recovery_timeout=circuit_breaker_timeout,
+    )
+    _rate_limiter = TokenBucketRateLimiter(
+        max_tokens=rate_limit_max_tokens,
+        refill_rate=rate_limit_refill_rate,
+    )
+
+
+def get_circuit_breaker() -> Optional[CircuitBreaker]:
+    """Return the circuit breaker singleton (for monitoring/testing)."""
+    return _circuit_breaker
+
+
+def get_rate_limiter() -> Optional[TokenBucketRateLimiter]:
+    """Return the rate limiter singleton (for monitoring/testing)."""
+    return _rate_limiter
 
 
 def _resolve_api_key(config: dict) -> str:
@@ -109,6 +144,14 @@ def chat_completion(
         kwargs["tools"] = tools
         kwargs["tool_choice"] = tool_choice
 
+    # Resiliency: fail-fast if circuit breaker is OPEN
+    if _circuit_breaker is not None:
+        _circuit_breaker.ensure_closed()
+
+    # Resiliency: wait for rate limiter token
+    if _rate_limiter is not None:
+        _rate_limiter.acquire(timeout=30.0)
+
     # Retry loop for transient errors
     last_exc: Optional[Exception] = None
     for attempt in range(_MAX_RETRIES):
@@ -116,9 +159,13 @@ def chat_completion(
             response = litellm.completion(**kwargs)
             msg = response.choices[0].message
             content = (msg.content or "").strip()
+            if _circuit_breaker is not None:
+                _circuit_breaker.record_success()
             return content, msg
         except Exception as exc:
             last_exc = exc
+            if _is_retryable(exc) and _circuit_breaker is not None:
+                _circuit_breaker.record_failure()
             if attempt < _MAX_RETRIES - 1 and _is_retryable(exc):
                 delay = _RETRY_BASE_DELAY * (2 ** attempt)
                 time.sleep(delay)

@@ -40,7 +40,7 @@ from src.code.analyzer import (
 )
 from src.context import build_context
 from src.consciousness.core import build_or_load_consciousness
-from src.agent.analyzer import generate_changes_with_agent
+from src.agent.analyzer import generate_changes_with_agent, generate_plan_with_agent
 from src.code.executor import run_tests, detect_project_type, detect_build_tool
 from src.agent.activity import (
     header,
@@ -52,6 +52,8 @@ from src.agent.activity import (
     log_warning,
 )
 from src.platform.reference_pr import get_reference_pr_context
+from src.startup_validator import validate_startup
+from src.llm_client import configure_resiliency
 
 
 def main() -> int:
@@ -61,7 +63,10 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Analyze and generate changes only, no push/PR")
     parser.add_argument("--skip-tests", action="store_true", help="Skip test run and regeneration loop")
     parser.add_argument("--reference-pr", "-r", help="GitHub PR URL to use as template for repetitive changes")
+    parser.add_argument("--repo-path", help="Path to an existing local repository (skips clone, branch creation, and push/PR)")
     parser.add_argument("--agent", "-a", action="store_true", help="Use agent mode: AI explores, edits, tests, and fixes code in a single loop (Claude-Code-like)")
+    parser.add_argument("--plan", "-p", action="store_true", help="Plan mode: agent explores read-only and proposes changes as diffs for review before applying (implies --agent)")
+    parser.add_argument("--auto-approve", action="store_true", help="Auto-approve plan without prompting (use with --plan)")
     parser.add_argument("--testing-strategy", "-t", choices=["bdd", "contract", "integration", "unit", "e2e", "soap", "auto"],
                        help="Java testing strategy (default: auto or from config/changes)")
     parser.add_argument("--rebuild-consciousness", action="store_true", help="Force rebuild of project consciousness cache")
@@ -84,67 +89,106 @@ def main() -> int:
     workflow = config["workflow"]
     testing_cfg = config.get("testing") or {}
 
-    repo_url = repo_cfg["repo_url"]
-    if not repo_url or repo_url == "https://github.com/owner/repo.git":
-        print("Error: Set repo_url in config.ini to your actual repository URL")
+    using_local_repo = bool(args.repo_path)
+
+    # Pre-flight validation
+    validation = validate_startup(config, dry_run=args.dry_run, using_local_repo=using_local_repo)
+    for w in validation.warnings:
+        log_warning(w)
+    if not validation.is_valid:
+        for e in validation.errors:
+            log_error(e)
         return 1
 
-    auth_token = creds["auth_token"]
-    if not auth_token and not args.dry_run:
-        print("Error: Set auth_token in config.ini or GITHUB_TOKEN/BITBUCKET_APP_PASSWORD env var")
-        return 1
+    # Initialize resiliency (circuit breaker + rate limiter)
+    agent_cfg = config.get("agent") or {}
+    configure_resiliency(
+        circuit_breaker_threshold=int(agent_cfg.get("circuit_breaker_threshold", 5)),
+        circuit_breaker_timeout=float(agent_cfg.get("circuit_breaker_timeout", 60.0)),
+        rate_limit_max_tokens=float(agent_cfg.get("rate_limit_max_tokens", 10.0)),
+        rate_limit_refill_rate=float(agent_cfg.get("rate_limit_refill_rate", 1.0)),
+    )
 
-    if not ai_cfg.get("api_key"):
-        env_var = ai_cfg.get("api_key_env", "OPENAI_API_KEY")
-        print(f"Error: Set {env_var} environment variable or api_key in config.ini [ai] section")
-        return 1
+    if using_local_repo:
+        # --repo-path: use existing local directory, skip clone/branch/push/PR
+        local_path = Path(args.repo_path).resolve()
+        if not local_path.is_dir():
+            print(f"Error: --repo-path is not a directory: {local_path}")
+            return 1
 
-    work_dir = Path(workflow["work_dir"]).resolve()
-    repo_name = get_repo_name(repo_url)
-    clone_path = work_dir / repo_name.replace("/", "-")
+        clone_path = local_path
 
-    base_branch = repo_cfg["base_branch"] or "main"
-    feature_branch = repo_cfg["feature_branch"] or generate_branch_name()
+        # Try to detect repo_url from git remote
+        repo_url = repo_cfg.get("repo_url", "")
+        if not repo_url or repo_url == "https://github.com/owner/repo.git":
+            try:
+                import subprocess as _sp
+                _out = _sp.run(
+                    ["git", "remote", "get-url", "origin"],
+                    cwd=str(local_path), capture_output=True, text=True,
+                )
+                if _out.returncode == 0 and _out.stdout.strip():
+                    repo_url = _out.stdout.strip()
+            except Exception:
+                pass
+            if not repo_url:
+                repo_url = ""  # Not required for local-only runs
 
-    header("Autonomous Code Generation", f"Repository: {repo_url}\nBranch: {feature_branch} → {base_branch}")
+        auth_token = creds.get("auth_token", "")
+        # auth_token not required for local repo
 
-    # Clone (try main then master if base_branch fails)
-    try:
-        if clone_path.exists():
-            with step("Cleaning workspace", str(clone_path)):
-                shutil.rmtree(clone_path)
-        work_dir.mkdir(parents=True, exist_ok=True)
+        header("Autonomous Code Generation (local repo)", f"Path: {clone_path}")
+    else:
+        # Normal remote mode — clone the repo
+        repo_url = repo_cfg["repo_url"]
+        auth_token = creds["auth_token"]
 
-        with spinner("Cloning repository"):
-            last_err = None
-            for try_branch in [base_branch, "main", "master"]:
-                if clone_path.exists():
-                    shutil.rmtree(clone_path, ignore_errors=True)
-                try:
-                    repo = clone_repo(
-                        repo_url,
-                        str(clone_path),
-                        branch=try_branch,
-                        auth_token=auth_token if auth_token else None,
-                    )
-                    if try_branch != base_branch:
-                        log_info(f"Used branch '{try_branch}' (base_branch '{base_branch}' not found)")
-                    break
-                except Exception as br_err:
-                    last_err = br_err
-                    if try_branch == "master":
-                        raise last_err
-    except Exception as e:
-        log_error(f"Clone failed: {e}")
-        return 1
+        work_dir = Path(workflow["work_dir"]).resolve()
+        repo_name = get_repo_name(repo_url)
+        clone_path = work_dir / repo_name.replace("/", "-")
 
-    with step("Creating feature branch", feature_branch):
-        checkout_branch(repo, feature_branch, create=True)
+        base_branch = repo_cfg["base_branch"] or "main"
+        feature_branch = repo_cfg["feature_branch"] or generate_branch_name()
+
+        header("Autonomous Code Generation", f"Repository: {repo_url}\nBranch: {feature_branch} → {base_branch}")
+
+        # Clone (try main then master if base_branch fails)
+        try:
+            if clone_path.exists():
+                with step("Cleaning workspace", str(clone_path)):
+                    shutil.rmtree(clone_path)
+            work_dir.mkdir(parents=True, exist_ok=True)
+
+            with spinner("Cloning repository"):
+                last_err = None
+                for try_branch in [base_branch, "main", "master"]:
+                    if clone_path.exists():
+                        shutil.rmtree(clone_path, ignore_errors=True)
+                    try:
+                        repo = clone_repo(
+                            repo_url,
+                            str(clone_path),
+                            branch=try_branch,
+                            auth_token=auth_token if auth_token else None,
+                        )
+                        if try_branch != base_branch:
+                            log_info(f"Used branch '{try_branch}' (base_branch '{base_branch}' not found)")
+                        break
+                    except Exception as br_err:
+                        last_err = br_err
+                        if try_branch == "master":
+                            raise last_err
+        except Exception as e:
+            log_error(f"Clone failed: {e}")
+            return 1
+
+        with step("Creating feature branch", feature_branch):
+            checkout_branch(repo, feature_branch, create=True)
 
     # Clone framework repo if specified in changes.txt
     framework_path = None
     framework_context = ""
-    if framework_repo_url:
+    if framework_repo_url and not using_local_repo:
         try:
             framework_name = get_repo_name(framework_repo_url).replace("/", "-")
             framework_dir = work_dir / ".framework-ref" / framework_name
@@ -224,9 +268,121 @@ def main() -> int:
     )
     build_tool = detect_build_tool(str(clone_path))  # maven or gradle for Java
 
-    use_agent = args.agent or workflow.get("use_agent", False)
+    use_agent = args.agent or args.plan or workflow.get("use_agent", False)
+    use_plan = args.plan
 
-    if use_agent:
+    if use_plan:
+        # ---------------------------------------------------------------
+        # PLAN MODE: agent explores read-only, proposes changes as diffs
+        # ---------------------------------------------------------------
+        from src.agent.plan import apply_plan
+        from src.agent.plan_display import render_plan, prompt_approval
+
+        agent_cfg_section = config.get("agent") or {}
+        agent_config = {
+            "plan_max_turns": int(agent_cfg_section.get("plan_max_turns", 30)),
+            "max_turns": int(agent_cfg_section.get("max_turns", 50)),
+            "smart_summarization": agent_cfg_section.get("smart_summarization", True),
+            "truncation_limit": int(agent_cfg_section.get("truncation_limit", 30000)),
+        }
+
+        # Phase 1: Plan
+        with spinner("Agent exploring codebase and proposing changes (plan mode)"):
+            plan_result = generate_plan_with_agent(
+                requirements,
+                str(clone_path),
+                llm_config=ai_cfg,
+                reference_pr_content=reference_pr_content,
+                verbose=ai_cfg.get("verbose", False),
+                testing_strategy=testing_strategy,
+                build_tool=build_tool,
+                consciousness_context=consciousness_str or "",
+                framework_context=framework_context,
+                agent_config=agent_config,
+                config=config,
+                repo_url=repo_url,
+            )
+
+        if not plan_result.success or plan_result.plan is None or plan_result.plan.is_empty:
+            log_error(f"Plan mode did not produce changes: {plan_result.summary}")
+            return 1
+
+        log_success(f"Plan complete: {plan_result.summary}")
+        log_info(f"Proposed changes to {len(plan_result.plan.files_affected)} file(s) in {plan_result.turns_used} turns")
+
+        # Display diffs
+        render_plan(plan_result.plan, str(clone_path))
+
+        # Phase 2: Approval
+        if args.auto_approve:
+            choice = "approve"
+            log_info("Auto-approved (--auto-approve)")
+        else:
+            choice = prompt_approval()
+
+        if choice == "reject":
+            log_warning("Plan rejected. No changes applied.")
+            return 0
+
+        if choice == "modify":
+            # Fall back to full agent mode with plan as context
+            log_info("Falling back to full agent mode with plan as starting context...")
+            plan_context = "\n".join(
+                f"- {c.action.value} {c.path}: {c.description}"
+                for c in plan_result.plan.changes
+            )
+            requirements_with_plan = (
+                f"{requirements}\n\n"
+                f"## Previously proposed plan (use as starting point, modify as needed)\n"
+                f"{plan_context}"
+            )
+            agent_config_full = {
+                "max_turns": int(agent_cfg_section.get("max_turns", 50)),
+                "smart_summarization": agent_cfg_section.get("smart_summarization", True),
+                "truncation_limit": int(agent_cfg_section.get("truncation_limit", 30000)),
+                "command_allowlist_only": agent_cfg_section.get("command_allowlist_only", False),
+                "allowed_command_prefixes": agent_cfg_section.get("allowed_command_prefixes", []),
+                "blocked_commands": agent_cfg_section.get("blocked_commands", []),
+            }
+            with spinner("Agent implementing modified plan"):
+                result = generate_changes_with_agent(
+                    requirements_with_plan,
+                    str(clone_path),
+                    llm_config=ai_cfg,
+                    reference_pr_content=reference_pr_content,
+                    verbose=ai_cfg.get("verbose", False),
+                    testing_strategy=testing_strategy,
+                    build_tool=build_tool,
+                    consciousness_context=consciousness_str or "",
+                    framework_context=framework_context,
+                    agent_config=agent_config_full,
+                    config=config,
+                    repo_url=repo_url,
+                )
+            if result.success:
+                modified = result.files_changed
+                log_success(f"Agent completed: {result.summary}")
+            else:
+                log_error(f"Agent did not complete: {result.summary}")
+                return 1
+        else:
+            # Approve: apply all changes
+            with spinner("Applying approved changes"):
+                modified = apply_plan(Path(clone_path), plan_result.plan)
+            log_success(f"Applied changes to {len(modified)} file(s)")
+
+            # Optionally run tests after applying
+            if run_tests_enabled and not args.dry_run:
+                ptype = detect_project_type(str(clone_path))
+                with step("Running tests", f"{ptype}"):
+                    exit_code, stdout, stderr = run_tests(str(clone_path), ptype, timeout=test_timeout)
+                if exit_code == 0:
+                    log_success("Tests passed")
+                else:
+                    log_warning(f"Tests failed (exit {exit_code})")
+                    log_info((stdout + "\n" + stderr)[:800])
+
+    elif use_agent:
         # ---------------------------------------------------------------
         # NEW AGENT MODE: agent writes files, runs tests, fixes errors
         # inside a single agentic loop — no external retry needed.
@@ -350,8 +506,11 @@ def main() -> int:
             if consciousness_str:
                 context += f"\n\n{consciousness_str}"
 
-    if args.dry_run:
-        log_success("Dry run complete. No commit, push, or PR.")
+    if args.dry_run or using_local_repo:
+        if using_local_repo:
+            log_success(f"Local repo mode complete. Changes applied to {clone_path}")
+        else:
+            log_success("Dry run complete. No commit, push, or PR.")
         return 0
 
     issue_ref = os.environ.get("AUTO_PR_ISSUE", "")
