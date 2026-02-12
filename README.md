@@ -860,6 +860,103 @@ The tool automatically builds and persists a project model on load (structure, c
 - **Cache:** Rebuilds when `max_age_hours` exceeded or `--rebuild-consciousness` is used
 - **Config:** `[consciousness]` section in config.ini (`backend`, `cache_dir`, `max_age_hours`)
 
+## Scaling to Multiple Repos & Large Teams
+
+The current system is a **single-run CLI** — one invocation, one repo, one changeset. Below is the plan for scaling across concurrent requests, multi-repo / multi-team isolation, and shared infrastructure.
+
+### 1. Request Orchestration
+
+**Current bottleneck:** `main.py` is a blocking process. One request = one process = one repo at a time.
+
+**Path forward:**
+
+| Layer | Role |
+|-------|------|
+| **API gateway** | FastAPI/Flask service accepting requests (repo, changes, mode, config) |
+| **Job queue** | Celery + Redis, or AWS SQS, to decouple submission from execution |
+| **Workers** | Pool of workers each running the existing `main.py` logic as a function call |
+| **Status API** | Poll job status, stream logs, fetch results (PR URL, AskResult, trace) |
+
+The existing code is already mostly functional (not stateful singletons), so wrapping `generate_changes_with_agent()` / `generate_plan_with_agent()` / `generate_answer_with_agent()` in a Celery task is straightforward.
+
+```
+Team member → API → Queue → Worker pool → (clone, agent loop, PR) → callback/webhook
+```
+
+### 2. Multi-Repo / Multi-Team Isolation
+
+**Current state:** config.ini is a single flat file. Knowledge, GCC, and traces use `repo_id` (SHA-256 hash) for isolation — this already works per-repo.
+
+**What's needed:**
+
+- **Config per request** — Move from file-based config to request payloads. Each job carries its own `repo_url`, `provider`, `model`, credentials (via vault/secrets manager, not plaintext).
+- **Workspace isolation** — Each worker clones into an ephemeral directory (`/tmp/worker-{job_id}/`), cleaned up after PR creation. The existing `work_dir` + `cleanup_after_pr` config supports this.
+- **Credential management** — Replace env vars with a secrets manager (Vault, AWS Secrets Manager). Map `team → repo → credentials`.
+- **Repo knowledge files** stay in-repo (`.code-autonomy/`, `AGENT.md`) — already team-managed via version control.
+
+### 3. Shared State & Knowledge
+
+| Component | Current | Scaled |
+|-----------|---------|--------|
+| **Knowledge** | File per repo on local disk | OpenSearch backend (already built). Shared cluster, one index per team/org. |
+| **GCC state** | Local JSON per repo | S3 or shared filesystem. Add locking for concurrent runs against same repo. |
+| **Traces** | Local JSON files | Ship to OpenSearch/Datadog/S3. Already structured — just needs an exporter. |
+| **Consciousness** | Local file cache | Shared cache (S3 or Redis). Rebuild is expensive; share across workers hitting the same repo. |
+
+### 4. LLM Resource Management
+
+The resiliency layer (circuit breaker + rate limiter) is per-process today. At scale:
+
+- **Shared rate limiter** — Redis-backed token bucket so all workers respect org-wide LLM rate limits.
+- **Provider rotation** — If Azure hits quota, fall back to Bedrock or direct Anthropic. The multi-provider LLM client already supports this; add a routing layer.
+- **Cost attribution** — Tag each LLM call with `team_id`, `repo_id`, `job_id` for chargeback. Tracing spans already carry `repo_id` and `model`.
+
+### 5. Target Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│  Teams (Slack bot, CI/CD trigger, Web UI, CLI)  │
+└──────────────────────┬──────────────────────────┘
+                       │ POST /jobs
+                       ▼
+              ┌─────────────────┐
+              │   API Gateway   │  (FastAPI + auth)
+              │   + Job Store   │  (Postgres)
+              └────────┬────────┘
+                       │ enqueue
+                       ▼
+              ┌─────────────────┐
+              │   Job Queue     │  (Redis / SQS)
+              └────────┬────────┘
+                       │ dequeue
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+     ┌─────────┐ ┌─────────┐ ┌─────────┐
+     │ Worker  │ │ Worker  │ │ Worker  │  (K8s pods / ECS tasks)
+     │ (agent) │ │ (plan)  │ │ (ask)   │
+     └────┬────┘ └────┬────┘ └────┬────┘
+          │            │            │
+          ▼            ▼            ▼
+  ┌──────────────────────────────────────┐
+  │  Shared Services                     │
+  │  - Secrets Manager (credentials)     │
+  │  - OpenSearch (knowledge + traces)   │
+  │  - S3 (GCC state, consciousness)    │
+  │  - Redis (rate limiter, cache)       │
+  │  - Git platform APIs (GitHub/BB)     │
+  └──────────────────────────────────────┘
+```
+
+### 6. Incremental Rollout
+
+1. **Wrap in API + queue** — Celery task around existing functions. Immediate concurrency.
+2. **Switch knowledge/traces to OpenSearch** — Already supported, just flip config.
+3. **Ephemeral workers on K8s/ECS** — Each job = a container. Clone, run, clean up.
+4. **Shared rate limiter** — Redis-backed, replacing per-process token bucket.
+5. **Web UI / Slack bot** — Submit jobs, track status, review plans.
+
+The codebase is already modular — `repo_id`-based isolation, pluggable storage backends, multi-provider LLM, and structured tracing are all in place. The main work is adding the orchestration layer on top and swapping local storage for shared backends.
+
 ## Limitations (POC)
 
 - Single commit per run
