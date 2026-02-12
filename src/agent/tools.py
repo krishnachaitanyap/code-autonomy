@@ -417,6 +417,51 @@ _READ_MEMORY_SCHEMA = _tool("read_memory",
     "Read all notes from working memory and any prior knowledge from previous runs.",
     {})
 
+# --- GCC (Git Context Controller) tool schemas ---
+
+_GCC_COMMIT_SCHEMA = _tool("gcc_commit",
+    "Checkpoint your current progress. Creates a versioned snapshot with a summary "
+    "of what was accomplished. Optionally mark as a milestone (e.g. 'tests passing', "
+    "'initial exploration done').",
+    {"summary": {"type": "string", "description": "Description of what was accomplished"},
+     "milestone": {"type": "string", "description": "Optional milestone label (e.g. 'tests passing')"}},
+    required=["summary"])
+
+_GCC_BRANCH_SCHEMA = _tool("gcc_branch",
+    "Create a new reasoning branch to explore an alternative approach. "
+    "Branches are context-level (not code-level) — they create isolated note-spaces "
+    "for exploratory reasoning without affecting working memory or conversation history.",
+    {"name": {"type": "string", "description": "Branch name (e.g. 'alt-approach', 'refactor-idea')"},
+     "purpose": {"type": "string", "description": "Why this branch is being created"}},
+    required=["name", "purpose"])
+
+_GCC_MERGE_SCHEMA = _tool("gcc_merge",
+    "Merge a reasoning branch back into main, consolidating findings. "
+    "Creates an auto-commit recording the merge.",
+    {"branch_name": {"type": "string", "description": "Name of the branch to merge"}},
+    required=["branch_name"])
+
+_GCC_CONTEXT_SCHEMA = _tool("gcc_context",
+    "Retrieve stored context at various levels of detail. "
+    "Scopes: 'status' (short summary), 'main' (synthesized context), "
+    "'commits' (full commit log), 'branch' (specific branch details), 'all' (everything).",
+    {"scope": {"type": "string", "enum": ["status", "main", "commits", "branch", "all"],
+               "description": "Level of detail to retrieve (default: status)"},
+     "branch": {"type": "string", "description": "Branch name (required when scope='branch')"}})
+
+GCC_TOOLS = [_GCC_COMMIT_SCHEMA, _GCC_BRANCH_SCHEMA, _GCC_MERGE_SCHEMA, _GCC_CONTEXT_SCHEMA]
+
+
+def _gcc_enabled(agent_config: Optional[dict] = None) -> bool:
+    """Check if GCC is enabled in agent config."""
+    if agent_config is None:
+        return False
+    val = agent_config.get("gcc_enabled", False)
+    if isinstance(val, str):
+        return val.lower() in ("true", "1", "yes")
+    return bool(val)
+
+
 # ===================================================================
 # Tool list builders
 # ===================================================================
@@ -441,6 +486,8 @@ def build_agent_tools(agent_config: Optional[dict] = None) -> list[dict]:
     tools.extend(EXECUTION_TOOLS)
     tools.extend(MEMORY_TOOLS)
     tools.extend(COMPLETION_TOOLS)
+    if _gcc_enabled(agent_config):
+        tools.extend(GCC_TOOLS)
     return tools
 
 
@@ -451,6 +498,8 @@ def build_plan_tools(agent_config: Optional[dict] = None) -> list[dict]:
     tools.extend(PLAN_TOOLS)
     tools.extend(MEMORY_TOOLS)
     tools.extend(COMPLETION_TOOLS)
+    if _gcc_enabled(agent_config):
+        tools.extend(GCC_TOOLS)
     return tools
 
 
@@ -460,6 +509,8 @@ def build_ask_tools(agent_config: Optional[dict] = None) -> list[dict]:
     tools.extend(READ_TOOLS)
     tools.extend(MEMORY_TOOLS)
     tools.extend(ASK_COMPLETION_TOOLS)
+    if _gcc_enabled(agent_config):
+        tools.extend([_GCC_CONTEXT_SCHEMA, _GCC_COMMIT_SCHEMA])
     return tools
 
 
@@ -474,14 +525,49 @@ def execute_tool(
     changes_tracker: Optional[set] = None,
     agent_config: Optional[dict] = None,
     working_memory: Optional[WorkingMemory] = None,
+    gcc_controller: Optional["GCCController"] = None,
 ) -> str:
     """Execute a tool and return the result string.
 
     *changes_tracker*: if provided, paths of written/edited/deleted files
     are added to this set.
     *working_memory*: if provided, used by memory tools.
+    *gcc_controller*: if provided, used by gcc_* tools.
     """
     repo = Path(repo_root)
+
+    # --- GCC tools ---
+    if tool_name == "gcc_commit":
+        if gcc_controller is None:
+            return "Error: GCC not enabled"
+        wm_snapshot = working_memory.to_dict() if working_memory and not working_memory.is_empty() else {}
+        return gcc_controller.commit(
+            summary=args.get("summary", ""),
+            working_memory=wm_snapshot,
+            milestone=args.get("milestone", ""),
+        )
+    if tool_name == "gcc_branch":
+        if gcc_controller is None:
+            return "Error: GCC not enabled"
+        return gcc_controller.branch(
+            name=args.get("name", ""),
+            purpose=args.get("purpose", ""),
+        )
+    if tool_name == "gcc_merge":
+        if gcc_controller is None:
+            return "Error: GCC not enabled"
+        wm_snapshot = working_memory.to_dict() if working_memory and not working_memory.is_empty() else {}
+        return gcc_controller.merge(
+            branch_name=args.get("branch_name", ""),
+            working_memory=wm_snapshot,
+        )
+    if tool_name == "gcc_context":
+        if gcc_controller is None:
+            return "Error: GCC not enabled"
+        return gcc_controller.context(
+            scope=args.get("scope", "status"),
+            branch=args.get("branch", ""),
+        )
 
     # --- Memory tools ---
     if tool_name == "update_memory":
@@ -543,11 +629,12 @@ def execute_plan_tool(
     args: dict,
     change_plan: "ChangePlan",
     working_memory: Optional[WorkingMemory] = None,
+    gcc_controller: Optional["GCCController"] = None,
 ) -> str:
     """Execute a tool in plan mode.
 
     - propose_change: validates and adds to the ChangePlan
-    - read/memory/completion tools: delegated to execute_tool
+    - read/memory/completion/gcc tools: delegated to execute_tool
     - write/exec tools: blocked with a helpful message
     """
     from src.agent.plan import ChangePlan, ChangeAction, ProposedChange
@@ -639,15 +726,15 @@ def execute_plan_tool(
 
             return "Error: modify action requires either content (full replacement) or old_string+new_string (surgical edit)"
 
-    # --- Delegate read/memory/completion tools to existing dispatcher ---
-    return execute_tool(repo, tool_name, args, working_memory=working_memory)
+    # --- Delegate read/memory/completion/gcc tools to existing dispatcher ---
+    return execute_tool(repo, tool_name, args, working_memory=working_memory, gcc_controller=gcc_controller)
 
 
 # ===================================================================
 # Ask-mode tool dispatcher
 # ===================================================================
 
-_BLOCKED_IN_ASK = {"write_file", "edit_file", "delete_file", "run_command", "propose_change"}
+_BLOCKED_IN_ASK = {"write_file", "edit_file", "delete_file", "run_command", "propose_change", "gcc_branch", "gcc_merge"}
 
 
 def execute_ask_tool(
@@ -655,8 +742,9 @@ def execute_ask_tool(
     tool_name: str,
     args: dict,
     working_memory: Optional[WorkingMemory] = None,
+    gcc_controller: Optional["GCCController"] = None,
 ) -> str:
     """Execute a tool in ask mode (read-only, no writes/exec/propose)."""
     if tool_name in _BLOCKED_IN_ASK:
         return f"Error: {tool_name} is not available in ask mode. Use read tools to explore the codebase."
-    return execute_tool(repo_root, tool_name, args, working_memory=working_memory)
+    return execute_tool(repo_root, tool_name, args, working_memory=working_memory, gcc_controller=gcc_controller)

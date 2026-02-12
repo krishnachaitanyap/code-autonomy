@@ -34,6 +34,7 @@ SPAN_TOOL_CALL = "tool_call"
 SPAN_CONTEXT_MGMT = "context_mgmt"
 SPAN_STUCK_DETECT = "stuck_detection"
 SPAN_SESSION = "session"
+SPAN_GCC_COMMAND = "gcc_command"
 
 
 @dataclass
@@ -278,6 +279,7 @@ class TraceCollector:
             "total_spans": len(self._spans),
             "llm_calls": 0,
             "tool_calls": 0,
+            "gcc_commands": 0,
             "errors": 0,
             "total_llm_duration_ms": 0.0,
             "total_tool_duration_ms": 0.0,
@@ -291,6 +293,9 @@ class TraceCollector:
                 metrics["llm_calls"] += 1
                 metrics["total_llm_duration_ms"] += span.duration_ms
                 metrics["total_tokens_est"] += span.metadata.get("tokens_est", 0)
+            elif span.span_type == SPAN_GCC_COMMAND:
+                metrics["gcc_commands"] += 1
+                metrics["total_tool_duration_ms"] += span.duration_ms
             elif span.span_type == SPAN_TOOL_CALL:
                 metrics["tool_calls"] += 1
                 metrics["total_tool_duration_ms"] += span.duration_ms

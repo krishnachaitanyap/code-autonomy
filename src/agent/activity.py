@@ -164,6 +164,8 @@ def summarize_tool_result(result: str, tool_name: str) -> str:
         if "Added" in result or "proposed" in result.lower():
             return "proposed"
         return result[:40] + ("..." if len(result) > 40 else "")
+    if tool_name.startswith("gcc_"):
+        return result[:60] + ("..." if len(result) > 60 else "")
     return result[:50] + ("..." if len(result) > 50 else "")
 
 
@@ -202,6 +204,14 @@ def _format_tool_arg_hint(tool_name: str, args: dict) -> str:
         path = args.get("path", "")
         action = args.get("action", "")
         return f" {action} {path}" if path else ""
+    if tool_name == "gcc_commit":
+        return f" {args.get('summary', '')[:40]}"
+    if tool_name == "gcc_branch":
+        return f" {args.get('name', '')}"
+    if tool_name == "gcc_merge":
+        return f" {args.get('branch_name', '')}"
+    if tool_name == "gcc_context":
+        return f" {args.get('scope', 'status')}"
     return ""
 
 

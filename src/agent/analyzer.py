@@ -13,6 +13,7 @@ from typing import Optional
 
 from src.agent.tools import build_agent_tools, build_plan_tools, build_ask_tools, execute_tool, execute_plan_tool, execute_ask_tool, AGENT_TOOLS
 from src.agent.knowledge import WorkingMemory, load_knowledge, save_knowledge, compute_repo_id
+from src.agent.gcc import GCCController
 from src.agent.ai_utils import parse_ai_changes
 from src.agent.activity import log_agent_activity, summarize_tool_result
 from src.agent.tracing import (
@@ -24,6 +25,7 @@ from src.agent.tracing import (
     _summarize_output,
     SPAN_LLM_CALL,
     SPAN_TOOL_CALL,
+    SPAN_GCC_COMMAND,
     SPAN_CONTEXT_MGMT,
     SPAN_STUCK_DETECT,
     SPAN_SESSION,
@@ -193,6 +195,28 @@ propose changes.
 - Be specific: reference file paths, line numbers, function names, and code snippets in your answer."""
 
 
+_GCC_PROMPT_SECTION = """
+
+## Context management tools (Git Context Controller)
+- gcc_commit(summary, milestone?): Checkpoint your progress. Creates a versioned snapshot with a summary. Optionally mark as a milestone.
+- gcc_branch(name, purpose): Start exploring an alternative approach in an isolated reasoning branch.
+- gcc_merge(branch_name): Merge a reasoning branch back into main, consolidating findings.
+- gcc_context(scope?, branch?): Retrieve stored context. Scopes: status, main, commits, branch, all.
+
+### When to use GCC tools
+- gcc_commit after: initial exploration, completing implementation, tests passing, significant progress
+- gcc_branch when: trying an alternative approach, need to explore without losing current context, stuck and want to experiment
+- gcc_merge when: branch exploration succeeded and findings should be consolidated
+- gcc_context when: need to recall what you've done, resuming work, want to review milestones"""
+
+
+_GCC_ASK_PROMPT_SECTION = """
+
+## Context management tools (Git Context Controller)
+- gcc_commit(summary, milestone?): Checkpoint exploration progress.
+- gcc_context(scope?, branch?): Retrieve stored context. Scopes: status, main, commits, branch, all."""
+
+
 # ---------------------------------------------------------------------------
 # Shared context builder
 # ---------------------------------------------------------------------------
@@ -313,6 +337,14 @@ def generate_changes_with_agent(
     # Working memory (survives context compression)
     working_memory = WorkingMemory()
 
+    # --- GCC (opt-in structured versioned memory) ---
+    gcc_controller: Optional[GCCController] = None
+    if agent_cfg.get("gcc_enabled", False):
+        gcc_controller = GCCController(
+            repo_id=compute_repo_id(repo_path, repo_url),
+            storage_dir=agent_cfg.get("gcc_storage_dir", ""),
+        )
+
     # --- Execution tracing (Agent Lightning-inspired) ---
     tracing_enabled = is_tracing_enabled(config)
     collector: Optional[TraceCollector] = None
@@ -342,8 +374,12 @@ def generate_changes_with_agent(
         repo_url=repo_url,
     )
 
+    system_prompt = _SYSTEM_PROMPT
+    if gcc_controller:
+        system_prompt += _GCC_PROMPT_SECTION
+
     messages: list[dict] = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
     ]
 
@@ -491,8 +527,9 @@ def generate_changes_with_agent(
             # --- Start tool span ---
             tool_span_id = None
             if collector:
+                span_type = SPAN_GCC_COMMAND if name.startswith("gcc_") else SPAN_TOOL_CALL
                 tool_span_id = collector.start_span(
-                    SPAN_TOOL_CALL, name, turn,
+                    span_type, name, turn,
                     inputs=_sanitize_tool_args(name, args),
                 )
 
@@ -511,6 +548,12 @@ def generate_changes_with_agent(
                         )
                 except Exception:
                     pass
+                # Save GCC state (non-fatal)
+                try:
+                    if gcc_controller:
+                        gcc_controller.save()
+                except Exception:
+                    pass
                 if collector and tool_span_id:
                     collector.end_span(
                         tool_span_id,
@@ -527,6 +570,7 @@ def generate_changes_with_agent(
                     changes_tracker=changes_tracker,
                     agent_config=agent_cfg,
                     working_memory=working_memory,
+                    gcc_controller=gcc_controller,
                 )
                 # --- End tool span with reward ---
                 if collector and tool_span_id:
@@ -542,6 +586,8 @@ def generate_changes_with_agent(
                     elif name in ("read_file", "grep", "list_dir", "find_files"):
                         reward = 0.5
                     elif name == "update_memory":
+                        reward = 0.5
+                    elif name in ("gcc_commit", "gcc_branch", "gcc_merge", "gcc_context"):
                         reward = 0.5
 
                     collector.end_span(
@@ -580,8 +626,14 @@ def generate_changes_with_agent(
             # --- Working memory protection: inject into system prompt ---
             if name == "update_memory" and not working_memory.is_empty():
                 wm_block = working_memory.to_message_block()
-                base_prompt = _SYSTEM_PROMPT
-                messages[0] = {"role": "system", "content": base_prompt + "\n" + wm_block}
+                gcc_block = gcc_controller.to_message_block() if gcc_controller else ""
+                messages[0] = {"role": "system", "content": system_prompt + "\n" + wm_block + gcc_block}
+
+            # --- GCC context injection after gcc_* tool calls ---
+            if name.startswith("gcc_") and gcc_controller:
+                gcc_block = gcc_controller.to_message_block()
+                wm_block = working_memory.to_message_block() if not working_memory.is_empty() else ""
+                messages[0] = {"role": "system", "content": system_prompt + "\n" + wm_block + gcc_block}
 
             # --- Stuck detection (same error 3 times) ---
             if name == "run_command" and "[exit code:" in result and "exit code: 0]" not in result:
@@ -687,6 +739,14 @@ def generate_plan_with_agent(
     working_memory = WorkingMemory()
     change_plan = ChangePlan()
 
+    # --- GCC (opt-in structured versioned memory) ---
+    gcc_controller: Optional[GCCController] = None
+    if agent_cfg.get("gcc_enabled", False):
+        gcc_controller = GCCController(
+            repo_id=compute_repo_id(repo_path, repo_url),
+            storage_dir=agent_cfg.get("gcc_storage_dir", ""),
+        )
+
     # --- Execution tracing ---
     tracing_enabled = is_tracing_enabled(config)
     collector: Optional[TraceCollector] = None
@@ -721,8 +781,12 @@ def generate_plan_with_agent(
         ),
     )
 
+    system_prompt = _PLAN_SYSTEM_PROMPT
+    if gcc_controller:
+        system_prompt += _GCC_PROMPT_SECTION
+
     messages: list[dict] = [
-        {"role": "system", "content": _PLAN_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
     ]
 
@@ -837,14 +901,21 @@ def generate_plan_with_agent(
 
             tool_span_id = None
             if collector:
+                span_type = SPAN_GCC_COMMAND if name.startswith("gcc_") else SPAN_TOOL_CALL
                 tool_span_id = collector.start_span(
-                    SPAN_TOOL_CALL, name, turn,
+                    span_type, name, turn,
                     inputs=_sanitize_tool_args(name, args),
                 )
 
             if name == "task_complete":
                 task_complete_data = args
                 result = f"Plan complete. Summary: {args.get('summary', '')}"
+                # Save GCC state (non-fatal)
+                try:
+                    if gcc_controller:
+                        gcc_controller.save()
+                except Exception:
+                    pass
                 if collector and tool_span_id:
                     collector.end_span(
                         tool_span_id,
@@ -860,6 +931,7 @@ def generate_plan_with_agent(
                     repo_root, name, args,
                     change_plan=change_plan,
                     working_memory=working_memory,
+                    gcc_controller=gcc_controller,
                 )
                 if agent_cfg.get("show_activity", True):
                     log_agent_activity(turn, name, args, summarize_tool_result(result, name))
@@ -898,7 +970,14 @@ def generate_plan_with_agent(
             # Working memory protection
             if name == "update_memory" and not working_memory.is_empty():
                 wm_block = working_memory.to_message_block()
-                messages[0] = {"role": "system", "content": _PLAN_SYSTEM_PROMPT + "\n" + wm_block}
+                gcc_block = gcc_controller.to_message_block() if gcc_controller else ""
+                messages[0] = {"role": "system", "content": system_prompt + "\n" + wm_block + gcc_block}
+
+            # GCC context injection after gcc_* tool calls
+            if name.startswith("gcc_") and gcc_controller:
+                gcc_block = gcc_controller.to_message_block()
+                wm_block = working_memory.to_message_block() if not working_memory.is_empty() else ""
+                messages[0] = {"role": "system", "content": system_prompt + "\n" + wm_block + gcc_block}
 
         if task_complete_data:
             break
@@ -968,6 +1047,14 @@ def generate_answer_with_agent(
     working_memory = WorkingMemory()
     sources_consulted: set[str] = set()
 
+    # --- GCC (opt-in structured versioned memory) ---
+    gcc_controller: Optional[GCCController] = None
+    if agent_cfg.get("gcc_enabled", False):
+        gcc_controller = GCCController(
+            repo_id=compute_repo_id(repo_path, repo_url),
+            storage_dir=agent_cfg.get("gcc_storage_dir", ""),
+        )
+
     # --- Execution tracing ---
     tracing_enabled = is_tracing_enabled(config)
     collector: Optional[TraceCollector] = None
@@ -1003,8 +1090,12 @@ def generate_answer_with_agent(
         "to answer the question. When you have a complete answer, call task_complete."
     )
 
+    system_prompt = _ASK_SYSTEM_PROMPT
+    if gcc_controller:
+        system_prompt += _GCC_ASK_PROMPT_SECTION
+
     messages: list[dict] = [
-        {"role": "system", "content": _ASK_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
     ]
 
@@ -1115,14 +1206,21 @@ def generate_answer_with_agent(
 
             tool_span_id = None
             if collector:
+                span_type = SPAN_GCC_COMMAND if name.startswith("gcc_") else SPAN_TOOL_CALL
                 tool_span_id = collector.start_span(
-                    SPAN_TOOL_CALL, name, turn,
+                    span_type, name, turn,
                     inputs=_sanitize_tool_args(name, args),
                 )
 
             if name == "task_complete":
                 task_complete_data = args
                 result = f"Answer complete. Summary: {args.get('summary', '')}"
+                # Save GCC state (non-fatal)
+                try:
+                    if gcc_controller:
+                        gcc_controller.save()
+                except Exception:
+                    pass
                 if collector and tool_span_id:
                     collector.end_span(
                         tool_span_id,
@@ -1137,6 +1235,7 @@ def generate_answer_with_agent(
                 result = execute_ask_tool(
                     repo_root, name, args,
                     working_memory=working_memory,
+                    gcc_controller=gcc_controller,
                 )
                 # Track sources from successful read_file calls
                 if name == "read_file" and not result.startswith("Error:"):
@@ -1178,7 +1277,14 @@ def generate_answer_with_agent(
             # Working memory protection
             if name == "update_memory" and not working_memory.is_empty():
                 wm_block = working_memory.to_message_block()
-                messages[0] = {"role": "system", "content": _ASK_SYSTEM_PROMPT + "\n" + wm_block}
+                gcc_block = gcc_controller.to_message_block() if gcc_controller else ""
+                messages[0] = {"role": "system", "content": system_prompt + "\n" + wm_block + gcc_block}
+
+            # GCC context injection after gcc_* tool calls
+            if name.startswith("gcc_") and gcc_controller:
+                gcc_block = gcc_controller.to_message_block()
+                wm_block = working_memory.to_message_block() if not working_memory.is_empty() else ""
+                messages[0] = {"role": "system", "content": system_prompt + "\n" + wm_block + gcc_block}
 
         if task_complete_data:
             break
