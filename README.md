@@ -6,8 +6,16 @@ Autonomous code generation and feature building that integrates with **GitHub** 
 - **Analyze** codebase (Python, Java) with optional grep search
 - **Generate** changes based on requirements (using AI)
 - **Agent mode** (Claude-Code-like): AI iteratively explores, edits, tests, and fixes code in a single agentic loop
+- **Plan mode**: AI proposes diffs for human review before applying changes
+- **Ask mode**: read-only Q&A exploration of a codebase
 - **Run tests** (pytest/unittest for Python, Maven/Gradle for Java)
 - **Error analysis → regenerate** when tests fail (up to N retries)
+- **Persistent knowledge** across runs (working memory + cross-run knowledge entries)
+- **Git Context Controller (GCC)**: structured versioned memory with commit/branch/merge semantics
+- **Execution tracing**: span-level telemetry with reward signals (RL-ready)
+- **Resiliency**: circuit breaker and token-bucket rate limiter for LLM calls
+- **Pre-flight validation**: startup checks for config, credentials, and connectivity
+- **Repo knowledge files**: `.code-autonomy/`, `.code-autonomy.md`, or `AGENT.md` for project-specific agent instructions
 - Commit and push changes
 - Create a Pull Request
 
@@ -18,19 +26,27 @@ sequenceDiagram
     participant User
     participant Main as main.py
     participant Config
+    participant Validator as startup_validator
     participant Git
     participant Repo as Cloned Repo
     participant Consciousness
+    participant Knowledge as Knowledge Store
     participant AI as LLM (OpenAI / Anthropic / Gemini / Azure / Bedrock)
+    participant GCC as Git Context Controller
+    participant Tracer as Execution Tracer
     participant Tests
     participant PR as PR Platform
 
-    User->>Main: python main.py --agent
+    User->>Main: python main.py --agent / --plan / --ask
     Main->>Config: load config.ini, changes.txt
+    Main->>Validator: validate_startup (config, credentials, connectivity)
+    Validator-->>Main: ValidationResult (errors / warnings)
     Main->>Git: clone repo, checkout feature branch
     Main->>Repo: load_codebase_context
     Main->>Consciousness: build_or_load (structure, conventions, samples)
     Consciousness-->>Main: project context
+    Main->>Knowledge: load cross-run knowledge + repo knowledge files
+    Knowledge-->>Main: prior knowledge context
     opt Framework repo in changes.txt
         Main->>Git: clone framework repo
         Main->>Consciousness: build framework consciousness
@@ -40,14 +56,36 @@ sequenceDiagram
         Main->>PR: fetch reference PR diff
         PR-->>Main: template content
     end
-    alt Agent mode (--agent)
-        Main->>AI: generate_changes_with_agent (9 tools)
+    alt Ask mode (--ask / -q)
+        Main->>AI: generate_answer_with_agent (read-only tools)
+        loop EXPLORE → ANSWER
+            AI->>Repo: read_file / grep / list_dir / find_files
+            Repo-->>AI: file content, search results
+        end
+        AI->>AI: task_complete(answer, sources)
+    else Plan mode (--plan)
+        Main->>AI: generate_plan_with_agent (read tools + propose_change)
+        loop EXPLORE → PROPOSE
+            AI->>Repo: read_file / grep / list_dir / find_files
+            Repo-->>AI: file content, search results
+            AI->>Main: propose_change(path, action, description, content/edits)
+        end
+        Main->>User: render_plan (colored diffs + summary table)
+        User->>Main: approve / reject / modify
+        alt Approved
+            Main->>Repo: apply_plan (write changes to disk)
+        end
+    else Agent mode (--agent)
+        Main->>AI: generate_changes_with_agent (9+ tools)
         loop EXPLORE → IMPLEMENT → VERIFY → FIX → COMPLETE
             AI->>Repo: read_file / grep / list_dir / find_files
             Repo-->>AI: file content, search results
             AI->>Repo: write_file / edit_file / delete_file
             AI->>Tests: run_command (pytest / mvn test)
             Tests-->>AI: exit code, stdout, stderr
+            opt GCC enabled
+                AI->>GCC: gcc_commit / gcc_branch / gcc_merge / gcc_context
+            end
             alt Tests failed
                 AI->>Repo: read errors, edit_file to fix
                 AI->>Tests: run_command (re-run tests)
@@ -69,6 +107,8 @@ sequenceDiagram
             end
         end
     end
+    Main->>Knowledge: save working memory → persistent knowledge
+    Main->>Tracer: finalize trace (spans, metrics, reward signals)
     alt Not dry-run
         Main->>Git: commit, push
         Main->>PR: create_pull_request
@@ -140,6 +180,16 @@ python main.py --agent
 
 # Agent mode with dry run (no push/PR)
 python main.py --agent --dry-run
+
+# Plan mode: AI proposes diffs for review before applying
+python main.py --plan
+
+# Plan mode with auto-approve (skip interactive review)
+python main.py --plan --auto-approve
+
+# Ask mode: read-only Q&A about the codebase
+python main.py --ask "How does authentication work?"
+python main.py -q "Where are the API routes defined?"
 
 # Standard mode (one-shot generation + external test/retry loop)
 python main.py
@@ -257,14 +307,30 @@ For script execution and output verification, use `src.code.executor`:
 | testing | test_timeout | Test timeout in seconds (default: 120) |
 | testing | testing_strategy | Java testing strategy: bdd, contract, integration, unit, e2e, soap, auto (default: auto) |
 | **agent** | **max_turns** | **Max turns in the agent loop, each turn = one LLM call (default: 50)** |
+| **agent** | **plan_max_turns** | **Max turns in plan mode (default: 30)** |
+| **agent** | **ask_max_turns** | **Max turns in ask mode (default: 20)** |
 | **agent** | **smart_summarization** | **Summarize large tool outputs with a fast LLM call instead of blind truncation (default: true)** |
 | **agent** | **truncation_limit** | **Char limit per tool result before summarization kicks in (default: 30000)** |
+| **agent** | **show_activity** | **Show spinner and status messages during agent loop (default: true)** |
 | **agent** | **command_allowlist_only** | **Restrict shell commands to allowlist prefixes only (default: false)** |
 | **agent** | **allowed_command_prefixes** | **Comma-separated allowed commands when allowlist mode is on (default: pytest,python,mvn,gradle,npm,npx)** |
 | **agent** | **blocked_commands** | **Always-blocked dangerous commands (default: rm -rf /,mkfs,dd if=,shutdown,reboot)** |
+| **agent** | **gcc_enabled** | **Enable Git Context Controller for structured memory (default: false)** |
+| **agent** | **gcc_storage_dir** | **GCC state directory (default: ~/.code-autonomy/gcc)** |
+| **agent** | **circuit_breaker_threshold** | **Consecutive LLM failures before circuit opens (default: 5)** |
+| **agent** | **circuit_breaker_timeout** | **Seconds before half-open probe after circuit opens (default: 60)** |
+| **agent** | **rate_limit_max_tokens** | **Token bucket capacity for LLM call rate limiting (default: 10)** |
+| **agent** | **rate_limit_refill_rate** | **Tokens refilled per second (default: 1.0)** |
 | consciousness | backend | Storage: file or opensearch (default: file) |
 | consciousness | cache_dir | Cache path relative to work_dir (default: .consciousness) |
 | consciousness | max_age_hours | Rebuild cache when older (default: 24, 0 = always rebuild) |
+| **knowledge** | **backend** | **Storage backend: `file` or `opensearch` (default: file)** |
+| **knowledge** | **storage_dir** | **Persistent knowledge directory (default: ~/.code-autonomy/knowledge)** |
+| **knowledge** | **opensearch_url** | **OpenSearch endpoint URL (when backend = opensearch)** |
+| **knowledge** | **opensearch_index** | **OpenSearch index name (default: agent_knowledge)** |
+| **knowledge** | **aws_region** | **AWS region for OpenSearch SigV4 auth** |
+| **tracing** | **enabled** | **Enable execution tracing (default: true)** |
+| **tracing** | **storage_dir** | **Trace file directory (default: ~/.code-autonomy/traces)** |
 | context | use_pipeline | Use modular context pipeline (default: false) |
 | context | grep_enricher | Grep from requirements + config (default: true) |
 | context | grep_from_requirements | Extract # Grep: and identifiers from requirements |
@@ -389,7 +455,7 @@ code-autonomy/
 ├── changes.txt         # Requirements input
 ├── examples/changes/   # Example changes (bdd, contract, integration, java, soap, springboot)
 ├── scripts/            # Standalone tools (run_grep, run_tests)
-├── main.py             # Orchestrator
+├── main.py             # Orchestrator (agent / plan / ask / standard modes)
 ├── fork_and_run.py     # Fork repo → run main → create PR
 ├── requirements.txt
 ├── src/
@@ -398,11 +464,17 @@ code-autonomy/
 │   ├── config_loader.py     # Config loading and parsing
 │   ├── llm_client.py        # Multi-provider LLM with retry logic (OpenAI, Anthropic, Gemini, Azure, Bedrock)
 │   ├── azure_openai_client.py  # Azure OpenAI client (API key or S3 certificate auth)
+│   ├── resiliency.py        # Circuit breaker + token-bucket rate limiter
+│   ├── startup_validator.py # Pre-flight validation (config, credentials, connectivity)
 │   │
 │   ├── agent/               # Agent loop infrastructure
-│   │   ├── analyzer.py      # Agent loop: explore → edit → test → fix → complete
+│   │   ├── analyzer.py      # Agent loop: explore → edit → test → fix → complete (+ ask mode)
 │   │   ├── tools.py         # 9 agent tools (read, write, edit, delete, grep, list, find, run, complete)
+│   │   ├── plan.py          # Plan mode: propose_change → diff generation → apply_plan
+│   │   ├── plan_display.py  # Rich-based colored diff rendering + approval prompt
 │   │   ├── knowledge.py     # Persistent knowledge system (working memory, cross-run knowledge)
+│   │   ├── gcc.py           # Git Context Controller (commit, branch, merge, context)
+│   │   ├── tracing.py       # Execution tracing (spans, metrics, reward signals)
 │   │   ├── context.py       # Smart context management (token-aware, summarization, compression)
 │   │   ├── activity.py      # Spinners, status messages
 │   │   └── ai_utils.py      # AI response parsing utilities
@@ -480,6 +552,84 @@ With `--agent` or `use_agent = true`, the AI operates in an autonomous agentic l
 - Agent fixes errors **iteratively** — reads failures, edits code, re-runs tests
 - **Stuck detection** — if the same test failure appears 3 times, the agent is nudged to try a different approach
 
+### Plan Mode
+
+With `--plan` (or `-p`), the agent operates in a **two-phase** workflow: first it explores and proposes changes as diffs, then the user reviews and approves before anything is written to disk.
+
+**Phase 1 — Explore & Propose:**
+
+The agent has the same read tools as agent mode (`read_file`, `grep`, `list_dir`, `find_files`) plus one additional tool:
+
+| Tool | Description |
+|------|-------------|
+| `propose_change` | Propose a file change without writing to disk |
+
+`propose_change` signature:
+
+```
+propose_change(
+    path,                # File path (relative to repo root)
+    action,              # "create", "modify", or "delete"
+    description,         # What this change does
+    content?,            # Full file content (for create / full replacement)
+    old_string?,         # Existing text to find (for surgical edits)
+    new_string?          # Replacement text
+)
+```
+
+Multiple proposals accumulate into a `ChangePlan`. When the agent calls `task_complete`, Phase 1 ends.
+
+**Phase 2 — Review & Apply:**
+
+The CLI renders the plan as a summary table and colored unified diffs (using Rich when available):
+
+```
+┌──────────────────┬────────┬─────────────────────────┬───────┐
+│ File             │ Action │ Description             │ +/- lines │
+├──────────────────┼────────┼─────────────────────────┼───────┤
+│ src/utils.py     │ modify │ Add email validation    │ +12 -2 │
+│ tests/test_utils │ create │ Tests for validation    │ +45    │
+└──────────────────┴────────┴─────────────────────────┴───────┘
+```
+
+The user is prompted to **approve**, **reject**, or **modify** the plan. On approval, `apply_plan()` writes all changes to disk using the existing write/edit/delete tools.
+
+**CLI:**
+```bash
+python main.py --plan                  # Interactive review
+python main.py --plan --auto-approve   # Skip review, apply immediately
+```
+
+**Config:** `plan_max_turns` in `[agent]` (default: 30).
+
+### Ask Mode
+
+With `--ask` (or `-q`), the agent operates in **read-only** mode to answer questions about the codebase. No files are written, no commands are executed.
+
+**Available tools:**
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read file contents (optionally a line range) |
+| `grep` | Search for regex pattern across code files |
+| `list_dir` | List directory contents |
+| `find_files` | Find files by extension or glob pattern |
+| `update_memory` | Save notes to working memory |
+| `read_memory` | Read current working memory |
+| `task_complete` | Return the answer and list of source files |
+
+The agent explores the repo to build understanding, then calls `task_complete(answer, sources)` with a structured answer and the list of files consulted.
+
+**Return type:** `AskResult` with `answer`, `sources` (file paths), `summary`, `turns_used`, and `trace_id`.
+
+**CLI:**
+```bash
+python main.py --ask "How does authentication work?"
+python main.py -q "Where are the API routes defined?"
+```
+
+**Config:** `ask_max_turns` in `[agent]` (default: 20).
+
 ### Smart Context Management
 
 The agent uses intelligent context management (`src/agent/context.py`) to maximize the effectiveness of each LLM call:
@@ -503,6 +653,182 @@ The agent uses intelligent context management (`src/agent/context.py`) to maximi
 - Parses identifiers from `changes.txt` requirements (CamelCase, snake_case symbols)
 - Uses grep to find files containing those identifiers
 - Provides focused project overview (language, build tool, test framework, relevant files) instead of dumping raw code samples
+
+### Persistent Knowledge
+
+The knowledge system has two layers that keep the agent informed across context compressions and across separate runs.
+
+**Layer 1 — WorkingMemory** (in-session, survives compression):
+
+A key-value note store that lives in the agent process. The agent uses `update_memory(key, content)` to save notes and `read_memory()` to recall them. Working memory is injected into the system prompt on every turn, so it survives context window compression.
+
+**Layer 2 — KnowledgeEntry** (cross-run, persistent):
+
+At the end of each session (on `task_complete`), working memory is merged into a persistent `KnowledgeEntry` for the repository. On the next run against the same repo, prior knowledge is loaded into the initial prompt.
+
+A `KnowledgeEntry` stores:
+- `project_overview` — high-level project description
+- `key_patterns` — architecture and conventions
+- `file_notes` — per-file observations
+- `change_history` — last 20 changes (capped)
+- `notes` — arbitrary key-value data from working memory
+
+**Storage backends:**
+
+| Backend | Config | Location |
+|---------|--------|----------|
+| `file` (default) | `backend = file` | `~/.code-autonomy/knowledge/{repo_id}.json` |
+| `opensearch` | `backend = opensearch` | AWS OpenSearch index (SigV4 auth) |
+
+**Config:** `[knowledge]` section — `backend`, `storage_dir`, `opensearch_url`, `opensearch_index`, `aws_region`.
+
+**Memory tools available to the agent:**
+
+| Tool | Description |
+|------|-------------|
+| `update_memory(key, content)` | Save or update a note in working memory |
+| `read_memory()` | Read all current working memory entries |
+
+### Repo Knowledge Files
+
+You can teach the agent about your repository by placing knowledge files in the repo root. These are automatically discovered and injected into the agent's initial context.
+
+**Discovery priority** (first match wins):
+
+1. **`.code-autonomy/` directory** — All `*.md` files inside, loaded alphabetically. Use for per-topic or per-app knowledge (e.g., `architecture.md`, `conventions.md`).
+2. **`.code-autonomy.md`** — Single knowledge file in repo root.
+3. **`AGENT.md`** — Alternative single-file name.
+
+**Constraints:**
+- Max 10,000 characters total (excess is truncated with a warning)
+- Content is injected as-is into the agent's system prompt
+- Write in a style the AI can act on: conventions, patterns, file layout, do/don't rules
+
+**Example `.code-autonomy.md`:**
+
+```markdown
+# Project: acme-api
+
+## Architecture
+- FastAPI app in src/api/, SQLAlchemy models in src/models/
+- All endpoints return Pydantic response schemas
+
+## Conventions
+- Use snake_case for all Python identifiers
+- Tests live in tests/ mirroring src/ structure
+- Never import from src.internal directly
+
+## Important files
+- src/api/deps.py — dependency injection (DB session, auth)
+- src/core/config.py — settings via pydantic BaseSettings
+```
+
+### Git Context Controller (GCC)
+
+GCC provides **structured versioned memory** with Git-like semantics for the agent loop. It lets the agent checkpoint progress, branch for exploratory reasoning, and recall prior context — inspired by the [GCC research framework](https://arxiv.org/abs/2508.00031).
+
+**4 tools:**
+
+| Tool | Description |
+|------|-------------|
+| `gcc_commit(summary, milestone?)` | Create a versioned snapshot (auto-ID: `c0001`, `c0002`, ...). Optional milestone label. |
+| `gcc_branch(name, purpose)` | Create a reasoning branch (max 10 active). |
+| `gcc_merge(branch_name)` | Merge branch back into parent with auto-merge-commit. |
+| `gcc_context(scope?, branch?)` | Query context. Scopes: `status`, `main`, `commits`, `branch`, `all`. |
+
+**Persistence:** State is saved to `~/.code-autonomy/gcc/{repo_id}/state.json` after every operation. Max 50 commits, 10 branches.
+
+**Config:**
+
+```ini
+[agent]
+gcc_enabled = false          # Enable/disable GCC (default: false)
+gcc_storage_dir =            # Override storage dir (default: ~/.code-autonomy/gcc)
+```
+
+When enabled, `gcc_commit` and `gcc_context` tools are available in all modes (agent, plan, ask). `gcc_branch` and `gcc_merge` are available in agent and plan modes.
+
+### Execution Tracing
+
+Every agent session produces a structured trace with span-level telemetry, compatible with RL reward signal frameworks.
+
+**Span types:**
+
+| Span type | Tracks |
+|-----------|--------|
+| `llm_call` | Each LLM API call (model, tokens, latency) |
+| `tool_call` | Each tool invocation (name, inputs summary, success/error) |
+| `gcc_command` | GCC operations (commit, branch, merge, context) |
+| `context_mgmt` | Context compression and summarization events |
+| `stuck_detection` | When the agent is nudged for repeated failures |
+| `session` | Top-level session span (start to finish) |
+
+**Reward signals** (RL-ready):
+
+| Signal | Meaning |
+|--------|---------|
+| `+1.0` | Positive outcome (write/edit success, test pass, task_complete) |
+| `+0.5` | Neutral (read, memory update, GCC command) |
+| `-0.5` | Test failure |
+| `-1.0` | Error or stuck detection |
+
+**Storage:** Traces are saved to `~/.code-autonomy/traces/{trace_id}_{repo_id}.json`.
+
+**AgentTrace** includes: `trace_id`, `repo_id`, `model`, `success`, `turns_used`, `files_changed`, `summary`, all `spans`, and aggregate `metrics`.
+
+**Config:**
+
+```ini
+[tracing]
+enabled = true               # Enable/disable tracing (default: true)
+storage_dir =                 # Override storage dir (default: ~/.code-autonomy/traces)
+```
+
+### Resiliency
+
+LLM calls are protected by two resiliency mechanisms configured in the `[agent]` section.
+
+**Circuit breaker** — Prevents cascading failures from a down or misbehaving LLM endpoint:
+
+| State | Behavior |
+|-------|----------|
+| `CLOSED` | Normal operation. Failures are counted. |
+| `OPEN` | All calls rejected immediately (`CircuitOpenError`). Entered after `circuit_breaker_threshold` consecutive failures. |
+| `HALF_OPEN` | After `circuit_breaker_timeout` seconds, one probe call is allowed. Success → CLOSED, failure → OPEN. |
+
+**Token-bucket rate limiter** — Smooths burst traffic to the LLM API:
+
+- Bucket holds `rate_limit_max_tokens` tokens (default: 10)
+- Refills at `rate_limit_refill_rate` tokens/second (default: 1.0)
+- Each LLM call consumes one token; blocks until a token is available
+
+**Config:**
+
+```ini
+[agent]
+circuit_breaker_threshold = 5    # Consecutive failures before OPEN (default: 5)
+circuit_breaker_timeout = 60     # Seconds before HALF_OPEN probe (default: 60)
+rate_limit_max_tokens = 10       # Token bucket capacity (default: 10)
+rate_limit_refill_rate = 1.0     # Tokens per second (default: 1.0)
+```
+
+Both are thread-safe and use only the Python standard library.
+
+### Pre-flight Validation
+
+On startup, `validate_startup()` runs a series of checks before the agent loop begins. Fatal errors abort the run; warnings are logged but non-blocking.
+
+**Checks:**
+
+| Check | Fatal? | Description |
+|-------|--------|-------------|
+| API key / auth | Yes | Validates provider-specific credentials (API key, Azure endpoint, Bedrock account) |
+| Model configured | Yes | Ensures a model name is set |
+| Repo URL | Yes | Valid GitHub/Bitbucket URL (skipped with `--repo-path`) |
+| GitHub token | Yes | Required unless `--dry-run` or local repo |
+| Work directory | Yes | Parent path must be writable |
+| Git binary | Yes | `git` must be on PATH |
+| API reachability | No | Ping test to LLM endpoint (warning only) |
 
 ### Java Testing Strategies
 
