@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 
 _MAX_CHANGE_HISTORY = 20
 
+# Repo knowledge file conventions
+_REPO_KNOWLEDGE_DIR = ".code-autonomy"
+_REPO_KNOWLEDGE_FILE = ".code-autonomy.md"
+_REPO_KNOWLEDGE_ALT_FILE = "AGENT.md"
+_REPO_KNOWLEDGE_MAX_CHARS = 10_000
+
 
 # ===================================================================
 # 1a. WorkingMemory
@@ -341,3 +347,96 @@ def save_knowledge(
         store.save(entry)
     except Exception as exc:
         logger.warning("Could not save knowledge (non-fatal): %s", exc)
+
+
+# ===================================================================
+# 1f. Repo Knowledge Files (.code-autonomy.md / AGENT.md)
+# ===================================================================
+
+def load_repo_knowledge(repo_path: str) -> str:
+    """Load repo knowledge from convention files in the repository root.
+
+    Discovery order (first match wins):
+    1. ``.code-autonomy/`` directory — all ``*.md`` files, alphabetically
+    2. ``.code-autonomy.md`` — single file
+    3. ``AGENT.md`` — alternative single file
+
+    Returns a formatted markdown string ready for injection into context,
+    or ``""`` if nothing is found.
+    """
+    root = Path(repo_path)
+    if not root.is_dir():
+        return ""
+
+    # Priority 1: directory of .md files
+    knowledge_dir = root / _REPO_KNOWLEDGE_DIR
+    if knowledge_dir.is_dir():
+        result = _load_from_directory(knowledge_dir)
+        if result:
+            return _cap_length(result)
+
+    # Priority 2: .code-autonomy.md
+    knowledge_file = root / _REPO_KNOWLEDGE_FILE
+    if knowledge_file.is_file():
+        result = _load_single_file(knowledge_file)
+        if result:
+            return _cap_length(result)
+
+    # Priority 3: AGENT.md
+    alt_file = root / _REPO_KNOWLEDGE_ALT_FILE
+    if alt_file.is_file():
+        result = _load_single_file(alt_file)
+        if result:
+            return _cap_length(result)
+
+    return ""
+
+
+def _load_single_file(path: Path) -> str:
+    """Read a single repo knowledge file and wrap with a header."""
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception as exc:
+        logger.warning("Could not read repo knowledge file %s: %s", path, exc)
+        return ""
+
+    if not content:
+        return ""
+
+    return f"\n\n## Repo Knowledge ({path.name})\n\n{content}\n"
+
+
+def _load_from_directory(directory: Path) -> str:
+    """Concatenate all *.md files in a directory, alphabetically."""
+    md_files = sorted(directory.glob("*.md"))
+    if not md_files:
+        return ""
+
+    parts: list[str] = ["\n\n## Repo Knowledge"]
+    for md_file in md_files:
+        try:
+            content = md_file.read_text(encoding="utf-8", errors="replace").strip()
+        except Exception as exc:
+            logger.warning("Could not read %s: %s", md_file, exc)
+            continue
+        if not content:
+            continue
+        parts.append(f"\n### {md_file.name}\n\n{content}")
+
+    # Only return if we found actual content beyond the header
+    if len(parts) <= 1:
+        return ""
+
+    return "\n".join(parts) + "\n"
+
+
+def _cap_length(text: str) -> str:
+    """Truncate repo knowledge to prevent oversized context."""
+    if len(text) <= _REPO_KNOWLEDGE_MAX_CHARS:
+        return text
+    logger.warning(
+        "Repo knowledge truncated from %d to %d chars",
+        len(text),
+        _REPO_KNOWLEDGE_MAX_CHARS,
+    )
+    return text[:_REPO_KNOWLEDGE_MAX_CHARS] + "\n\n[... truncated — repo knowledge exceeded 10,000 chars]\n"

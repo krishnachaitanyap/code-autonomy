@@ -41,6 +41,7 @@ from src.code.analyzer import (
 from src.context import build_context
 from src.consciousness.core import build_or_load_consciousness
 from src.agent.analyzer import generate_changes_with_agent, generate_plan_with_agent, generate_answer_with_agent
+from src.agent.knowledge import load_repo_knowledge
 from src.code.executor import run_tests, detect_project_type, detect_build_tool
 from src.agent.activity import (
     header,
@@ -242,6 +243,13 @@ def main() -> int:
         if consciousness_str:
             context += f"\n\n{consciousness_str}"
             log_info("Included project consciousness (structure, conventions, samples)")
+
+        # Load repo knowledge files (.code-autonomy.md, AGENT.md, or .code-autonomy/ dir)
+        repo_knowledge = load_repo_knowledge(str(clone_path))
+        if repo_knowledge:
+            consciousness_str = (consciousness_str or "") + repo_knowledge
+            context += repo_knowledge
+            log_info(f"Included repo knowledge ({len(repo_knowledge)} chars)")
     log_info(f"Loaded {len(context)} chars of context")
 
     # Fetch reference PR if specified (CLI > config > changes file)
@@ -549,6 +557,9 @@ def main() -> int:
             consciousness_str = consciousness.to_context_string()
             if consciousness_str:
                 context += f"\n\n{consciousness_str}"
+            if repo_knowledge:
+                consciousness_str = (consciousness_str or "") + repo_knowledge
+                context += repo_knowledge
 
     if args.dry_run or using_local_repo:
         if using_local_repo:

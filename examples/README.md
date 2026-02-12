@@ -14,3 +14,12 @@ Example requirement files for different testing strategies and project types:
 | `changes_springboot.txt` | Spring Boot features |
 
 Usage: `python main.py --changes examples/changes/changes_bdd.txt`
+
+## Repo Knowledge
+
+| File | Use case |
+|------|----------|
+| `code-autonomy.example.md` | Sample `.code-autonomy.md` — copy to your repo root and customize |
+
+The agent auto-discovers this file to understand your repo's structure and conventions.
+See the file comments for all supported formats (single file, alternative name, directory mode).
