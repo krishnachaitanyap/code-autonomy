@@ -73,6 +73,11 @@ def _is_bedrock_provider(config: dict) -> bool:
     return (config.get("provider") or "openai").lower() in ("bedrock", "cdao")
 
 
+def _is_azure_provider(config: dict) -> bool:
+    """True when using Azure OpenAI (certificate or API key auth)."""
+    return (config.get("provider") or "openai").lower() == "azure"
+
+
 def _build_model_string(config: dict) -> str:
     """Build LiteLLM model string: provider/model or just model for OpenAI. For bedrock/cdao returns model ARN as-is."""
     provider = (config.get("provider") or "openai").lower()
@@ -152,6 +157,7 @@ def chat_completion(
     tools: Optional[list[dict]] = None,
     tool_choice: str = "auto",
     temperature: float = 0.2,
+    full_config: Optional[dict] = None,
 ) -> tuple[str, Any]:
     """
     Unified chat completion across OpenAI, Anthropic, Gemini.
@@ -171,8 +177,34 @@ def chat_completion(
         content: str from assistant message.
         message: raw message object (has .tool_calls for agent mode).
     """
+    # Resolve ai config (callers may pass full config or ai section)
+    ai_cfg = config.get("ai", config) if isinstance(config.get("ai"), dict) else config
+    # Azure OpenAI path (certificate from S3 or API key)
+    if _is_azure_provider(ai_cfg):
+        if _circuit_breaker is not None:
+            _circuit_breaker.ensure_closed()
+        if _rate_limiter is not None:
+            _rate_limiter.acquire(timeout=30.0)
+        try:
+            from src.azure_openai_client import chat_completion_azure
+
+            content, msg = chat_completion_azure(
+                messages=messages,
+                config={"ai": ai_cfg},
+                tools=tools,
+                tool_choice=tool_choice,
+                temperature=temperature,
+            )
+            if _circuit_breaker is not None:
+                _circuit_breaker.record_success()
+            return content, msg
+        except Exception as exc:
+            if _circuit_breaker is not None:
+                _circuit_breaker.record_failure()
+            raise
+
     # Bedrock/cdao path (org BYOA via cdao)
-    if _is_bedrock_provider(config):
+    if _is_bedrock_provider(ai_cfg):
         if tools:
             # Bedrock path does not support tools; use text-only
             pass
@@ -184,7 +216,7 @@ def chat_completion(
         for attempt in range(_MAX_RETRIES):
             try:
                 content, msg = _chat_completion_bedrock(
-                    messages, config, temperature=temperature, max_tokens=1024
+                    messages, ai_cfg, temperature=temperature, max_tokens=1024
                 )
                 if _circuit_breaker is not None:
                     _circuit_breaker.record_success()
@@ -207,15 +239,15 @@ def chat_completion(
             "Install with: pip install litellm"
         )
 
-    api_key = _resolve_api_key(config)
+    api_key = _resolve_api_key(ai_cfg)
     if not api_key:
         raise ValueError(
             "No API key found. Set api_key in config.ini or "
-            f"{DEFAULT_API_KEY_ENV.get(config.get('provider', 'openai'), 'OPENAI_API_KEY')} env var."
+            f"{DEFAULT_API_KEY_ENV.get(ai_cfg.get('provider', 'openai'), 'OPENAI_API_KEY')} env var."
         )
 
-    model = _build_model_string(config)
-    base_url = config.get("base_url", "").strip() or None
+    model = _build_model_string(ai_cfg)
+    base_url = ai_cfg.get("base_url", "").strip() or None
 
     kwargs: dict[str, Any] = {
         "model": model,

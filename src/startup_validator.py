@@ -49,11 +49,27 @@ def validate_startup(
 
     provider = (ai_cfg.get("provider") or "openai").lower()
     is_bedrock = provider in ("bedrock", "cdao")
+    is_azure = provider == "azure"
     api_key = ai_cfg.get("api_key", "")
     model = ai_cfg.get("model", "")
 
-    # 1. API key or Bedrock config present
-    if is_bedrock:
+    # 1. API key or Bedrock/Azure config present
+    if is_azure:
+        endpoint = (ai_cfg.get("endpoint") or "").strip()
+        deployment = (ai_cfg.get("deployment_name") or "").strip()
+        azure_api_key = (ai_cfg.get("api_key") or "").strip()
+        s3_bucket = (ai_cfg.get("s3_bucket_name") or "").strip()
+        cert_file = (ai_cfg.get("azure_cert_file_name") or "").strip()
+        has_cert_auth = all([s3_bucket, cert_file, ai_cfg.get("tenant_id"), ai_cfg.get("client_id")])
+        if not endpoint or not deployment:
+            result.errors.append(
+                "For provider=azure set endpoint and deployment_name in config.ini [ai] section."
+            )
+        if not azure_api_key and not has_cert_auth:
+            result.errors.append(
+                "For provider=azure set api_key in [ai] or certificate auth (tenant_id, client_id, s3_bucket_name, azure_cert_file_name)."
+            )
+    elif is_bedrock:
         try:
             import cdao  # noqa: F401
         except ImportError:
@@ -153,7 +169,7 @@ def validate_startup(
             result.warnings.append(
                 f"Bedrock/cdao ping failed (non-fatal): {e}"
             )
-    elif api_key and model:
+    elif not is_azure and api_key and model:
         try:
             import litellm
             from src.llm_client import _build_model_string, _resolve_api_key

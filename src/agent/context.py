@@ -85,6 +85,7 @@ def summarize_large_output(
     content: str,
     tool_name: str,
     llm_config: dict,
+    full_config: Optional[dict] = None,
 ) -> str:
     """Summarize a large tool result using a fast LLM call.
 
@@ -113,6 +114,7 @@ def summarize_large_output(
             messages=[{"role": "user", "content": prompt}],
             config=summary_config,
             temperature=0.0,
+            full_config=full_config,
         )
         return f"[Summarized from {len(content)} chars]\n{summary}"
     except Exception:
@@ -133,6 +135,7 @@ def manage_conversation_context(
     model: str,
     llm_config: dict,
     smart_summarization: bool = True,
+    full_config: Optional[dict] = None,
 ) -> list[dict]:
     """Compress conversation when approaching context limits.
 
@@ -160,7 +163,7 @@ def manage_conversation_context(
         content = msg.get("content", "") or ""
         if msg.get("role") == "tool" and len(content) > 2000:
             if smart_summarization:
-                summarized = summarize_large_output(content, "tool_result", llm_config)
+                summarized = summarize_large_output(content, "tool_result", llm_config, full_config=full_config)
             else:
                 summarized = content[:500] + f"\n...(compressed, was {len(content)} chars)"
             compressed_middle.append({**msg, "content": summarized})

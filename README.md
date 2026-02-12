@@ -21,7 +21,7 @@ sequenceDiagram
     participant Git
     participant Repo as Cloned Repo
     participant Consciousness
-    participant AI as LLM (OpenAI / Anthropic / Gemini)
+    participant AI as LLM (OpenAI / Anthropic / Gemini / Azure / Bedrock)
     participant Tests
     participant PR as PR Platform
 
@@ -229,11 +229,24 @@ For script execution and output verification, use `src.code.executor`:
 | repository | feature_branch | Optional; auto-generated if empty |
 | github_config | auth_token | Token; can use env vars instead |
 | github_config | use_env | Use `GITHUB_TOKEN` / `BITBUCKET_APP_PASSWORD` |
-| ai | provider | LLM provider: openai, anthropic, gemini (default: openai) |
-| ai | api_key | API key; or use api_key_env (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY) |
-| ai | api_key_env | Env var for API key (optional override) |
-| ai | model | Model (gpt-4o, claude-sonnet-4-5, gemini-1.5-pro, etc.) |
-| ai | base_url | Optional: custom endpoint (Azure, proxy) |
+| ai | provider | LLM provider: `openai`, `anthropic`, `gemini`, `azure`, `bedrock`, `cdao` (default: openai) |
+| ai | api_key | API key (or use env var — see api_key_env) |
+| ai | api_key_env | Override env var name for API key (default: auto per provider) |
+| ai | model | Model name or ARN (gpt-4o, claude-sonnet-4-5, gemini-1.5-pro, etc.) |
+| ai | base_url | Optional: custom endpoint URL |
+| ai | verbose | Log verbose LLM details (default: false) |
+| ai | endpoint | **Azure only:** Azure OpenAI endpoint URL |
+| ai | deployment_name | **Azure only:** Azure deployment name |
+| ai | api_version | **Azure only:** API version (default: 2024-02-15-preview) |
+| ai | tenant_id | **Azure only:** Tenant ID for certificate auth |
+| ai | client_id | **Azure only:** Client ID for certificate auth |
+| ai | scope | **Azure only:** OAuth scope (default: cognitiveservices) |
+| ai | s3_bucket_name | **Azure cert auth:** S3 bucket containing the certificate |
+| ai | azure_cert_file_name | **Azure cert auth:** Certificate file key in S3 |
+| ai | aws_account_number | **Bedrock/cdao only:** AWS account number |
+| ai | aws_region | **Bedrock/cdao only:** AWS region (default: us-east-1) |
+| ai | workspace_id | **Bedrock/cdao only:** Workspace ID |
+| ai | is_execution_role | **Bedrock/cdao only:** Use execution role (default: false) |
 | workflow | work_dir | Clone directory (default: ./workspace) |
 | workflow | cleanup_after_pr | Delete workspace after PR |
 | workflow | grep_patterns | Comma-separated patterns to search before AI |
@@ -280,17 +293,80 @@ Set `use_pipeline = true` in `[context]` to enable the modular pipeline:
 
 Optional deps: `pip install sentence-transformers` for similarity, `pip install javalang` for Java call graph.
 
-### Multi-provider LLM (OpenAI, Anthropic, Gemini)
+### Multi-provider LLM
 
-The LLM layer (`src/llm_client.py`) supports multiple providers via [LiteLLM](https://docs.litellm.ai/) with automatic retry (3 retries, exponential backoff) for transient errors (rate limits, timeouts, 5xx):
+The LLM layer (`src/llm_client.py`) supports multiple providers with automatic retry (3 retries, exponential backoff) for transient errors (rate limits, timeouts, 5xx). All provider configuration lives in a single `[ai]` section — you only fill in the fields relevant to your chosen provider.
 
-| Provider | config.ini | Model examples | Env var |
-|----------|------------|----------------|---------|
-| OpenAI | `provider = openai` | gpt-4o, gpt-4o-mini | OPENAI_API_KEY |
-| Anthropic | `provider = anthropic` | claude-sonnet-4-5, claude-3-5-haiku | ANTHROPIC_API_KEY |
-| Google | `provider = gemini` | gemini-1.5-pro, gemini-1.5-flash | GEMINI_API_KEY |
+| Provider | `provider =` | Model examples | Auth |
+|----------|------------|----------------|------|
+| OpenAI | `openai` | gpt-4o, gpt-4o-mini | `OPENAI_API_KEY` env var or `api_key` in config |
+| Anthropic | `anthropic` | claude-sonnet-4-5, claude-3-5-haiku | `ANTHROPIC_API_KEY` env var or `api_key` in config |
+| Google | `gemini` | gemini-1.5-pro, gemini-1.5-flash | `GEMINI_API_KEY` env var or `api_key` in config |
+| Azure OpenAI | `azure` | gpt-4o (via deployment) | `api_key` in config or S3 certificate auth |
+| AWS Bedrock | `bedrock` / `cdao` | Bedrock model ARN | AWS account + workspace via cdao |
 
-Set `api_key` in config or the corresponding env var. Use `base_url` for Azure or custom endpoints.
+OpenAI, Anthropic, and Gemini use [LiteLLM](https://docs.litellm.ai/) under the hood. Azure and Bedrock use dedicated clients.
+
+#### OpenAI / Anthropic / Gemini
+
+Set the provider, model, and API key (via env var or config):
+
+```ini
+[ai]
+provider = openai
+model = gpt-4o
+# api_key = sk-... (or set OPENAI_API_KEY env var)
+```
+
+#### Azure OpenAI
+
+Azure requires `endpoint` and `deployment_name` in addition to the provider. Authentication is either API key or certificate-based (cert stored in S3).
+
+**API key auth:**
+
+```ini
+[ai]
+provider = azure
+model = gpt-4o
+endpoint = https://your-resource.openai.azure.com/
+deployment_name = your-deployment-name
+api_version = 2024-02-15-preview
+api_key = your-azure-api-key
+```
+
+**Certificate auth (cert from S3):**
+
+```ini
+[ai]
+provider = azure
+model = gpt-4o
+endpoint = https://your-resource.openai.azure.com/
+deployment_name = your-deployment-name
+api_version = 2024-02-15-preview
+tenant_id = your-tenant-id
+client_id = your-client-id
+scope = https://cognitiveservices.azure.com/.default
+s3_bucket_name = your-s3-bucket
+azure_cert_file_name = path/to/cert.pem
+```
+
+Certificate auth loads the PEM certificate from S3, then obtains an Azure access token using `azure.identity.CertificateCredential`. Requires `boto3` and `azure-identity` packages.
+
+#### AWS Bedrock (cdao)
+
+Uses the org `cdao.bedrock_byoa_invoke_model` for Claude on Bedrock:
+
+```ini
+[ai]
+provider = bedrock
+model = arn:aws:bedrock:us-east-1:ACCOUNT:application-inference-profile/PROFILE_ID
+aws_account_number = 098034167131
+aws_region = us-east-1
+workspace_id = 904071
+is_execution_role = false
+```
+
+Requires the internal `cdao` package.
 
 ## GitHub Setup
 
@@ -320,7 +396,8 @@ code-autonomy/
 │   ├── __init__.py
 │   ├── constants.py         # Shared constants (extensions, skip dirs)
 │   ├── config_loader.py     # Config loading and parsing
-│   ├── llm_client.py        # Multi-provider LLM with retry logic (OpenAI, Anthropic, Gemini via LiteLLM)
+│   ├── llm_client.py        # Multi-provider LLM with retry logic (OpenAI, Anthropic, Gemini, Azure, Bedrock)
+│   ├── azure_openai_client.py  # Azure OpenAI client (API key or S3 certificate auth)
 │   │
 │   ├── agent/               # Agent loop infrastructure
 │   │   ├── analyzer.py      # Agent loop: explore → edit → test → fix → complete

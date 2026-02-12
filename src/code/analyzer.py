@@ -64,6 +64,7 @@ def generate_changes(
     framework_context: str = "",
     testing_strategy: str = "auto",
     build_tool: Optional[str] = None,
+    full_config: Optional[dict] = None,
 ) -> list[dict]:
     """
     Use AI to generate file changes based on requirements.
@@ -137,6 +138,7 @@ Produce the JSON array of file changes to implement the requirements (adapt path
         ],
         config=llm_config,
         temperature=0.2,
+        full_config=full_config,
     )
     if verbose:
         print("AI Response (raw):", content[:500], "...")
@@ -177,6 +179,7 @@ def regenerate_with_error_analysis(
     framework_context: str = "",
     testing_strategy: str = "auto",
     build_tool: Optional[str] = None,
+    full_config: Optional[dict] = None,
 ) -> list[dict]:
     """
     Given test/execution failure, analyze error and regenerate fixes.
@@ -240,6 +243,7 @@ Produce the JSON array of file changes to FIX these errors."""
         ],
         config=llm_config,
         temperature=0.2,
+        full_config=full_config,
     )
     if verbose:
         print("AI regeneration response:", content[:300], "...")

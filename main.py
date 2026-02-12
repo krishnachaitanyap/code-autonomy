@@ -449,6 +449,7 @@ def main() -> int:
                         framework_context=framework_context,
                         testing_strategy=testing_strategy,
                         build_tool=build_tool,
+                        full_config=config,
                     )
             else:
                 with spinner(f"Regenerating (attempt {attempt + 1}/{max_retries + 1}) after test failure"):
@@ -463,6 +464,7 @@ def main() -> int:
                         framework_context=framework_context,
                         testing_strategy=testing_strategy,
                         build_tool=build_tool,
+                        full_config=config,
                     )
 
             if not changes:

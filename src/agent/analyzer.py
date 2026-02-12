@@ -14,6 +14,7 @@ from typing import Optional
 from src.agent.tools import build_agent_tools, build_plan_tools, execute_tool, execute_plan_tool, AGENT_TOOLS
 from src.agent.knowledge import WorkingMemory, load_knowledge, save_knowledge, compute_repo_id
 from src.agent.ai_utils import parse_ai_changes
+from src.agent.activity import log_agent_activity, summarize_tool_result
 from src.agent.tracing import (
     TraceCollector,
     FileTraceStore,
@@ -324,6 +325,7 @@ def generate_changes_with_agent(
                 model=model_name,
                 llm_config=llm_config,
                 smart_summarization=smart_summarization,
+                full_config=config,
             )
             if collector and ctx_span_id:
                 collector.end_span(
@@ -353,6 +355,7 @@ def generate_changes_with_agent(
             tools=all_tools,
             tool_choice="auto",
             temperature=0.2,
+            full_config=config,
         )
 
         tool_calls = getattr(msg, "tool_calls", None)
@@ -459,6 +462,8 @@ def generate_changes_with_agent(
                         success=True,
                         reward=1.0,
                     )
+                if agent_cfg.get("show_activity", True):
+                    log_agent_activity(turn, name, args, f"done — {args.get('summary', '')[:50]}")
             else:
                 result = execute_tool(
                     repo_root, name, args,
@@ -490,6 +495,9 @@ def generate_changes_with_agent(
                         error=result[:200] if is_error else "",
                         reward=reward,
                     )
+
+                if agent_cfg.get("show_activity", True):
+                    log_agent_activity(turn, name, args, summarize_tool_result(result, name))
 
             # Intelligent summarization for large outputs
             if len(result) > truncation_limit:
@@ -678,6 +686,7 @@ def generate_plan_with_agent(
             messages = manage_conversation_context(
                 messages, model=model_name, llm_config=llm_config,
                 smart_summarization=smart_summarization,
+                full_config=config,
             )
             if collector and ctx_span_id:
                 collector.end_span(
@@ -707,6 +716,7 @@ def generate_plan_with_agent(
             tools=all_tools,
             tool_choice="auto",
             temperature=0.2,
+            full_config=config,
         )
 
         tool_calls = getattr(msg, "tool_calls", None)
@@ -777,12 +787,16 @@ def generate_plan_with_agent(
                         success=True,
                         reward=1.0,
                     )
+                if agent_cfg.get("show_activity", True):
+                    log_agent_activity(turn, name, args, f"done — {args.get('summary', '')[:50]}")
             else:
                 result = execute_plan_tool(
                     repo_root, name, args,
                     change_plan=change_plan,
                     working_memory=working_memory,
                 )
+                if agent_cfg.get("show_activity", True):
+                    log_agent_activity(turn, name, args, summarize_tool_result(result, name))
                 if collector and tool_span_id:
                     is_error = result.startswith("Error:")
                     reward = -1.0 if is_error else (0.8 if name == "propose_change" else 0.5)

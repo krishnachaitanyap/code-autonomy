@@ -97,6 +97,16 @@ def load_config(config_path: str = "config.ini") -> dict:
             "aws_region": get("ai", "aws_region", "us-east-1"),
             "workspace_id": get("ai", "workspace_id", ""),
             "is_execution_role": get_bool("ai", "is_execution_role", False),
+            # Azure OpenAI (when provider is azure)
+            "endpoint": get("ai", "endpoint", ""),
+            "deployment_name": get("ai", "deployment_name", ""),
+            "api_version": get("ai", "api_version", "2024-02-15-preview"),
+            "tenant_id": get("ai", "tenant_id", ""),
+            "client_id": get("ai", "client_id", ""),
+            "scope": get("ai", "scope", "https://cognitiveservices.azure.com/.default"),
+            # S3 certificate auth (for Azure cert-based auth)
+            "s3_bucket_name": get("ai", "s3_bucket_name", ""),
+            "azure_cert_file_name": get("ai", "azure_cert_file_name", ""),
         },
         "workflow": {
             "work_dir": get("workflow", "work_dir", "./workspace"),
@@ -134,6 +144,7 @@ def load_config(config_path: str = "config.ini") -> dict:
             "plan_max_turns": get_int("agent", "plan_max_turns", 30),
             "smart_summarization": get_bool("agent", "smart_summarization", True),
             "truncation_limit": get_int("agent", "truncation_limit", 30000),
+            "show_activity": get_bool("agent", "show_activity", True),
             "command_allowlist_only": get_bool("agent", "command_allowlist_only", False),
             "allowed_command_prefixes": get_list("agent", "allowed_command_prefixes"),
             "blocked_commands": get_list("agent", "blocked_commands"),

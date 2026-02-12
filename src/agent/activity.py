@@ -99,6 +99,112 @@ def log_warning(msg: str) -> None:
         print(f"  ! {msg}")
 
 
+def log_agent_activity(
+    turn: int,
+    tool_name: str,
+    args: dict,
+    result_summary: str,
+) -> None:
+    """
+    Log agent tool call for visibility (deep thinking / activity indicator).
+    Shows what the agent is doing: read_file, grep, edit_file, run_command, etc.
+    """
+    arg_hint = _format_tool_arg_hint(tool_name, args)
+    if result_summary:
+        msg = f"[turn {turn + 1}] {tool_name}{arg_hint} → {result_summary}"
+    else:
+        msg = f"[turn {turn + 1}] {tool_name}{arg_hint}"
+    if _USE_RICH and _RICH_AVAILABLE and console:
+        console.print(f"  [dim cyan]▸[/] [dim]{msg}[/]")
+    else:
+        print(f"  ▸ {msg}")
+
+
+def summarize_tool_result(result: str, tool_name: str) -> str:
+    """Produce a short summary of tool result for activity log."""
+    if not result:
+        return ""
+    if result.startswith("Error:"):
+        return result[:60] + ("..." if len(result) > 60 else "")
+    if tool_name == "read_file":
+        lines = result.count("\n") + (1 if result and not result.endswith("\n") else 0)
+        return f"{lines} lines"
+    if tool_name == "grep":
+        if "match" in result.lower() or ":" in result:
+            n = result.count("\n") or 1
+            return f"{n} line(s)"
+        return "results"
+    if tool_name == "list_dir":
+        n = result.count("\n") + (1 if result and result != "(empty)" else 0)
+        return f"{n} item(s)" if n > 0 else "empty"
+    if tool_name == "find_files":
+        if "No files" in result:
+            return "0 files"
+        n = result.count("\n") + 1
+        return f"{n} files"
+    if tool_name in ("write_file", "edit_file", "delete_file"):
+        if "Wrote" in result:
+            return result.split("Wrote")[-1].strip()[:40]
+        if "Edited" in result:
+            return "edited"
+        if "Deleted" in result:
+            return "deleted"
+        return "ok"
+    if tool_name == "run_command":
+        if "exit code:" in result:
+            for part in result.split():
+                if part.startswith("exit") and ":" in part:
+                    return part
+            idx = result.rfind("exit code:")
+            if idx >= 0:
+                snippet = result[idx:idx + 20]
+                return snippet.strip()
+        return "run"
+    if tool_name == "propose_change":
+        if "Added" in result or "proposed" in result.lower():
+            return "proposed"
+        return result[:40] + ("..." if len(result) > 40 else "")
+    return result[:50] + ("..." if len(result) > 50 else "")
+
+
+def _format_tool_arg_hint(tool_name: str, args: dict) -> str:
+    """Format a short hint from tool args for the activity log."""
+    if not args:
+        return ""
+    if tool_name == "read_file":
+        path = args.get("path", "")
+        lines = ""
+        if args.get("start_line") or args.get("end_line"):
+            s, e = args.get("start_line"), args.get("end_line")
+            lines = f" L{s}-{e}" if s or e else ""
+        return f" {path}{lines}" if path else ""
+    if tool_name == "grep":
+        pat = args.get("pattern", "")
+        return f" \"{pat[:40]}{'...' if len(pat) > 40 else ''}\"" if pat else ""
+    if tool_name == "list_dir":
+        path = args.get("path", "") or "."
+        return f" {path}"
+    if tool_name == "find_files":
+        ext = args.get("extension", "")
+        pat = args.get("pattern", "")
+        return f" {ext or pat or ''}"
+    if tool_name in ("write_file", "edit_file", "delete_file"):
+        path = args.get("path", "")
+        return f" {path}" if path else ""
+    if tool_name == "run_command":
+        cmd = args.get("command", "")
+        short = cmd[:50] + "..." if len(cmd) > 50 else cmd
+        return f" {short}"
+    if tool_name == "update_memory":
+        key = args.get("key", "")
+        return f" {key}" if key else ""
+    if tool_name == "propose_change":
+        path = args.get("path", "")
+        action = args.get("action", "")
+        return f" {action} {path}" if path else ""
+    return ""
+
+
 def header(title: str, subtitle: str = "") -> None:
     """Print workflow header."""
     if _USE_RICH and _RICH_AVAILABLE and console:
