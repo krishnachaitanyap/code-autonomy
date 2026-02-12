@@ -388,6 +388,17 @@ _PROPOSE_CHANGE_SCHEMA = _tool("propose_change",
      "new_string": {"type": "string", "description": "Replacement string (for modify with surgical edit)"}},
     required=["path", "action", "description"])
 
+# --- Ask-mode completion schema ---
+
+_ASK_TASK_COMPLETE_SCHEMA = _tool("task_complete",
+    "Signal that you have answered the question. "
+    "Provide your complete answer and list the files you consulted.",
+    {"summary": {"type": "string", "description": "Brief summary of exploration done"},
+     "answer": {"type": "string", "description": "Your complete answer to the user's question"},
+     "sources": {"type": "array", "items": {"type": "string"},
+                 "description": "List of file paths you consulted to answer"}},
+    required=["answer", "sources"])
+
 # --- Memory tool schemas ---
 
 _UPDATE_MEMORY_SCHEMA = _tool("update_memory",
@@ -416,6 +427,7 @@ EXECUTION_TOOLS = [_RUN_COMMAND_SCHEMA]
 COMPLETION_TOOLS = [_TASK_COMPLETE_SCHEMA]
 MEMORY_TOOLS = [_UPDATE_MEMORY_SCHEMA, _READ_MEMORY_SCHEMA]
 PLAN_TOOLS = [_PROPOSE_CHANGE_SCHEMA]
+ASK_COMPLETION_TOOLS = [_ASK_TASK_COMPLETE_SCHEMA]
 
 # Backward-compatible read-only tool list (used by old code paths)
 AGENT_TOOLS = list(READ_TOOLS)
@@ -439,6 +451,15 @@ def build_plan_tools(agent_config: Optional[dict] = None) -> list[dict]:
     tools.extend(PLAN_TOOLS)
     tools.extend(MEMORY_TOOLS)
     tools.extend(COMPLETION_TOOLS)
+    return tools
+
+
+def build_ask_tools(agent_config: Optional[dict] = None) -> list[dict]:
+    """Build the tool list for ask mode (read-only + memory + answer completion)."""
+    tools: list[dict] = []
+    tools.extend(READ_TOOLS)
+    tools.extend(MEMORY_TOOLS)
+    tools.extend(ASK_COMPLETION_TOOLS)
     return tools
 
 
@@ -620,3 +641,22 @@ def execute_plan_tool(
 
     # --- Delegate read/memory/completion tools to existing dispatcher ---
     return execute_tool(repo, tool_name, args, working_memory=working_memory)
+
+
+# ===================================================================
+# Ask-mode tool dispatcher
+# ===================================================================
+
+_BLOCKED_IN_ASK = {"write_file", "edit_file", "delete_file", "run_command", "propose_change"}
+
+
+def execute_ask_tool(
+    repo_root: Path,
+    tool_name: str,
+    args: dict,
+    working_memory: Optional[WorkingMemory] = None,
+) -> str:
+    """Execute a tool in ask mode (read-only, no writes/exec/propose)."""
+    if tool_name in _BLOCKED_IN_ASK:
+        return f"Error: {tool_name} is not available in ask mode. Use read tools to explore the codebase."
+    return execute_tool(repo_root, tool_name, args, working_memory=working_memory)

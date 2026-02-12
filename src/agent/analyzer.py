@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from src.agent.tools import build_agent_tools, build_plan_tools, execute_tool, execute_plan_tool, AGENT_TOOLS
+from src.agent.tools import build_agent_tools, build_plan_tools, build_ask_tools, execute_tool, execute_plan_tool, execute_ask_tool, AGENT_TOOLS
 from src.agent.knowledge import WorkingMemory, load_knowledge, save_knowledge, compute_repo_id
 from src.agent.ai_utils import parse_ai_changes
 from src.agent.activity import log_agent_activity, summarize_tool_result
@@ -56,6 +56,18 @@ class PlanResult:
 
     success: bool = False
     plan: "ChangePlan | None" = None
+    summary: str = ""
+    turns_used: int = 0
+    trace_id: str = ""
+
+
+@dataclass
+class AskResult:
+    """Result from ask-mode agent loop."""
+
+    success: bool = False
+    answer: str = ""
+    sources: list[str] = field(default_factory=list)
     summary: str = ""
     turns_used: int = 0
     trace_id: str = ""
@@ -149,6 +161,36 @@ You are an expert software engineer in PLAN mode. You can explore the codebase \
 - Do NOT attempt to use write_file, edit_file, delete_file, or run_command — they are blocked in plan mode.
 - Propose ALL changes needed. The user will review diffs and approve/reject the plan.
 - Be precise with old_string — it must match exactly (whitespace, indentation)."""
+
+
+_ASK_SYSTEM_PROMPT = """\
+You are an expert software engineer in ASK mode. You can explore the codebase \
+(read-only) to answer questions, but you CANNOT write files, run commands, or \
+propose changes.
+
+## Read tools (explore the codebase)
+- read_file(path, start_line?, end_line?): Read file contents
+- grep(pattern, path_filter?, context_lines?): Search for a pattern across code files
+- list_dir(path): List directory contents (use "" for repo root)
+- find_files(extension?, pattern?): Find files by extension or glob
+
+## Memory tools
+- update_memory(key, content): Write a note to working memory.
+- read_memory(): Read all notes from working memory and prior knowledge.
+
+## Completion
+- task_complete(answer, sources): Call when you have fully answered the question.
+
+## Workflow
+1. **EXPLORE** — Use read tools to understand the codebase and find information relevant to the question.
+2. **RECORD** — Use update_memory to record what you learn.
+3. **ANSWER** — Call task_complete with your complete answer and the list of source files consulted.
+
+## Rules
+- ALWAYS explore before answering. Read relevant files first.
+- Do NOT attempt to use write_file, edit_file, delete_file, run_command, or propose_change — they are blocked in ask mode.
+- Provide a thorough, well-cited answer. List every file you consulted in sources.
+- Be specific: reference file paths, line numbers, function names, and code snippets in your answer."""
 
 
 # ---------------------------------------------------------------------------
@@ -893,3 +935,288 @@ def generate_plan_with_agent(
             pass
 
     return plan_result
+
+
+# ---------------------------------------------------------------------------
+# Ask-mode entry point
+# ---------------------------------------------------------------------------
+
+def generate_answer_with_agent(
+    question: str,
+    repo_path: str,
+    llm_config: dict,
+    max_turns: int = 20,
+    verbose: bool = False,
+    consciousness_context: str = "",
+    agent_config: Optional[dict] = None,
+    config: Optional[dict] = None,
+    repo_url: str = "",
+) -> "AskResult":
+    """Run the agent in ask mode: explore → answer question → complete.
+
+    Returns an :class:`AskResult` with the answer and source files consulted.
+    No files are written to disk.
+    """
+    from src.llm_client import chat_completion
+
+    repo_root = Path(repo_path)
+    agent_cfg = agent_config or {}
+    max_turns = agent_cfg.get("ask_max_turns", agent_cfg.get("max_turns", max_turns))
+    smart_summarization = agent_cfg.get("smart_summarization", True)
+    truncation_limit = agent_cfg.get("truncation_limit", 30_000)
+
+    working_memory = WorkingMemory()
+    sources_consulted: set[str] = set()
+
+    # --- Execution tracing ---
+    tracing_enabled = is_tracing_enabled(config)
+    collector: Optional[TraceCollector] = None
+    if tracing_enabled:
+        _repo_id = compute_repo_id(repo_path, repo_url)
+        collector = TraceCollector(
+            repo_id=_repo_id,
+            repo_url=repo_url,
+            model=llm_config.get("model", "gpt-4o"),
+            requirements=question,
+        )
+
+    # Build ask-mode tool list (read + memory + ask completion)
+    all_tools = build_ask_tools(agent_cfg)
+
+    # Build simplified context (question + consciousness + prior knowledge)
+    knowledge_context = ""
+    try:
+        prior = load_knowledge(config, repo_path, repo_url)
+        if prior:
+            knowledge_context = prior.to_context_string()
+    except Exception:
+        pass
+
+    initial_context = consciousness_context or ""
+    knowledge_section = f"\n\n{knowledge_context}\n" if knowledge_context else ""
+
+    user_msg = (
+        f"## Question\n{question}\n"
+        f"{initial_context}\n"
+        f"{knowledge_section}\n\n"
+        "Start by listing the repo root with list_dir, then explore relevant files "
+        "to answer the question. When you have a complete answer, call task_complete."
+    )
+
+    messages: list[dict] = [
+        {"role": "system", "content": _ASK_SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ]
+
+    task_complete_data: Optional[dict] = None
+    consecutive_empty = 0
+    model_name = llm_config.get("model", "gpt-4o")
+
+    for turn in range(max_turns):
+        # --- Context management ---
+        ctx_span_id = None
+        if collector:
+            ctx_span_id = collector.start_span(
+                SPAN_CONTEXT_MGMT, "manage_context", turn,
+                inputs={"message_count": len(messages)},
+            )
+        try:
+            from src.agent.context import manage_conversation_context
+            prev_count = len(messages)
+            messages = manage_conversation_context(
+                messages, model=model_name, llm_config=llm_config,
+                smart_summarization=smart_summarization,
+                full_config=config,
+            )
+            if collector and ctx_span_id:
+                collector.end_span(
+                    ctx_span_id,
+                    output_summary=f"{prev_count} -> {len(messages)} messages",
+                    metadata={"messages_before": prev_count, "messages_after": len(messages)},
+                )
+                ctx_span_id = None
+        except ImportError:
+            pass
+        if collector and ctx_span_id:
+            collector.end_span(ctx_span_id, output_summary="skipped (no context module)")
+
+        # --- LLM call ---
+        llm_span_id = None
+        if collector:
+            tokens_est = sum(len(m.get("content", "") or "") // 4 for m in messages)
+            llm_span_id = collector.start_span(
+                SPAN_LLM_CALL, model_name, turn,
+                inputs={"message_count": len(messages), "tokens_est": tokens_est},
+                metadata={"model": model_name, "temperature": 0.2},
+            )
+
+        content, msg = chat_completion(
+            messages=messages,
+            config=llm_config,
+            tools=all_tools,
+            tool_choice="auto",
+            temperature=0.2,
+            full_config=config,
+        )
+
+        tool_calls = getattr(msg, "tool_calls", None)
+
+        if collector and llm_span_id:
+            n_tool_calls = len(tool_calls) if tool_calls else 0
+            content_len = len(content) if content else 0
+            collector.end_span(
+                llm_span_id,
+                output_summary=f"{n_tool_calls} tool calls, {content_len} chars content",
+                output_chars=content_len,
+                metadata={"tool_call_count": n_tool_calls},
+            )
+
+        # ---- No tool calls ----
+        if not tool_calls or len(tool_calls) == 0:
+            if task_complete_data:
+                break
+            consecutive_empty += 1
+            if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
+                break
+            messages.append({"role": "assistant", "content": content})
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Please use the read tools to explore the codebase and answer the question. "
+                    "When you have a complete answer, call task_complete."
+                ),
+            })
+            continue
+
+        # ---- Process tool calls ----
+        consecutive_empty = 0
+        messages.append({
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments or "{}",
+                    },
+                }
+                for tc in tool_calls
+            ],
+        })
+
+        for tc in tool_calls:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+            except json.JSONDecodeError:
+                args = {}
+
+            tool_span_id = None
+            if collector:
+                tool_span_id = collector.start_span(
+                    SPAN_TOOL_CALL, name, turn,
+                    inputs=_sanitize_tool_args(name, args),
+                )
+
+            if name == "task_complete":
+                task_complete_data = args
+                result = f"Answer complete. Summary: {args.get('summary', '')}"
+                if collector and tool_span_id:
+                    collector.end_span(
+                        tool_span_id,
+                        output_summary=_summarize_output(result),
+                        output_chars=len(result),
+                        success=True,
+                        reward=1.0,
+                    )
+                if agent_cfg.get("show_activity", True):
+                    log_agent_activity(turn, name, args, f"done — {args.get('summary', '')[:50]}")
+            else:
+                result = execute_ask_tool(
+                    repo_root, name, args,
+                    working_memory=working_memory,
+                )
+                # Track sources from successful read_file calls
+                if name == "read_file" and not result.startswith("Error:"):
+                    sources_consulted.add(args.get("path", ""))
+                if agent_cfg.get("show_activity", True):
+                    log_agent_activity(turn, name, args, summarize_tool_result(result, name))
+                if collector and tool_span_id:
+                    is_error = result.startswith("Error:")
+                    reward = -1.0 if is_error else 0.5
+                    collector.end_span(
+                        tool_span_id,
+                        output_summary=_summarize_output(result),
+                        output_chars=len(result),
+                        success=not is_error,
+                        error=result[:200] if is_error else "",
+                        reward=reward,
+                    )
+
+            # Truncation
+            if len(result) > truncation_limit:
+                try:
+                    from src.agent.context import summarize_large_output
+                    if smart_summarization:
+                        result = summarize_large_output(result, name, llm_config)
+                    else:
+                        result = result[:truncation_limit] + f"\n...(truncated, {len(result)} total chars)"
+                except ImportError:
+                    result = result[:truncation_limit] + f"\n...(truncated, {len(result)} total chars)"
+
+            if verbose:
+                print(f"  Ask turn {turn + 1}: {name}({list(args.keys())}) -> {len(result)} chars")
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result,
+            })
+
+            # Working memory protection
+            if name == "update_memory" and not working_memory.is_empty():
+                wm_block = working_memory.to_message_block()
+                messages[0] = {"role": "system", "content": _ASK_SYSTEM_PROMPT + "\n" + wm_block}
+
+        if task_complete_data:
+            break
+
+    # ---- Build result ----
+    if task_complete_data:
+        # Merge agent-reported sources with tracked sources
+        reported_sources = task_complete_data.get("sources", [])
+        all_sources = sorted(set(reported_sources) | sources_consulted)
+        ask_result = AskResult(
+            success=True,
+            answer=task_complete_data.get("answer", ""),
+            sources=all_sources,
+            summary=task_complete_data.get("summary", ""),
+            turns_used=turn + 1,
+        )
+    else:
+        ask_result = AskResult(
+            success=False,
+            answer="",
+            sources=sorted(sources_consulted),
+            summary=f"Agent did not call task_complete within {max_turns} turns",
+            turns_used=max_turns,
+        )
+
+    # --- Save trace ---
+    if collector:
+        try:
+            trace = collector.finalize(
+                success=ask_result.success,
+                turns_used=ask_result.turns_used,
+                files_changed=ask_result.sources,
+                summary=ask_result.summary,
+            )
+            ask_result.trace_id = trace.trace_id
+            store = get_trace_store(config)
+            store.save(trace)
+        except Exception:
+            pass
+
+    return ask_result

@@ -40,7 +40,7 @@ from src.code.analyzer import (
 )
 from src.context import build_context
 from src.consciousness.core import build_or_load_consciousness
-from src.agent.analyzer import generate_changes_with_agent, generate_plan_with_agent
+from src.agent.analyzer import generate_changes_with_agent, generate_plan_with_agent, generate_answer_with_agent
 from src.code.executor import run_tests, detect_project_type, detect_build_tool
 from src.agent.activity import (
     header,
@@ -66,6 +66,7 @@ def main() -> int:
     parser.add_argument("--repo-path", help="Path to an existing local repository (skips clone, branch creation, and push/PR)")
     parser.add_argument("--agent", "-a", action="store_true", help="Use agent mode: AI explores, edits, tests, and fixes code in a single loop (Claude-Code-like)")
     parser.add_argument("--plan", "-p", action="store_true", help="Plan mode: agent explores read-only and proposes changes as diffs for review before applying (implies --agent)")
+    parser.add_argument("--ask", "-q", action="store_true", help="Ask mode: agent explores repo read-only and answers questions about the codebase")
     parser.add_argument("--auto-approve", action="store_true", help="Auto-approve plan without prompting (use with --plan)")
     parser.add_argument("--testing-strategy", "-t", choices=["bdd", "contract", "integration", "unit", "e2e", "soap", "auto"],
                        help="Java testing strategy (default: auto or from config/changes)")
@@ -268,8 +269,49 @@ def main() -> int:
     )
     build_tool = detect_build_tool(str(clone_path))  # maven or gradle for Java
 
-    use_agent = args.agent or args.plan or workflow.get("use_agent", False)
+    use_agent = args.agent or args.plan or args.ask or workflow.get("use_agent", False)
     use_plan = args.plan
+
+    if args.ask:
+        # ---------------------------------------------------------------
+        # ASK MODE: agent explores read-only and answers questions
+        # ---------------------------------------------------------------
+        agent_cfg_section = config.get("agent") or {}
+        agent_config = {
+            "ask_max_turns": int(agent_cfg_section.get("ask_max_turns", 20)),
+            "max_turns": int(agent_cfg_section.get("max_turns", 50)),
+            "smart_summarization": agent_cfg_section.get("smart_summarization", True),
+            "truncation_limit": int(agent_cfg_section.get("truncation_limit", 30000)),
+        }
+
+        with spinner("Agent exploring codebase to answer your question"):
+            ask_result = generate_answer_with_agent(
+                requirements,
+                str(clone_path),
+                llm_config=ai_cfg,
+                verbose=ai_cfg.get("verbose", False),
+                consciousness_context=consciousness_str or "",
+                agent_config=agent_config,
+                config=config,
+                repo_url=repo_url,
+            )
+
+        if ask_result.success:
+            log_success(f"Answer found ({ask_result.turns_used} turns)")
+            print(f"\n{'=' * 60}")
+            print("ANSWER")
+            print(f"{'=' * 60}")
+            print(ask_result.answer)
+            if ask_result.sources:
+                print(f"\n{'─' * 60}")
+                print("Sources consulted:")
+                for src in ask_result.sources:
+                    print(f"  - {src}")
+            print(f"{'=' * 60}\n")
+        else:
+            log_error(f"Could not answer: {ask_result.summary}")
+
+        return 0
 
     if use_plan:
         # ---------------------------------------------------------------
