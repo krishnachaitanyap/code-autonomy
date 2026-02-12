@@ -62,6 +62,12 @@ class PlanResult:
 
 
 # ---------------------------------------------------------------------------
+# Guard: abort after N consecutive empty LLM responses
+# ---------------------------------------------------------------------------
+MAX_CONSECUTIVE_EMPTY = 3
+
+
+# ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
 
@@ -305,6 +311,7 @@ def generate_changes_with_agent(
     task_complete_data: Optional[dict] = None
     last_error_hash: Optional[str] = None
     stuck_count = 0
+    consecutive_empty = 0
 
     model_name = llm_config.get("model", "gpt-4o")
 
@@ -397,6 +404,13 @@ def generate_changes_with_agent(
                 return legacy_result
 
             # Nudge the agent to use tools
+            consecutive_empty += 1
+            if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
+                logger.error(
+                    "Aborting agent loop: %d consecutive empty LLM responses",
+                    consecutive_empty,
+                )
+                break
             messages.append({"role": "assistant", "content": content})
             messages.append({
                 "role": "user",
@@ -408,6 +422,7 @@ def generate_changes_with_agent(
             continue
 
         # ---- Process tool calls ----
+        consecutive_empty = 0
         messages.append({
             "role": "assistant",
             "content": msg.content,
@@ -670,6 +685,7 @@ def generate_plan_with_agent(
     ]
 
     task_complete_data: Optional[dict] = None
+    consecutive_empty = 0
     model_name = llm_config.get("model", "gpt-4o")
 
     for turn in range(max_turns):
@@ -735,6 +751,13 @@ def generate_plan_with_agent(
         if not tool_calls or len(tool_calls) == 0:
             if task_complete_data:
                 break
+            consecutive_empty += 1
+            if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
+                logger.error(
+                    "Aborting plan loop: %d consecutive empty LLM responses",
+                    consecutive_empty,
+                )
+                break
             messages.append({"role": "assistant", "content": content})
             messages.append({
                 "role": "user",
@@ -746,6 +769,7 @@ def generate_plan_with_agent(
             continue
 
         # ---- Process tool calls ----
+        consecutive_empty = 0
         messages.append({
             "role": "assistant",
             "content": msg.content,

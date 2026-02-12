@@ -12,6 +12,9 @@ atlassian-python-api>=3.41.0
 # LLM: multi-provider (OpenAI, Anthropic, Gemini) via LiteLLM
 litellm>=1.30.0
 
+# LLM: Azure OpenAI via LangChain
+langchain-openai>=0.1.0
+
 # Configuration parsing
 # configparser is built-in for .ini files
 

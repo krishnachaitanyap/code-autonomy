@@ -1,6 +1,6 @@
 """
 Azure OpenAI client with certificate-based auth (S3) or API key.
-Supports direct HTTP requests to Azure OpenAI chat completions API.
+Uses LangChain's AzureChatOpenAI for chat completions.
 Integrates with code-autonomy's llm_client when provider=azure.
 """
 
@@ -10,6 +10,8 @@ import os
 import uuid
 from pathlib import Path
 from typing import Any, Optional
+
+from langchain_openai import AzureChatOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -142,17 +144,6 @@ class _LLMMessage:
 # Azure OpenAI API helpers
 # ---------------------------------------------------------------------------
 
-def _build_chat_url(config: dict) -> str:
-    """Build Azure OpenAI chat completions URL."""
-    ai = config.get("ai") or config
-    endpoint = (ai.get("endpoint") or "").rstrip("/")
-    deployment = (ai.get("deployment_name") or "").strip()
-    version = (ai.get("api_version") or "2024-02-15-preview").strip()
-    if not endpoint or not deployment:
-        raise ValueError("Azure OpenAI requires endpoint and deployment_name in [ai] section.")
-    return f"{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={version}"
-
-
 def _extract_functions(tools: Optional[list[dict]]) -> list[dict]:
     """Extract function definitions from OpenAI-style tool schemas."""
     if not tools:
@@ -178,11 +169,10 @@ def chat_completion_azure(
     max_tokens: int = 1024,
 ) -> tuple[str, Any]:
     """
-    Call Azure OpenAI chat completion. Returns (content, message).
-    message has .content and .tool_calls (AGENT_TOOLS compatible).
+    Call Azure OpenAI chat completion via LangChain AzureChatOpenAI.
+    Returns (content, message) where message has .content and .tool_calls
+    (AGENT_TOOLS compatible).
     """
-    import requests
-
     _ensure_logging_configured()
     _ensure_file_handler(os.environ.get("LLM_LOG_FILE", ""))
 
@@ -192,34 +182,25 @@ def chat_completion_azure(
 
     if not api_key and not access_token:
         raise ValueError(
-            "Azure OpenAI requires api_key in [ai] or certificate-based auth (tenant_id, client_id, s3_bucket_name, azure_cert_file_name)."
+            "Azure OpenAI requires api_key in [ai] or certificate-based auth "
+            "(tenant_id, client_id, s3_bucket_name, azure_cert_file_name)."
         )
 
+    endpoint = (ai.get("endpoint") or "").rstrip("/")
     deployment = (ai.get("deployment_name") or "").strip()
-    if not deployment:
-        raise ValueError("Azure OpenAI requires deployment_name in [ai] section.")
+    api_version = (ai.get("api_version") or "2024-02-15-preview").strip()
 
-    url = _build_chat_url(config)
+    if not endpoint or not deployment:
+        raise ValueError("Azure OpenAI requires endpoint and deployment_name in [ai] section.")
 
-    payload = {
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
+    # Build default headers for auth
+    default_headers = {"user_sid": "code-autonomy"}
+    if access_token:
+        default_headers["Authorization"] = f"Bearer {access_token}"
+    if api_key:
+        default_headers["api-key"] = api_key
 
     functions = _extract_functions(tools)
-    if functions:
-        payload["tools"] = [{"type": "function", "function": f} for f in functions]
-        payload["tool_choice"] = tool_choice if tool_choice != "none" else "none"
-
-    headers = {
-        "Content-Type": "application/json",
-        "user_sid": "code-autonomy",
-    }
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
-    if api_key:
-        headers["api-key"] = api_key
 
     logger.info(
         "Azure OpenAI request: deployment=%s temperature=%s tools=%s\n%s",
@@ -227,27 +208,41 @@ def chat_completion_azure(
         _format_messages(messages),
     )
 
-    response = requests.post(url, json=payload, headers=headers, timeout=60)
-    response.raise_for_status()
+    llm = AzureChatOpenAI(
+        azure_endpoint=endpoint,
+        openai_api_version=api_version,
+        deployment_name=deployment,
+        openai_api_key=api_key or "placeholder",
+        openai_api_type="azure",
+        max_tokens=max_tokens,
+        temperature=temperature,
+        streaming=False,
+        default_headers=default_headers,
+    )
 
-    data = response.json()
-    choices = data.get("choices") or []
-    if not choices:
-        raise RuntimeError("Azure OpenAI returned no choices")
+    # Bind tools if provided
+    if functions:
+        tools_schema = [{"type": "function", "function": f} for f in functions]
+        llm_with_tools = llm.bind_tools(tools_schema)
+    else:
+        llm_with_tools = llm
 
-    message = choices[0].get("message", {})
-    content = (message.get("content") or "").strip()
-    function_call = message.get("function_call")
+    # Invoke LangChain
+    ai_message = llm_with_tools.invoke(messages)
+    content = (ai_message.content or "").strip()
 
+    # Convert LangChain tool_calls to our wrapper format
     tool_calls = []
-    if function_call and isinstance(function_call, dict):
-        name = function_call.get("name") or ""
-        arguments = function_call.get("arguments") or "{}"
-        tool_calls.append(_LLMToolCall(name=name, arguments=arguments))
+    for tc in (ai_message.tool_calls or []):
+        tool_calls.append(_LLMToolCall(
+            name=tc["name"],
+            arguments=json.dumps(tc["args"]) if isinstance(tc["args"], dict) else tc["args"],
+            call_id=tc.get("id", ""),
+        ))
 
     logger.info(
-        "Azure OpenAI response: deployment=%s content=%s function_call=%s",
-        deployment, content[:200] if content else "(empty)", function_call,
+        "Azure OpenAI response: deployment=%s content=%s tool_calls=%d",
+        deployment, content[:200] if content else "(empty)", len(tool_calls),
     )
 
     msg = _LLMMessage(content=content, tool_calls=tool_calls)
