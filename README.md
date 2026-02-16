@@ -16,6 +16,10 @@ Autonomous code generation and feature building that integrates with **GitHub** 
 - **Resiliency**: circuit breaker and token-bucket rate limiter for LLM calls
 - **Pre-flight validation**: startup checks for config, credentials, and connectivity
 - **Repo knowledge files**: `.code-autonomy/`, `.code-autonomy.md`, or `AGENT.md` for project-specific agent instructions
+- **Code Intelligence (CodeIndex)**: symbol table, dependency graph, class hierarchy, entity embeddings, 7 agent tools
+- **Pre-edit context assembly** (`context_for_edit`): Graph-RAG context — callers, callees, dependents, hierarchy, tests — before any edit
+- **Breakage prediction** (`predict_breakage`): per-symbol risk report (HIGH/MEDIUM/LOW) with caller/child/dependent analysis before changes
+- **Verify-and-repair loop**: post-edit verification gate with graph-aware repair suggestions and automatic agent retry
 - Commit and push changes
 - Create a Pull Request
 
@@ -92,6 +96,17 @@ sequenceDiagram
             end
         end
         AI->>AI: task_complete(summary, files_changed)
+        opt Post-edit verification gate (code index available)
+            Main->>Main: post_edit_verification_gate (syntax, imports, tests, callers)
+            alt Verification passed
+                Main-->>User: verification PASSED
+            else Verification failed
+                Main->>Main: generate_repair_suggestions (graph-aware)
+                Main->>AI: retry agent with repair_prompt (max 20 turns)
+                AI->>Repo: fix errors, re-run tests
+                Main->>Main: re-verify (max 1 retry)
+            end
+        end
     else Standard mode
         Main->>AI: generate_changes (requirements + context)
         AI-->>Main: JSON changes
@@ -190,6 +205,9 @@ python main.py --plan --auto-approve
 # Ask mode: read-only Q&A about the codebase
 python main.py --ask "How does authentication work?"
 python main.py -q "Where are the API routes defined?"
+
+# Init knowledge: auto-generate .code-autonomy.md from project analysis
+python main.py --init-knowledge --repo-path /path/to/repo
 
 # Standard mode (one-shot generation + external test/retry loop)
 python main.py
@@ -485,6 +503,17 @@ code-autonomy/
 │   │   ├── executor.py      # Run Python/Java tests in isolation
 │   │   └── testing_strategies.py  # BDD, Contract, Integration, Unit, E2E, SOAP guidance
 │   │
+│   ├── code_index/          # Precision code intelligence (Graph-RAG)
+│   │   ├── __init__.py      # Public API (CodeIndex, tools, verifier)
+│   │   ├── storage.py       # CodeIndex dataclass + build / load / cache
+│   │   ├── symbol_table.py  # AST-based symbol extraction (functions, classes, methods)
+│   │   ├── import_resolver.py # Cross-file import resolution
+│   │   ├── graph_builder.py # Bidirectional call graph + file dependency maps
+│   │   ├── hierarchy.py     # Class hierarchy (parents, children, ancestors, descendants)
+│   │   ├── entity_embeddings.py # Semantic embeddings for code entities
+│   │   ├── tools.py         # 7 agent tools (find_callers, find_dependents, impact_analysis, describe_entity, find_similar, context_for_edit, predict_breakage)
+│   │   └── verifier.py      # Post-edit verification gate + repair suggestions
+│   │
 │   ├── consciousness/       # Project understanding and indexing
 │   │   ├── core.py          # Project model, indexing, file storage
 │   │   └── opensearch.py    # OpenSearch backend (optional)
@@ -539,12 +568,25 @@ With `--agent` or `use_agent = true`, the AI operates in an autonomous agentic l
 |------|-------------|
 | `task_complete` | Signal that all changes are done and verified |
 
+**Code intelligence tools** (available when code index is built):
+
+| Tool | Description |
+|------|-------------|
+| `find_callers` | Find all callers of a function/method/class |
+| `find_dependents` | Find all files that import from a given file |
+| `impact_analysis` | Callers + dependents + related tests for a file |
+| `describe_entity` | Full signature, docstring, callers, callees, hierarchy |
+| `find_similar` | Semantic search across all code entities |
+| `context_for_edit` | **Pre-edit context** — callers, callees, dependents, hierarchy, tests, similar code |
+| `predict_breakage` | **Risk report** — per-symbol HIGH/MEDIUM/LOW risk with caller/child/dependent warnings |
+
 **Agent workflow:**
 1. **EXPLORE** – Use read tools to understand the codebase structure, conventions, and relevant files
-2. **IMPLEMENT** – Use `edit_file` for surgical edits to existing files, `write_file` for new files
-3. **VERIFY** – Run tests with `run_command` (e.g., `pytest -v`, `mvn test`)
-4. **FIX** – If tests fail, read error output, edit files, re-run tests
-5. **COMPLETE** – Call `task_complete` with summary and list of changed files
+2. **ASSESS** – Use `context_for_edit` and `predict_breakage` to understand edit impact before changing code
+3. **IMPLEMENT** – Use `edit_file` for surgical edits to existing files, `write_file` for new files
+4. **VERIFY** – Run tests with `run_command` (e.g., `pytest -v`, `mvn test`)
+5. **FIX** – If tests fail, read error output, edit files, re-run tests
+6. **COMPLETE** – Call `task_complete` with summary and list of changed files
 
 **Key differences from standard mode:**
 - Agent writes files **directly** during the loop — no external `apply_changes()` step
@@ -722,6 +764,22 @@ You can teach the agent about your repository by placing knowledge files in the 
 - src/api/deps.py — dependency injection (DB session, auth)
 - src/core/config.py — settings via pydantic BaseSettings
 ```
+
+#### Auto-generating with `--init-knowledge`
+
+Instead of writing `.code-autonomy.md` from scratch, you can auto-generate one from project analysis:
+
+```bash
+python main.py --init-knowledge --repo-path /path/to/repo
+```
+
+This runs `ProjectConsciousness` (filesystem-only, no LLM or API keys needed) and produces a `.code-autonomy.md` pre-populated with:
+- Detected language, build tool, test framework, naming style
+- Directory tree (depth 2)
+- Important files table from ranked code samples
+- `<!-- TODO -->` markers for sections requiring human input (architecture, domain context, gotchas)
+
+If a knowledge file already exists, the command warns and exits without overwriting.
 
 ### Git Context Controller (GCC)
 
@@ -956,6 +1014,122 @@ The resiliency layer (circuit breaker + rate limiter) is per-process today. At s
 5. **Web UI / Slack bot** — Submit jobs, track status, review plans.
 
 The codebase is already modular — `repo_id`-based isolation, pluggable storage backends, multi-provider LLM, and structured tracing are all in place. The main work is adding the orchestration layer on top and swapping local storage for shared backends.
+
+### Code Intelligence (CodeIndex)
+
+The code index provides **precision code intelligence** for the agent — a structured code graph built from AST parsing, import resolution, and semantic embeddings. It is inspired by the Graph-RAG approach ([Edge et al., 2024](#references)), which combines knowledge graph traversal with retrieval-augmented generation to produce context that is both relevant and structurally complete.
+
+**Components:**
+
+| Component | Description |
+|-----------|-------------|
+| **Symbol table** | AST-extracted functions, classes, methods with FQN, signature, docstring, line range |
+| **Import resolver** | Maps cross-file imports to FQNs (handles `from X import Y` and relative imports) |
+| **Dependency graph** | Bidirectional call graph (caller→callees, callee→callers) + file-level import/dependent maps |
+| **Class hierarchy** | Parent/child inheritance graph with ancestor/descendant traversal |
+| **Entity embeddings** | Semantic vectors for all symbols (signature + docstring + body); enables `find_similar` |
+| **Verification gate** | Post-edit checks (syntax, imports, tests, caller compatibility) with repair suggestions |
+
+**7 agent tools:**
+
+| Tool | Description | Use when |
+|------|-------------|----------|
+| `find_callers(symbol_name)` | Reverse graph traversal — who calls this symbol | Before modifying a function's signature |
+| `find_dependents(file_path)` | File-level reverse imports — who imports this file | Before renaming/moving a module |
+| `impact_analysis(file_path)` | Callers + dependents + test files for a file | Quick blast-radius check |
+| `describe_entity(symbol_name)` | Full symbol profile: signature, docstring, callers, callees, hierarchy | Understanding what a symbol does |
+| `find_similar(query, top_k?)` | Semantic search across all code entities | Discovering related code patterns |
+| `context_for_edit(file_path, symbol_name?, intent?)` | **Graph-RAG context assembly** — minimum sufficient context before editing | **Before any edit** — assembles callers, callees, dependents, hierarchy, tests, similar code |
+| `predict_breakage(file_path, changes_description?)` | **Risk prediction** — per-symbol breakage risk with specific warnings | **Before making changes** — identifies HIGH/MEDIUM/LOW risk symbols |
+
+#### `context_for_edit` — Pre-edit Graph-RAG Context
+
+Inspired by the Graph-RAG paradigm ([Edge et al., 2024](#references)) and repository-level code planning ([Bairi et al., 2024](#references)), `context_for_edit` assembles the **minimum sufficient context** from the code graph before any edit. Instead of dumping the entire codebase into the prompt, it traverses the graph to collect only what's structurally relevant.
+
+**Algorithm:**
+1. Get all symbols in the target file
+2. If `symbol_name` provided, narrow focus to that symbol
+3. Collect **callers** (reverse graph) — who depends on this code
+4. Collect **callees** (forward graph) — what this code depends on
+5. Get **file dependents** — who imports this file
+6. Get **class hierarchy** — parents and children for classes
+7. Find **related test files** — matching `test_*.py` or `*_test.py`
+8. If `intent` provided, run **semantic search** for related code
+
+**Output:** Structured markdown with sections: Symbols, Callers, Callees, Dependents, Hierarchy, Tests, Similar Code.
+
+This approach directly addresses the "lost context" problem identified in SWE-bench evaluations ([Jimenez et al., 2024](#references)), where agents fail because they edit code without understanding its structural dependencies.
+
+#### `predict_breakage` — Risk Report Before Changes
+
+Motivated by change impact analysis research and the observation that most first-attempt PR failures come from breaking callers or subclasses ([Zhang et al., 2024](#references)), `predict_breakage` generates a risk report before any changes are made.
+
+**Algorithm:**
+1. For each symbol in the file, count callers from the reverse graph
+2. Assign risk levels:
+   - **HIGH**: >5 callers or class with child classes (interface changes cascade)
+   - **MEDIUM**: 1–5 callers (changes may need propagation)
+   - **LOW**: 0 callers (safe to change freely)
+3. List file dependents (import-level blast radius)
+4. Warn if no test files exist for the module
+5. If `changes_description` provided, find semantically similar code that may also need changes
+
+**Output:** Overall risk level + per-symbol breakdown (sorted HIGH-first) + specific "will break" warnings + test coverage status.
+
+### Verify-and-Repair Loop
+
+The verify-and-repair loop implements structured self-debugging, inspired by the Self-Debugging ([Chen et al., 2024](#references)) and Reflexion ([Shinn et al., 2023](#references)) approaches. When the post-edit verification gate fails, the system generates **graph-aware repair suggestions** and re-invokes the agent for one structured retry.
+
+**Verification gate** (runs automatically after agent mode completes):
+
+| Check | Level | What it catches |
+|-------|-------|-----------------|
+| Syntax check | Error | `py_compile` failures on changed `.py` files |
+| Import check | Warning | Broken `from src.X import Y` that no longer resolve |
+| Scoped tests | Error | Matching `test_*.py` files that fail |
+| Caller check | Warning | Changed function signatures with existing callers |
+
+**Repair suggestion generation** (`generate_repair_suggestions`):
+
+When verification fails, the system enriches the `VerificationResult` with actionable repair instructions derived from the code graph:
+
+- **Syntax errors** → "Fix syntax in {file}"
+- **Test failures** → "Read {test_file} to understand failing assertions"
+- **Signature changes** → Lists actual caller locations from the graph (`file:line`)
+- **Import warnings** → "Check imports in {file}"
+
+**Retry flow:**
+
+```
+Agent completes → Verification gate runs → FAILED
+  → generate_repair_suggestions() enriches result with graph-aware suggestions
+  → repair_prompt() generates structured prompt for retry agent
+  → Re-invoke agent with original requirements + repair instructions (max 20 turns)
+  → Re-verify after repair (max 1 retry, no infinite loops)
+```
+
+The key insight from Self-Debugging research is that **structured feedback** (specific file:line locations, caller names, test file paths) dramatically outperforms generic "fix the errors" prompts. By combining verification results with graph traversal, repair suggestions point the agent to exactly where changes need to propagate.
+
+**Config:** The verify-and-repair loop runs automatically when all conditions are met:
+- Agent mode (`--agent`)
+- Code index is available
+- Not a dry run or local repo
+- Agent produced changes
+
+## Research References
+
+This project builds on several research directions in AI-assisted software engineering:
+
+| Paper | Key insight applied |
+|-------|-------------------|
+| [From Local to Global: A Graph RAG Approach to Query-Focused Summarization](https://arxiv.org/abs/2404.16130) (Edge et al., Microsoft Research, 2024) | **Graph-RAG context assembly** — `context_for_edit` uses knowledge graph traversal (callers, callees, hierarchy) instead of flat retrieval to assemble structurally complete context before edits |
+| [CodePlan: Repository-level Coding using LLMs and Planning](https://arxiv.org/abs/2309.12499) (Bairi et al., Microsoft Research, 2024) | **Repository-level planning** — dependency graph analysis for multi-file change propagation; `predict_breakage` identifies which callers and subclasses will need updates |
+| [SWE-bench: Can Language Models Resolve Real-World GitHub Issues?](https://arxiv.org/abs/2310.06770) (Jimenez et al., Princeton, 2024) | **Benchmark motivation** — showed that most agent failures come from incomplete context and missed dependencies; directly motivated `context_for_edit` and the verification gate |
+| [Self-Debugging: Teaching Large Language Models to Debug Their Own Code](https://arxiv.org/abs/2304.05128) (Chen et al., 2024) | **Structured self-repair** — the verify-and-repair loop feeds specific error locations and graph-derived repair suggestions back to the agent, not generic "fix it" prompts |
+| [Reflexion: Language Agents with Verbal Reinforcement Learning](https://arxiv.org/abs/2303.11366) (Shinn et al., 2023) | **Verbal feedback loop** — `repair_prompt()` generates structured natural language feedback from verification failures, enabling the agent to self-correct in one retry |
+| [SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering](https://arxiv.org/abs/2405.15793) (Yang et al., Princeton, 2024) | **Agent-computer interface design** — informed the tool design (7 code intelligence tools) and the verification-repair feedback loop |
+| [Measuring Coding Challenge Competence With APPS](https://arxiv.org/abs/2105.09938) (Hendrycks et al., 2021) | **Test-driven verification** — scoped test execution in the verification gate follows the principle of using tests as an oracle for code correctness |
+| [Git Context Controller](https://arxiv.org/abs/2508.00031) | **Structured versioned memory** — GCC commit/branch/merge semantics for agent reasoning context |
 
 ## Limitations (POC)
 

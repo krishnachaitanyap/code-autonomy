@@ -51,6 +51,7 @@ from src.agent.activity import (
     log_success,
     log_error,
     log_warning,
+    log_llm_stats,
 )
 from src.platform.reference_pr import get_reference_pr_context
 from src.startup_validator import validate_startup
@@ -72,7 +73,41 @@ def main() -> int:
     parser.add_argument("--testing-strategy", "-t", choices=["bdd", "contract", "integration", "unit", "e2e", "soap", "auto"],
                        help="Java testing strategy (default: auto or from config/changes)")
     parser.add_argument("--rebuild-consciousness", action="store_true", help="Force rebuild of project consciousness cache")
+    parser.add_argument("--init-knowledge", action="store_true",
+                        help="Generate a .code-autonomy.md repo knowledge file from project analysis")
     args = parser.parse_args()
+
+    # --init-knowledge: generate .code-autonomy.md and exit (no config needed)
+    if args.init_knowledge:
+        from src.consciousness.core import build_consciousness
+        from src.agent.knowledge_generator import (
+            detect_existing_knowledge_file,
+            generate_knowledge_markdown,
+            write_knowledge_file,
+        )
+
+        target_path = Path(args.repo_path).resolve() if args.repo_path else Path.cwd()
+        if not target_path.is_dir():
+            log_error(f"Target directory does not exist: {target_path}")
+            return 1
+
+        header("Init Knowledge", f"Target: {target_path}")
+
+        existing = detect_existing_knowledge_file(str(target_path))
+        if existing:
+            log_warning(f"Knowledge file already exists: {existing}")
+            log_info("Remove it first if you want to regenerate.")
+            return 0
+
+        with spinner("Analyzing project structure"):
+            consciousness = build_consciousness(str(target_path))
+
+        content = generate_knowledge_markdown(consciousness)
+        output_path = write_knowledge_file(str(target_path), content)
+
+        log_success(f"Created {output_path} ({len(content)} chars)")
+        log_info("Look for <!-- TODO --> markers and fill in project-specific details.")
+        return 0
 
     project_root = Path(__file__).parent
     os.chdir(project_root)
@@ -222,35 +257,55 @@ def main() -> int:
         except Exception as e:
             log_warning(f"Could not clone/build framework: {e}. Proceeding without framework context.")
 
+    use_agent = args.agent or args.plan or args.ask or workflow.get("use_agent", False)
+
     with step("Analyzing codebase"):
-        grep_patterns = workflow.get("grep_patterns") or []
-        if isinstance(grep_patterns, str) and grep_patterns.strip():
-            grep_patterns = [p.strip() for p in grep_patterns.split(",") if p.strip()]
-        context = build_context(
-            str(clone_path),
-            requirements=requirements,
-            config=config,
-            grep_patterns=grep_patterns,
-        )
-        # Build or load project consciousness (structure, conventions, samples)
+        # Build or load project consciousness (needed by all modes)
         consciousness = build_or_load_consciousness(
             str(clone_path),
             config,
             repo_url=repo_url,
             force_rebuild=getattr(args, "rebuild_consciousness", False),
         )
-        consciousness_str = consciousness.to_context_string()
-        if consciousness_str:
-            context += f"\n\n{consciousness_str}"
-            log_info("Included project consciousness (structure, conventions, samples)")
+        log_info("Loaded project consciousness (structure, conventions, samples)")
+
+        # Build or load code index (symbol table, dependency graph, hierarchy, embeddings)
+        code_index = None
+        if use_agent:
+            try:
+                from src.code_index import build_or_load_code_index
+                code_index = build_or_load_code_index(
+                    str(clone_path), config, repo_url=repo_url,
+                    consciousness=consciousness,
+                )
+                log_info(f"Loaded code index ({code_index.total_symbols} symbols, {code_index.total_files} files)")
+            except Exception as _ci_err:
+                log_warning(f"Could not build code index: {_ci_err}. Proceeding without it.")
 
         # Load repo knowledge files (.code-autonomy.md, AGENT.md, or .code-autonomy/ dir)
         repo_knowledge = load_repo_knowledge(str(clone_path))
         if repo_knowledge:
-            consciousness_str = (consciousness_str or "") + repo_knowledge
-            context += repo_knowledge
             log_info(f"Included repo knowledge ({len(repo_knowledge)} chars)")
-    log_info(f"Loaded {len(context)} chars of context")
+
+        # build_context() is only needed for standard (non-agent) mode — agent
+        # modes use tools to explore the codebase, so bulk context is wasteful.
+        context = ""
+        if not use_agent:
+            grep_patterns = workflow.get("grep_patterns") or []
+            if isinstance(grep_patterns, str) and grep_patterns.strip():
+                grep_patterns = [p.strip() for p in grep_patterns.split(",") if p.strip()]
+            context = build_context(
+                str(clone_path),
+                requirements=requirements,
+                config=config,
+                grep_patterns=grep_patterns,
+            )
+            consciousness_str = consciousness.to_context_string()
+            if consciousness_str:
+                context += f"\n\n{consciousness_str}"
+            if repo_knowledge:
+                context += repo_knowledge
+            log_info(f"Loaded {len(context)} chars of context")
 
     # Fetch reference PR if specified (CLI > config > changes file)
     reference_pr_url = args.reference_pr or workflow.get("reference_pr") or reference_pr_from_file or ""
@@ -277,7 +332,6 @@ def main() -> int:
     )
     build_tool = detect_build_tool(str(clone_path))  # maven or gradle for Java
 
-    use_agent = args.agent or args.plan or args.ask or workflow.get("use_agent", False)
     use_plan = args.plan
 
     if args.ask:
@@ -298,10 +352,12 @@ def main() -> int:
                 str(clone_path),
                 llm_config=ai_cfg,
                 verbose=ai_cfg.get("verbose", False),
-                consciousness_context=consciousness_str or "",
+                consciousness=consciousness,
                 agent_config=agent_config,
                 config=config,
                 repo_url=repo_url,
+                repo_knowledge=repo_knowledge,
+                code_index=code_index,
             )
 
         if ask_result.success:
@@ -318,6 +374,9 @@ def main() -> int:
             print(f"{'=' * 60}\n")
         else:
             log_error(f"Could not answer: {ask_result.summary}")
+
+        if ask_result.usage_stats and ask_result.usage_stats.num_calls > 0:
+            log_llm_stats(ask_result.usage_stats)
 
         return 0
 
@@ -346,11 +405,13 @@ def main() -> int:
                 verbose=ai_cfg.get("verbose", False),
                 testing_strategy=testing_strategy,
                 build_tool=build_tool,
-                consciousness_context=consciousness_str or "",
+                consciousness=consciousness,
                 framework_context=framework_context,
                 agent_config=agent_config,
                 config=config,
                 repo_url=repo_url,
+                repo_knowledge=repo_knowledge,
+                code_index=code_index,
             )
 
         if not plan_result.success or plan_result.plan is None or plan_result.plan.is_empty:
@@ -359,6 +420,8 @@ def main() -> int:
 
         log_success(f"Plan complete: {plan_result.summary}")
         log_info(f"Proposed changes to {len(plan_result.plan.files_affected)} file(s) in {plan_result.turns_used} turns")
+        if plan_result.usage_stats and plan_result.usage_stats.num_calls > 0:
+            log_llm_stats(plan_result.usage_stats)
 
         # Display diffs
         render_plan(plan_result.plan, str(clone_path))
@@ -403,15 +466,19 @@ def main() -> int:
                     verbose=ai_cfg.get("verbose", False),
                     testing_strategy=testing_strategy,
                     build_tool=build_tool,
-                    consciousness_context=consciousness_str or "",
+                    consciousness=consciousness,
                     framework_context=framework_context,
                     agent_config=agent_config_full,
                     config=config,
                     repo_url=repo_url,
+                    repo_knowledge=repo_knowledge,
+                    code_index=code_index,
                 )
             if result.success:
                 modified = result.files_changed
                 log_success(f"Agent completed: {result.summary}")
+                if result.usage_stats and result.usage_stats.num_calls > 0:
+                    log_llm_stats(result.usage_stats)
             else:
                 log_error(f"Agent did not complete: {result.summary}")
                 return 1
@@ -456,17 +523,73 @@ def main() -> int:
                 verbose=ai_cfg.get("verbose", False),
                 testing_strategy=testing_strategy,
                 build_tool=build_tool,
-                consciousness_context=consciousness_str or "",
+                consciousness=consciousness,
                 framework_context=framework_context,
                 agent_config=agent_config,
                 config=config,
                 repo_url=repo_url,
+                repo_knowledge=repo_knowledge,
+                code_index=code_index,
             )
 
         if result.success:
             modified = result.files_changed
             log_success(f"Agent completed: {result.summary}")
             log_info(f"Modified {len(modified)} file(s) in {result.turns_used} turns")
+            if result.usage_stats and result.usage_stats.num_calls > 0:
+                log_llm_stats(result.usage_stats)
+
+            # Post-edit verification gate
+            if modified and not args.dry_run and not using_local_repo and code_index is not None:
+                try:
+                    from src.code_index import post_edit_verification_gate
+                    verification = post_edit_verification_gate(
+                        str(clone_path), modified, code_index, config,
+                    )
+                    if verification.passed:
+                        log_success("Post-edit verification passed")
+                    else:
+                        log_warning(f"Post-edit verification issues:\n{verification.summary()}")
+                        # Retry: re-invoke agent with repair instructions (max 1 retry)
+                        repair_prompt = verification.repair_prompt()
+                        if repair_prompt:
+                            log_info("Attempting repair via agent retry...")
+                            repair_requirements = (
+                                f"{requirements}\n\n{repair_prompt}"
+                            )
+                            with spinner("Agent repairing verification failures"):
+                                repair_result = generate_changes_with_agent(
+                                    repair_requirements,
+                                    str(clone_path),
+                                    llm_config=ai_cfg,
+                                    reference_pr_content=reference_pr_content,
+                                    verbose=ai_cfg.get("verbose", False),
+                                    max_turns=20,
+                                    testing_strategy=testing_strategy,
+                                    build_tool=build_tool,
+                                    consciousness=consciousness,
+                                    framework_context=framework_context,
+                                    agent_config=agent_config,
+                                    config=config,
+                                    repo_url=repo_url,
+                                    repo_knowledge=repo_knowledge,
+                                    code_index=code_index,
+                                )
+                            if repair_result.success:
+                                modified = list(set(modified) | set(repair_result.files_changed))
+                                log_info("Re-verifying after repair...")
+                                reverify = post_edit_verification_gate(
+                                    str(clone_path), modified, code_index, config,
+                                )
+                                if reverify.passed:
+                                    log_success("Post-repair verification passed")
+                                else:
+                                    log_warning(f"Post-repair verification still has issues:\n{reverify.summary()}")
+                            else:
+                                log_warning(f"Repair attempt did not complete: {repair_result.summary}")
+                except Exception as _ve:
+                    log_warning(f"Post-edit verification skipped: {_ve}")
+
         elif result.changes:
             # Backward compat: agent fell back to legacy JSON mode
             log_info("Agent used legacy JSON mode")
@@ -558,7 +681,6 @@ def main() -> int:
             if consciousness_str:
                 context += f"\n\n{consciousness_str}"
             if repo_knowledge:
-                consciousness_str = (consciousness_str or "") + repo_knowledge
                 context += repo_knowledge
 
     if args.dry_run or using_local_repo:

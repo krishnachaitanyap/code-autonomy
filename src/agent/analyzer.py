@@ -50,6 +50,8 @@ class AgentResult:
     changes: list[dict] = field(default_factory=list)
     # Execution trace ID (for retrieving the full trace from the store)
     trace_id: str = ""
+    # LLM token usage statistics (populated when stats tracking is enabled)
+    usage_stats: "LLMUsageStats | None" = None
 
 
 @dataclass
@@ -61,6 +63,7 @@ class PlanResult:
     summary: str = ""
     turns_used: int = 0
     trace_id: str = ""
+    usage_stats: "LLMUsageStats | None" = None
 
 
 @dataclass
@@ -73,6 +76,7 @@ class AskResult:
     summary: str = ""
     turns_used: int = 0
     trace_id: str = ""
+    usage_stats: "LLMUsageStats | None" = None
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +109,15 @@ You are an expert software engineer with tools to explore AND modify the codebas
 ## Memory tools
 - update_memory(key, content): Write a note to working memory. Notes survive context compression and are saved when you call task_complete. Use keys: 'project_overview', 'key_patterns', 'file_notes', or any custom key.
 - read_memory(): Read all notes from working memory and prior knowledge from previous runs.
+
+## Code intelligence tools (available when code index is built)
+- find_callers(symbol_name): Find all callers of a function/method/class
+- find_dependents(file_path): Find all files that import from a given file
+- impact_analysis(file_path): Callers + dependents + related tests for a file
+- describe_entity(symbol_name): Full signature, docstring, callers, callees
+- find_similar(query, top_k?): Semantic search across all code entities
+- context_for_edit(file_path, symbol_name?, intent?): Pre-edit context — callers, callees, dependents, hierarchy, tests
+- predict_breakage(file_path, changes_description?): Risk report — what callers/children/dependents will break
 
 ## Completion
 - task_complete(summary, files_changed): Call when ALL changes are done and verified
@@ -146,6 +159,15 @@ You are an expert software engineer in PLAN mode. You can explore the codebase \
 - update_memory(key, content): Write a note to working memory.
 - read_memory(): Read all notes from working memory and prior knowledge.
 
+## Code intelligence tools (available when code index is built)
+- find_callers(symbol_name): Find all callers of a function/method/class
+- find_dependents(file_path): Find all files that import from a given file
+- impact_analysis(file_path): Callers + dependents + related tests for a file
+- describe_entity(symbol_name): Full signature, docstring, callers, callees
+- find_similar(query, top_k?): Semantic search across all code entities
+- context_for_edit(file_path, symbol_name?, intent?): Pre-edit context — callers, callees, dependents, hierarchy, tests
+- predict_breakage(file_path, changes_description?): Risk report — what callers/children/dependents will break
+
 ## Completion
 - task_complete(summary, files_changed): Call when you have proposed ALL necessary changes.
 
@@ -179,6 +201,15 @@ propose changes.
 ## Memory tools
 - update_memory(key, content): Write a note to working memory.
 - read_memory(): Read all notes from working memory and prior knowledge.
+
+## Code intelligence tools (available when code index is built)
+- find_callers(symbol_name): Find all callers of a function/method/class
+- find_dependents(file_path): Find all files that import from a given file
+- impact_analysis(file_path): Callers + dependents + related tests for a file
+- describe_entity(symbol_name): Full signature, docstring, callers, callees
+- find_similar(query, top_k?): Semantic search across all code entities
+- context_for_edit(file_path, symbol_name?, intent?): Pre-edit context — callers, callees, dependents, hierarchy, tests
+- predict_breakage(file_path, changes_description?): Risk report — what callers/children/dependents will break
 
 ## Completion
 - task_complete(answer, sources): Call when you have fully answered the question.
@@ -228,20 +259,27 @@ def _build_agent_context(
     reference_pr_content: str = "",
     testing_strategy: str = "auto",
     build_tool: Optional[str] = None,
-    consciousness_context: str = "",
+    consciousness: "ProjectConsciousness | None" = None,
     framework_context: str = "",
     config: Optional[dict] = None,
     repo_url: str = "",
     instruction_suffix: str = "",
+    repo_knowledge: str = "",
 ) -> tuple[str, str]:
     """Build the user message and knowledge context for both agent and plan modes.
+
+    Uses ``build_smart_initial_context`` to produce focused, requirement-relevant
+    context instead of dumping the full consciousness string.  When
+    *repo_knowledge* (hand-written ``.code-autonomy.md``) is present, it is
+    included directly and the auto-generated consciousness structure/conventions
+    are suppressed in favour of the higher-quality manual docs.
 
     Returns (user_message, knowledge_context).
     """
     from pathlib import Path
     repo_root = Path(repo_path)
 
-    # Load persistent knowledge
+    # Load persistent knowledge from prior runs
     knowledge_context = ""
     try:
         prior = load_knowledge(config, repo_path, repo_url)
@@ -250,15 +288,21 @@ def _build_agent_context(
     except Exception:
         pass
 
-    # Initial context (consciousness)
+    # Build focused initial context (requirement-relevant only)
     initial_context = ""
     try:
         from src.agent.context import build_smart_initial_context
-        from src.consciousness.core import ProjectConsciousness
-        if consciousness_context:
-            initial_context = consciousness_context
+        initial_context = build_smart_initial_context(
+            repo_path, requirements, consciousness=consciousness,
+        )
     except ImportError:
-        initial_context = consciousness_context or ""
+        # Fallback: render consciousness directly if smart builder unavailable
+        if consciousness is not None:
+            initial_context = consciousness.to_context_string()
+
+    # Repo knowledge (hand-written .code-autonomy.md) — higher quality than
+    # auto-generated consciousness, so include it alongside the focused extract.
+    repo_knowledge_section = f"\n{repo_knowledge}\n" if repo_knowledge else ""
 
     # Testing strategy
     testing_section = ""
@@ -278,7 +322,8 @@ def _build_agent_context(
         if reference_pr_content
         else ""
     )
-    knowledge_section = f"\n\n{knowledge_context}\n" if knowledge_context else ""
+    # Only include prior knowledge if it adds new info beyond repo_knowledge
+    knowledge_section = f"\n\n{knowledge_context}\n" if knowledge_context and not repo_knowledge else ""
 
     suffix = instruction_suffix or (
         "Start by listing the repo root with list_dir, then explore relevant files "
@@ -288,6 +333,7 @@ def _build_agent_context(
     user_msg = (
         f"## Requirements\n{requirements}\n"
         f"{initial_context}\n"
+        f"{repo_knowledge_section}"
         f"{framework_section}"
         f"{testing_section}"
         f"{ref_section}"
@@ -311,11 +357,13 @@ def generate_changes_with_agent(
     verbose: bool = False,
     testing_strategy: str = "auto",
     build_tool: Optional[str] = None,
-    consciousness_context: str = "",
+    consciousness: "ProjectConsciousness | None" = None,
     framework_context: str = "",
     agent_config: Optional[dict] = None,
     config: Optional[dict] = None,
     repo_url: str = "",
+    repo_knowledge: str = "",
+    code_index: "CodeIndex | None" = None,
 ) -> AgentResult:
     """Run the agentic loop: explore → edit → test → fix → complete.
 
@@ -323,11 +371,14 @@ def generate_changes_with_agent(
     *summary*, etc.  When the LLM falls back to legacy JSON-output mode the
     result carries ``changes`` instead.
     """
-    from src.llm_client import chat_completion
+    from src.llm_client import chat_completion, LLMUsageStats
 
     repo_root = Path(repo_path)
     agent_cfg = agent_config or {}
     max_turns = agent_cfg.get("max_turns", max_turns)
+
+    # LLM usage tracking
+    usage_stats = LLMUsageStats()
     smart_summarization = agent_cfg.get("smart_summarization", True)
     truncation_limit = agent_cfg.get("truncation_limit", 30_000)
 
@@ -357,8 +408,8 @@ def generate_changes_with_agent(
             requirements=requirements,
         )
 
-    # Build the full tool list (read + write + exec + memory + complete)
-    all_tools = build_agent_tools(agent_cfg)
+    # Build the full tool list (read + write + exec + memory + complete + code_index)
+    all_tools = build_agent_tools(agent_cfg, code_index=code_index)
 
     # Build shared context
     user_msg, _knowledge_ctx = _build_agent_context(
@@ -368,10 +419,11 @@ def generate_changes_with_agent(
         reference_pr_content=reference_pr_content,
         testing_strategy=testing_strategy,
         build_tool=build_tool,
-        consciousness_context=consciousness_context,
+        consciousness=consciousness,
         framework_context=framework_context,
         config=config,
         repo_url=repo_url,
+        repo_knowledge=repo_knowledge,
     )
 
     system_prompt = _SYSTEM_PROMPT
@@ -411,6 +463,7 @@ def generate_changes_with_agent(
                 llm_config=llm_config,
                 smart_summarization=smart_summarization,
                 full_config=config,
+                usage_stats=usage_stats,
             )
             if collector and ctx_span_id:
                 collector.end_span(
@@ -441,6 +494,7 @@ def generate_changes_with_agent(
             tool_choice="auto",
             temperature=0.2,
             full_config=config,
+            usage_stats=usage_stats,
         )
 
         tool_calls = getattr(msg, "tool_calls", None)
@@ -468,6 +522,7 @@ def generate_changes_with_agent(
                     changes=parsed,
                     turns_used=turn + 1,
                     summary="Legacy JSON output mode",
+                    usage_stats=usage_stats,
                 )
                 if collector:
                     try:
@@ -571,6 +626,7 @@ def generate_changes_with_agent(
                     agent_config=agent_cfg,
                     working_memory=working_memory,
                     gcc_controller=gcc_controller,
+                    code_index=code_index,
                 )
                 # --- End tool span with reward ---
                 if collector and tool_span_id:
@@ -608,7 +664,9 @@ def generate_changes_with_agent(
                     from src.agent.context import summarize_large_output
 
                     if smart_summarization:
-                        result = summarize_large_output(result, name, llm_config)
+                        result = summarize_large_output(
+                            result, name, llm_config, usage_stats=usage_stats,
+                        )
                     else:
                         result = result[:truncation_limit] + f"\n...(truncated, {len(result)} total chars)"
                 except ImportError:
@@ -623,16 +681,11 @@ def generate_changes_with_agent(
                 "content": result,
             })
 
-            # --- Working memory protection: inject into system prompt ---
-            if name == "update_memory" and not working_memory.is_empty():
-                wm_block = working_memory.to_message_block()
-                gcc_block = gcc_controller.to_message_block() if gcc_controller else ""
-                messages[0] = {"role": "system", "content": system_prompt + "\n" + wm_block + gcc_block}
-
-            # --- GCC context injection after gcc_* tool calls ---
-            if name.startswith("gcc_") and gcc_controller:
-                gcc_block = gcc_controller.to_message_block()
+            # --- Inject working memory / GCC context into system prompt ---
+            if (name == "update_memory" and not working_memory.is_empty()) or \
+               (name.startswith("gcc_") and gcc_controller):
                 wm_block = working_memory.to_message_block() if not working_memory.is_empty() else ""
+                gcc_block = gcc_controller.to_message_block() if gcc_controller else ""
                 messages[0] = {"role": "system", "content": system_prompt + "\n" + wm_block + gcc_block}
 
             # --- Stuck detection (same error 3 times) ---
@@ -673,6 +726,7 @@ def generate_changes_with_agent(
             summary=task_complete_data.get("summary", ""),
             turns_used=turn + 1,
             tests_passed=True,
+            usage_stats=usage_stats,
         )
     else:
         # Agent exhausted turns without completing
@@ -681,6 +735,7 @@ def generate_changes_with_agent(
             files_changed=sorted(changes_tracker),
             summary=f"Agent did not call task_complete within {max_turns} turns",
             turns_used=max_turns,
+            usage_stats=usage_stats,
         )
 
     # --- Save execution trace ---
@@ -716,23 +771,28 @@ def generate_plan_with_agent(
     verbose: bool = False,
     testing_strategy: str = "auto",
     build_tool: Optional[str] = None,
-    consciousness_context: str = "",
+    consciousness: "ProjectConsciousness | None" = None,
     framework_context: str = "",
     agent_config: Optional[dict] = None,
     config: Optional[dict] = None,
     repo_url: str = "",
+    repo_knowledge: str = "",
+    code_index: "CodeIndex | None" = None,
 ) -> "PlanResult":
     """Run the agent in plan mode: explore → propose changes → complete.
 
     Returns a :class:`PlanResult` with the accumulated :class:`ChangePlan`.
     No files are written to disk.
     """
-    from src.llm_client import chat_completion
+    from src.llm_client import chat_completion, LLMUsageStats
     from src.agent.plan import ChangePlan
 
     repo_root = Path(repo_path)
     agent_cfg = agent_config or {}
     max_turns = agent_cfg.get("plan_max_turns", agent_cfg.get("max_turns", max_turns))
+
+    # LLM usage tracking
+    usage_stats = LLMUsageStats()
     smart_summarization = agent_cfg.get("smart_summarization", True)
     truncation_limit = agent_cfg.get("truncation_limit", 30_000)
 
@@ -759,8 +819,8 @@ def generate_plan_with_agent(
             requirements=requirements,
         )
 
-    # Build plan-mode tool list (read + propose + memory + completion)
-    all_tools = build_plan_tools(agent_cfg)
+    # Build plan-mode tool list (read + propose + memory + completion + code_index)
+    all_tools = build_plan_tools(agent_cfg, code_index=code_index)
 
     # Build shared context
     user_msg, _knowledge_ctx = _build_agent_context(
@@ -770,7 +830,7 @@ def generate_plan_with_agent(
         reference_pr_content=reference_pr_content,
         testing_strategy=testing_strategy,
         build_tool=build_tool,
-        consciousness_context=consciousness_context,
+        consciousness=consciousness,
         framework_context=framework_context,
         config=config,
         repo_url=repo_url,
@@ -779,6 +839,7 @@ def generate_plan_with_agent(
             "Once you understand the codebase, use propose_change to propose ALL needed changes. "
             "When done proposing, call task_complete."
         ),
+        repo_knowledge=repo_knowledge,
     )
 
     system_prompt = _PLAN_SYSTEM_PROMPT
@@ -809,6 +870,7 @@ def generate_plan_with_agent(
                 messages, model=model_name, llm_config=llm_config,
                 smart_summarization=smart_summarization,
                 full_config=config,
+                usage_stats=usage_stats,
             )
             if collector and ctx_span_id:
                 collector.end_span(
@@ -839,6 +901,7 @@ def generate_plan_with_agent(
             tool_choice="auto",
             temperature=0.2,
             full_config=config,
+            usage_stats=usage_stats,
         )
 
         tool_calls = getattr(msg, "tool_calls", None)
@@ -932,6 +995,7 @@ def generate_plan_with_agent(
                     change_plan=change_plan,
                     working_memory=working_memory,
                     gcc_controller=gcc_controller,
+                    code_index=code_index,
                 )
                 if agent_cfg.get("show_activity", True):
                     log_agent_activity(turn, name, args, summarize_tool_result(result, name))
@@ -952,7 +1016,9 @@ def generate_plan_with_agent(
                 try:
                     from src.agent.context import summarize_large_output
                     if smart_summarization:
-                        result = summarize_large_output(result, name, llm_config)
+                        result = summarize_large_output(
+                            result, name, llm_config, usage_stats=usage_stats,
+                        )
                     else:
                         result = result[:truncation_limit] + f"\n...(truncated, {len(result)} total chars)"
                 except ImportError:
@@ -967,16 +1033,11 @@ def generate_plan_with_agent(
                 "content": result,
             })
 
-            # Working memory protection
-            if name == "update_memory" and not working_memory.is_empty():
-                wm_block = working_memory.to_message_block()
-                gcc_block = gcc_controller.to_message_block() if gcc_controller else ""
-                messages[0] = {"role": "system", "content": system_prompt + "\n" + wm_block + gcc_block}
-
-            # GCC context injection after gcc_* tool calls
-            if name.startswith("gcc_") and gcc_controller:
-                gcc_block = gcc_controller.to_message_block()
+            # --- Inject working memory / GCC context into system prompt ---
+            if (name == "update_memory" and not working_memory.is_empty()) or \
+               (name.startswith("gcc_") and gcc_controller):
                 wm_block = working_memory.to_message_block() if not working_memory.is_empty() else ""
+                gcc_block = gcc_controller.to_message_block() if gcc_controller else ""
                 messages[0] = {"role": "system", "content": system_prompt + "\n" + wm_block + gcc_block}
 
         if task_complete_data:
@@ -989,6 +1050,7 @@ def generate_plan_with_agent(
             plan=change_plan,
             summary=task_complete_data.get("summary", ""),
             turns_used=turn + 1,
+            usage_stats=usage_stats,
         )
     else:
         plan_result = PlanResult(
@@ -996,6 +1058,7 @@ def generate_plan_with_agent(
             plan=change_plan,
             summary=f"Agent did not call task_complete within {max_turns} turns",
             turns_used=max_turns,
+            usage_stats=usage_stats,
         )
 
     # --- Save trace ---
@@ -1026,21 +1089,26 @@ def generate_answer_with_agent(
     llm_config: dict,
     max_turns: int = 20,
     verbose: bool = False,
-    consciousness_context: str = "",
+    consciousness: "ProjectConsciousness | None" = None,
     agent_config: Optional[dict] = None,
     config: Optional[dict] = None,
     repo_url: str = "",
+    repo_knowledge: str = "",
+    code_index: "CodeIndex | None" = None,
 ) -> "AskResult":
     """Run the agent in ask mode: explore → answer question → complete.
 
     Returns an :class:`AskResult` with the answer and source files consulted.
     No files are written to disk.
     """
-    from src.llm_client import chat_completion
+    from src.llm_client import chat_completion, LLMUsageStats
 
     repo_root = Path(repo_path)
     agent_cfg = agent_config or {}
     max_turns = agent_cfg.get("ask_max_turns", agent_cfg.get("max_turns", max_turns))
+
+    # LLM usage tracking
+    usage_stats = LLMUsageStats()
     smart_summarization = agent_cfg.get("smart_summarization", True)
     truncation_limit = agent_cfg.get("truncation_limit", 30_000)
 
@@ -1067,24 +1135,38 @@ def generate_answer_with_agent(
             requirements=question,
         )
 
-    # Build ask-mode tool list (read + memory + ask completion)
-    all_tools = build_ask_tools(agent_cfg)
+    # Build ask-mode tool list (read + memory + ask completion + code_index)
+    all_tools = build_ask_tools(agent_cfg, code_index=code_index)
 
-    # Build simplified context (question + consciousness + prior knowledge)
-    knowledge_context = ""
+    # Build focused context (question-relevant only)
+    initial_context = ""
     try:
-        prior = load_knowledge(config, repo_path, repo_url)
-        if prior:
-            knowledge_context = prior.to_context_string()
-    except Exception:
-        pass
+        from src.agent.context import build_smart_initial_context
+        initial_context = build_smart_initial_context(
+            repo_path, question, consciousness=consciousness,
+        )
+    except ImportError:
+        if consciousness is not None:
+            initial_context = consciousness.to_context_string()
 
-    initial_context = consciousness_context or ""
+    # Repo knowledge (hand-written .code-autonomy.md)
+    repo_knowledge_section = f"\n{repo_knowledge}\n" if repo_knowledge else ""
+
+    # Prior knowledge from previous runs (skip if repo_knowledge already present)
+    knowledge_context = ""
+    if not repo_knowledge:
+        try:
+            prior = load_knowledge(config, repo_path, repo_url)
+            if prior:
+                knowledge_context = prior.to_context_string()
+        except Exception:
+            pass
     knowledge_section = f"\n\n{knowledge_context}\n" if knowledge_context else ""
 
     user_msg = (
         f"## Question\n{question}\n"
         f"{initial_context}\n"
+        f"{repo_knowledge_section}"
         f"{knowledge_section}\n\n"
         "Start by listing the repo root with list_dir, then explore relevant files "
         "to answer the question. When you have a complete answer, call task_complete."
@@ -1118,6 +1200,7 @@ def generate_answer_with_agent(
                 messages, model=model_name, llm_config=llm_config,
                 smart_summarization=smart_summarization,
                 full_config=config,
+                usage_stats=usage_stats,
             )
             if collector and ctx_span_id:
                 collector.end_span(
@@ -1148,6 +1231,7 @@ def generate_answer_with_agent(
             tool_choice="auto",
             temperature=0.2,
             full_config=config,
+            usage_stats=usage_stats,
         )
 
         tool_calls = getattr(msg, "tool_calls", None)
@@ -1236,6 +1320,7 @@ def generate_answer_with_agent(
                     repo_root, name, args,
                     working_memory=working_memory,
                     gcc_controller=gcc_controller,
+                    code_index=code_index,
                 )
                 # Track sources from successful read_file calls
                 if name == "read_file" and not result.startswith("Error:"):
@@ -1259,7 +1344,9 @@ def generate_answer_with_agent(
                 try:
                     from src.agent.context import summarize_large_output
                     if smart_summarization:
-                        result = summarize_large_output(result, name, llm_config)
+                        result = summarize_large_output(
+                            result, name, llm_config, usage_stats=usage_stats,
+                        )
                     else:
                         result = result[:truncation_limit] + f"\n...(truncated, {len(result)} total chars)"
                 except ImportError:
@@ -1274,16 +1361,11 @@ def generate_answer_with_agent(
                 "content": result,
             })
 
-            # Working memory protection
-            if name == "update_memory" and not working_memory.is_empty():
-                wm_block = working_memory.to_message_block()
-                gcc_block = gcc_controller.to_message_block() if gcc_controller else ""
-                messages[0] = {"role": "system", "content": system_prompt + "\n" + wm_block + gcc_block}
-
-            # GCC context injection after gcc_* tool calls
-            if name.startswith("gcc_") and gcc_controller:
-                gcc_block = gcc_controller.to_message_block()
+            # --- Inject working memory / GCC context into system prompt ---
+            if (name == "update_memory" and not working_memory.is_empty()) or \
+               (name.startswith("gcc_") and gcc_controller):
                 wm_block = working_memory.to_message_block() if not working_memory.is_empty() else ""
+                gcc_block = gcc_controller.to_message_block() if gcc_controller else ""
                 messages[0] = {"role": "system", "content": system_prompt + "\n" + wm_block + gcc_block}
 
         if task_complete_data:
@@ -1300,6 +1382,7 @@ def generate_answer_with_agent(
             sources=all_sources,
             summary=task_complete_data.get("summary", ""),
             turns_used=turn + 1,
+            usage_stats=usage_stats,
         )
     else:
         ask_result = AskResult(
@@ -1308,6 +1391,7 @@ def generate_answer_with_agent(
             sources=sorted(sources_consulted),
             summary=f"Agent did not call task_complete within {max_turns} turns",
             turns_used=max_turns,
+            usage_stats=usage_stats,
         )
 
     # --- Save trace ---
