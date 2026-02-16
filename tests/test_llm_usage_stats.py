@@ -50,6 +50,7 @@ class TestLLMUsageStats:
             "prompt_tokens": 10,
             "completion_tokens": 5,
             "total_tokens": 15,
+            "category": "main",
         }
 
     def test_zero_token_record(self):

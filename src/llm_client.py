@@ -26,13 +26,27 @@ class LLMUsageStats:
 
     calls: list[dict] = field(default_factory=list)
 
-    def record(self, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> None:
+    def record(self, prompt_tokens: int, completion_tokens: int, total_tokens: int, category: str = "main") -> None:
         """Record usage from a single LLM call."""
         self.calls.append({
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
+            "category": category,
         })
+
+    def calls_by_category(self, category: str) -> int:
+        """Return the number of calls in *category*."""
+        return sum(1 for c in self.calls if c.get("category") == category)
+
+    def tokens_by_category(self, category: str) -> int:
+        """Return the total tokens used by *category*."""
+        return sum(c["total_tokens"] for c in self.calls if c.get("category") == category)
+
+    @property
+    def categories(self) -> list[str]:
+        """Return distinct categories seen so far."""
+        return sorted({c.get("category", "main") for c in self.calls})
 
     @property
     def num_calls(self) -> int:
@@ -202,6 +216,7 @@ def chat_completion(
     temperature: float = 0.2,
     full_config: Optional[dict] = None,
     usage_stats: Optional[LLMUsageStats] = None,
+    usage_category: str = "main",
 ) -> tuple[str, Any]:
     """
     Unified chat completion across OpenAI, Anthropic, Gemini.
@@ -246,6 +261,7 @@ def chat_completion(
                     prompt_tokens=_usage.get("prompt_tokens", 0),
                     completion_tokens=_usage.get("completion_tokens", 0),
                     total_tokens=_usage.get("total_tokens", 0),
+                    category=usage_category,
                 )
             if _circuit_breaker is not None:
                 _circuit_breaker.record_success()
@@ -276,6 +292,7 @@ def chat_completion(
                         prompt_tokens=_usage.get("prompt_tokens", 0),
                         completion_tokens=_usage.get("completion_tokens", 0),
                         total_tokens=_usage.get("total_tokens", 0),
+                        category=usage_category,
                     )
                 if _circuit_breaker is not None:
                     _circuit_breaker.record_success()
@@ -342,6 +359,7 @@ def chat_completion(
                         prompt_tokens=getattr(_usage, "prompt_tokens", 0) or 0,
                         completion_tokens=getattr(_usage, "completion_tokens", 0) or 0,
                         total_tokens=getattr(_usage, "total_tokens", 0) or 0,
+                        category=usage_category,
                     )
             if _circuit_breaker is not None:
                 _circuit_breaker.record_success()

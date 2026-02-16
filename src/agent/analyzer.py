@@ -12,7 +12,10 @@ from pathlib import Path
 from typing import Optional
 
 from src.agent.tools import build_agent_tools, build_plan_tools, build_ask_tools, execute_tool, execute_plan_tool, execute_ask_tool, AGENT_TOOLS
-from src.agent.knowledge import WorkingMemory, load_knowledge, save_knowledge, compute_repo_id
+from src.agent.knowledge import (
+    WorkingMemory, load_knowledge, save_knowledge, compute_repo_id,
+    save_checkpoint, load_checkpoint, clear_checkpoint, compute_requirement_hash,
+)
 from src.agent.gcc import GCCController
 from src.agent.ai_utils import parse_ai_changes
 from src.agent.activity import log_agent_activity, summarize_tool_result
@@ -52,6 +55,8 @@ class AgentResult:
     trace_id: str = ""
     # LLM token usage statistics (populated when stats tracking is enabled)
     usage_stats: "LLMUsageStats | None" = None
+    # Checkpoint from an incomplete run (populated when agent exhausts turns)
+    checkpoint: "Checkpoint | None" = None
 
 
 @dataclass
@@ -364,6 +369,7 @@ def generate_changes_with_agent(
     repo_url: str = "",
     repo_knowledge: str = "",
     code_index: "CodeIndex | None" = None,
+    resume: bool = False,
 ) -> AgentResult:
     """Run the agentic loop: explore → edit → test → fix → complete.
 
@@ -381,6 +387,11 @@ def generate_changes_with_agent(
     usage_stats = LLMUsageStats()
     smart_summarization = agent_cfg.get("smart_summarization", True)
     truncation_limit = agent_cfg.get("truncation_limit", 30_000)
+
+    # Budget tracking
+    summarization_budget = agent_cfg.get("summarization_budget", 0)
+    testing_budget = agent_cfg.get("testing_budget", 0)
+    testing_turns_used = 0
 
     # Track every file the agent creates / edits / deletes
     changes_tracker: set[str] = set()
@@ -436,6 +447,32 @@ def generate_changes_with_agent(
     ]
 
     # ------------------------------------------------------------------ #
+    # Resume from checkpoint (if requested)
+    # ------------------------------------------------------------------ #
+    if resume:
+        existing_checkpoint = load_checkpoint(config, repo_path, repo_url)
+        if existing_checkpoint:
+            req_hash = compute_requirement_hash(requirements)
+            if existing_checkpoint.requirement_hash == req_hash:
+                checkpoint_context = existing_checkpoint.to_context_string()
+                # Restore working memory
+                for k, v in existing_checkpoint.working_memory.items():
+                    working_memory.update(k, v)
+                # Pre-populate changes tracker
+                for f in existing_checkpoint.files_changed:
+                    changes_tracker.add(f)
+                # Inject checkpoint context into user message
+                messages[1]["content"] = user_msg + f"\n\n{checkpoint_context}\n"
+                # Inject restored working memory into system prompt
+                if not working_memory.is_empty():
+                    messages[0]["content"] = system_prompt + "\n" + working_memory.to_message_block()
+                print(f"  [resume] Restored checkpoint: {existing_checkpoint.turns_used}/{existing_checkpoint.max_turns} turns, {len(existing_checkpoint.files_changed)} file(s)")
+            else:
+                print("  [resume] Checkpoint found but requirement differs — starting fresh")
+        else:
+            print("  [resume] No checkpoint found — starting fresh")
+
+    # ------------------------------------------------------------------ #
     # Agent loop
     # ------------------------------------------------------------------ #
     task_complete_data: Optional[dict] = None
@@ -464,6 +501,7 @@ def generate_changes_with_agent(
                 smart_summarization=smart_summarization,
                 full_config=config,
                 usage_stats=usage_stats,
+                summarization_budget=summarization_budget,
             )
             if collector and ctx_span_id:
                 collector.end_span(
@@ -655,6 +693,18 @@ def generate_changes_with_agent(
                 if agent_cfg.get("show_activity", True):
                     log_agent_activity(turn, name, args, summarize_tool_result(result, name))
 
+            # Track testing turns
+            if name == "run_command":
+                testing_turns_used += 1
+                if testing_budget > 0 and testing_turns_used >= testing_budget:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"You have used {testing_turns_used} of {testing_budget} allowed testing/build turns. "
+                            "Stop running tests and call task_complete with your current progress."
+                        ),
+                    })
+
             # Intelligent summarization for large outputs
             if len(result) > truncation_limit:
                 try:
@@ -663,6 +713,7 @@ def generate_changes_with_agent(
                     if smart_summarization:
                         result = summarize_large_output(
                             result, name, llm_config, usage_stats=usage_stats,
+                            summarization_budget=summarization_budget,
                         )
                     else:
                         result = result[:truncation_limit] + f"\n...(truncated, {len(result)} total chars)"
@@ -717,6 +768,11 @@ def generate_changes_with_agent(
     # Build result + finalize trace
     # ------------------------------------------------------------------ #
     if task_complete_data:
+        # Clear checkpoint on successful completion
+        try:
+            clear_checkpoint(config, repo_path, repo_url)
+        except Exception:
+            pass
         result_obj = AgentResult(
             success=True,
             files_changed=sorted(changes_tracker),
@@ -726,13 +782,30 @@ def generate_changes_with_agent(
             usage_stats=usage_stats,
         )
     else:
-        # Agent exhausted turns without completing
+        # Agent exhausted turns without completing — save checkpoint
+        checkpoint = save_checkpoint(
+            config, repo_path, repo_url, requirements,
+            sorted(changes_tracker), working_memory,
+            turns_used=max_turns, max_turns=max_turns,
+            summary=f"Agent used {max_turns} turns, changed {len(changes_tracker)} file(s).",
+            pending_work="Agent ran out of turns before calling task_complete.",
+            summarization_calls_used=usage_stats.calls_by_category("summarization") if usage_stats else 0,
+            testing_turns_used=testing_turns_used,
+        )
+        # Also save working memory into knowledge (even on failure)
+        try:
+            if not working_memory.is_empty():
+                save_knowledge(config, repo_path, repo_url, working_memory,
+                               summary="Incomplete run checkpoint")
+        except Exception:
+            pass
         result_obj = AgentResult(
             success=False,
             files_changed=sorted(changes_tracker),
             summary=f"Agent did not call task_complete within {max_turns} turns",
             turns_used=max_turns,
             usage_stats=usage_stats,
+            checkpoint=checkpoint,
         )
 
     # --- Save execution trace ---

@@ -108,22 +108,81 @@ def log_llm_stats(stats) -> None:
     if stats is None or stats.num_calls == 0:
         return
 
+    categories = getattr(stats, "categories", None)
+    has_categories = categories and len(categories) > 1
+
     if _USE_RICH and _RICH_AVAILABLE and console:
         table = Table(title="LLM Usage", border_style="dim", show_header=False, padding=(0, 1))
         table.add_column("Metric", style="cyan")
         table.add_column("Value", style="bold", justify="right")
         table.add_row("Calls", f"{stats.num_calls:,}")
+        if has_categories:
+            for cat in categories:
+                table.add_row(f"  {cat}", f"{stats.calls_by_category(cat):,}")
         table.add_row("Prompt tokens", f"{stats.total_prompt_tokens:,}")
         table.add_row("Completion tokens", f"{stats.total_completion_tokens:,}")
         table.add_row("Total tokens", f"{stats.total_tokens:,}")
+        if has_categories:
+            for cat in categories:
+                table.add_row(f"  {cat}", f"{stats.tokens_by_category(cat):,}")
         console.print(table)
     else:
         print(f"\n{'── LLM Usage ─':─<44}")
         print(f"  Calls:             {stats.num_calls:,}")
+        if has_categories:
+            for cat in categories:
+                print(f"    {cat + ':':20s} {stats.calls_by_category(cat):,}")
         print(f"  Prompt tokens:     {stats.total_prompt_tokens:,}")
         print(f"  Completion tokens: {stats.total_completion_tokens:,}")
         print(f"  Total tokens:      {stats.total_tokens:,}")
+        if has_categories:
+            for cat in categories:
+                print(f"    {cat + ':':20s} {stats.tokens_by_category(cat):,}")
         print(f"{'─' * 44}")
+
+
+def log_checkpoint_saved(checkpoint) -> None:
+    """Display a summary panel when an incomplete run checkpoint is saved.
+
+    Args:
+        checkpoint: A Checkpoint instance (from knowledge.py).
+    """
+    if checkpoint is None:
+        return
+
+    files = getattr(checkpoint, "files_changed", []) or []
+    turns_used = getattr(checkpoint, "turns_used", 0)
+    max_turns = getattr(checkpoint, "max_turns", 0)
+
+    if _USE_RICH and _RICH_AVAILABLE and console:
+        lines = [
+            f"[bold yellow]Turns used:[/] {turns_used}/{max_turns}",
+            f"[bold yellow]Files changed:[/] {len(files)}",
+        ]
+        for f in files[:10]:
+            lines.append(f"  - {f}")
+        if len(files) > 10:
+            lines.append(f"  ... and {len(files) - 10} more")
+        lines.append("")
+        lines.append("[bold]Resume with:[/] --resume")
+        content = "\n".join(lines)
+        console.print(Panel(
+            content,
+            title="[bold red]INCOMPLETE RUN — CHECKPOINT SAVED[/]",
+            border_style="red",
+        ))
+    else:
+        print(f"\n{'─' * 50}")
+        print("  INCOMPLETE RUN — CHECKPOINT SAVED")
+        print(f"{'─' * 50}")
+        print(f"  Turns used: {turns_used}/{max_turns}")
+        print(f"  Files changed: {len(files)}")
+        for f in files[:10]:
+            print(f"    - {f}")
+        if len(files) > 10:
+            print(f"    ... and {len(files) - 10} more")
+        print(f"  Resume with: --resume")
+        print(f"{'─' * 50}")
 
 
 def log_agent_activity(

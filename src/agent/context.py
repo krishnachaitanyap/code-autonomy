@@ -87,6 +87,7 @@ def summarize_large_output(
     llm_config: dict,
     full_config: Optional[dict] = None,
     usage_stats: "Optional[LLMUsageStats]" = None,
+    summarization_budget: int = 0,
 ) -> str:
     """Summarize a large tool result using a fast LLM call.
 
@@ -95,9 +96,17 @@ def summarize_large_output(
 
     If *usage_stats* is provided, the summarization LLM call's token usage
     is recorded so it doesn't become a hidden cost.
+
+    If *summarization_budget* > 0 and the budget is exhausted, falls back
+    to plain truncation instead of making another LLM call.
     """
     if len(content) < _SUMMARIZE_THRESHOLD:
         return content
+
+    # Budget check: fall back to truncation when budget is exhausted
+    if summarization_budget > 0 and usage_stats:
+        if usage_stats.calls_by_category("summarization") >= summarization_budget:
+            return content[:_SUMMARIZE_THRESHOLD] + "\n...(summarization budget exhausted)"
 
     summary_config = _get_summary_model_config(llm_config)
 
@@ -120,6 +129,7 @@ def summarize_large_output(
             temperature=0.0,
             full_config=full_config,
             usage_stats=usage_stats,
+            usage_category="summarization",
         )
         return f"[Summarized from {len(content)} chars]\n{summary}"
     except Exception:
@@ -142,6 +152,7 @@ def manage_conversation_context(
     smart_summarization: bool = True,
     full_config: Optional[dict] = None,
     usage_stats: "Optional[LLMUsageStats]" = None,
+    summarization_budget: int = 0,
 ) -> list[dict]:
     """Compress conversation when approaching context limits.
 
@@ -151,6 +162,7 @@ def manage_conversation_context(
     3. If still too large: drop oldest middle messages in pairs.
 
     If *usage_stats* is provided, any summarization LLM calls are tracked.
+    If *summarization_budget* > 0, summarization LLM calls are capped.
     """
     context_limit = get_context_limit(model)
     current_tokens = get_messages_token_count(messages)
@@ -174,6 +186,7 @@ def manage_conversation_context(
                 summarized = summarize_large_output(
                     content, "tool_result", llm_config,
                     full_config=full_config, usage_stats=usage_stats,
+                    summarization_budget=summarization_budget,
                 )
             else:
                 summarized = content[:500] + f"\n...(compressed, was {len(content)} chars)"

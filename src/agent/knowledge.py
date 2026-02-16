@@ -440,3 +440,314 @@ def _cap_length(text: str) -> str:
         _REPO_KNOWLEDGE_MAX_CHARS,
     )
     return text[:_REPO_KNOWLEDGE_MAX_CHARS] + "\n\n[... truncated — repo knowledge exceeded 10,000 chars]\n"
+
+
+# ===================================================================
+# 2. Checkpointing (resume from incomplete runs)
+# ===================================================================
+
+def compute_requirement_hash(requirements: str) -> str:
+    """SHA-256 of normalized requirement text (first 16 hex chars)."""
+    normalized = " ".join(requirements.strip().split())
+    return hashlib.sha256(normalized.encode()).hexdigest()[:16]
+
+
+@dataclass
+class Checkpoint:
+    """Snapshot of an incomplete agent run for resumption."""
+
+    repo_id: str = ""
+    repo_url: str = ""
+    requirement_hash: str = ""
+    requirements_text: str = ""
+    created_at: str = ""
+    files_changed: list[str] = field(default_factory=list)
+    summary: str = ""
+    pending_work: str = ""
+    working_memory: dict[str, str] = field(default_factory=dict)
+    turns_used: int = 0
+    max_turns: int = 0
+    summarization_calls_used: int = 0
+    testing_turns_used: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "repo_id": self.repo_id,
+            "repo_url": self.repo_url,
+            "requirement_hash": self.requirement_hash,
+            "requirements_text": self.requirements_text,
+            "created_at": self.created_at,
+            "files_changed": self.files_changed,
+            "summary": self.summary,
+            "pending_work": self.pending_work,
+            "working_memory": self.working_memory,
+            "turns_used": self.turns_used,
+            "max_turns": self.max_turns,
+            "summarization_calls_used": self.summarization_calls_used,
+            "testing_turns_used": self.testing_turns_used,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Checkpoint":
+        return cls(
+            repo_id=data.get("repo_id", ""),
+            repo_url=data.get("repo_url", ""),
+            requirement_hash=data.get("requirement_hash", ""),
+            requirements_text=data.get("requirements_text", ""),
+            created_at=data.get("created_at", ""),
+            files_changed=data.get("files_changed", []),
+            summary=data.get("summary", ""),
+            pending_work=data.get("pending_work", ""),
+            working_memory=data.get("working_memory", {}),
+            turns_used=data.get("turns_used", 0),
+            max_turns=data.get("max_turns", 0),
+            summarization_calls_used=data.get("summarization_calls_used", 0),
+            testing_turns_used=data.get("testing_turns_used", 0),
+        )
+
+    def to_context_string(self) -> str:
+        """Render as context block for injection into the agent prompt on resume."""
+        lines: list[str] = ["## Checkpoint from previous incomplete run"]
+        lines.append(f"Previous run used {self.turns_used}/{self.max_turns} turns before stopping.")
+
+        if self.files_changed:
+            lines.append(f"\n### Files already changed ({len(self.files_changed)})")
+            for f in self.files_changed:
+                lines.append(f"  - {f}")
+
+        if self.summary:
+            lines.append(f"\n### What was accomplished\n{self.summary}")
+
+        if self.pending_work:
+            lines.append(f"\n### What still needs to be done\n{self.pending_work}")
+
+        if self.working_memory:
+            lines.append("\n### Working memory from previous run")
+            for k, v in self.working_memory.items():
+                lines.append(f"#### {k}\n{v}")
+
+        return "\n".join(lines)
+
+
+# ===================================================================
+# 2a. FileCheckpointStore
+# ===================================================================
+
+class FileCheckpointStore:
+    """Stores checkpoints as JSON files in ``~/.code-autonomy/checkpoints/``."""
+
+    def __init__(self, storage_dir: str = "") -> None:
+        if storage_dir:
+            self._dir = Path(os.path.expanduser(storage_dir))
+        else:
+            self._dir = Path.home() / ".code-autonomy" / "checkpoints"
+
+    def save(self, checkpoint: Checkpoint) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        path = self._dir / f"{checkpoint.repo_id}.json"
+        path.write_text(json.dumps(checkpoint.to_dict(), indent=2), encoding="utf-8")
+        logger.info("Checkpoint saved to %s", path)
+
+    def load(self, repo_id: str) -> Optional[Checkpoint]:
+        path = self._dir / f"{repo_id}.json"
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return Checkpoint.from_dict(data)
+        except Exception as exc:
+            logger.warning("Failed to load checkpoint from %s: %s", path, exc)
+            return None
+
+    def clear(self, repo_id: str) -> None:
+        path = self._dir / f"{repo_id}.json"
+        if path.exists():
+            path.unlink()
+            logger.info("Checkpoint cleared: %s", path)
+
+
+# ===================================================================
+# 2b. AWSOpenSearchCheckpointStore
+# ===================================================================
+
+class AWSOpenSearchCheckpointStore:
+    """Stores checkpoints in AWS-managed OpenSearch Service with IAM auth."""
+
+    def __init__(
+        self,
+        opensearch_url: str,
+        index: str = "agent_checkpoints",
+        aws_region: str = "",
+    ) -> None:
+        self._url = opensearch_url.rstrip("/")
+        self._index = index
+        self._region = aws_region
+        self._client: Any = None
+
+    def _get_client(self) -> Any:
+        if self._client is not None:
+            return self._client
+
+        import boto3
+        from opensearchpy import OpenSearch, RequestsHttpConnection
+        from requests_aws4auth import AWS4Auth
+
+        session = boto3.Session()
+        credentials = session.get_credentials().get_frozen_credentials()
+        region = self._region or session.region_name or "us-east-1"
+
+        aws4auth = AWS4Auth(
+            credentials.access_key,
+            credentials.secret_key,
+            region,
+            "es",
+            session_token=credentials.token,
+        )
+
+        self._client = OpenSearch(
+            hosts=[self._url],
+            http_auth=aws4auth,
+            use_ssl=self._url.startswith("https"),
+            verify_certs=True,
+            connection_class=RequestsHttpConnection,
+        )
+
+        if not self._client.indices.exists(index=self._index):
+            self._client.indices.create(index=self._index, body={
+                "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+            })
+            logger.info("Created OpenSearch index: %s", self._index)
+
+        return self._client
+
+    def save(self, checkpoint: Checkpoint) -> None:
+        client = self._get_client()
+        client.index(
+            index=self._index,
+            id=checkpoint.repo_id,
+            body=checkpoint.to_dict(),
+            refresh=True,
+        )
+        logger.info("Checkpoint saved to OpenSearch: %s/%s", self._index, checkpoint.repo_id)
+
+    def load(self, repo_id: str) -> Optional[Checkpoint]:
+        client = self._get_client()
+        try:
+            resp = client.get(index=self._index, id=repo_id, ignore=[404])
+            if resp.get("found"):
+                return Checkpoint.from_dict(resp["_source"])
+            return None
+        except Exception as exc:
+            logger.warning("Failed to load checkpoint from OpenSearch: %s", exc)
+            return None
+
+    def clear(self, repo_id: str) -> None:
+        client = self._get_client()
+        try:
+            client.delete(index=self._index, id=repo_id, ignore=[404], refresh=True)
+            logger.info("Checkpoint cleared from OpenSearch: %s/%s", self._index, repo_id)
+        except Exception as exc:
+            logger.warning("Failed to clear checkpoint from OpenSearch: %s", exc)
+
+
+# ===================================================================
+# 2c. Checkpoint factory + helpers
+# ===================================================================
+
+def get_checkpoint_store(config: Optional[dict] = None) -> "FileCheckpointStore | AWSOpenSearchCheckpointStore":
+    """Select the checkpoint backend based on ``[knowledge]`` config."""
+    if config is None:
+        return FileCheckpointStore()
+
+    kcfg = config.get("knowledge", {})
+    backend = kcfg.get("backend", "file").lower()
+
+    if backend == "opensearch":
+        url = kcfg.get("opensearch_url", "")
+        if not url:
+            return FileCheckpointStore(kcfg.get("storage_dir", ""))
+        return AWSOpenSearchCheckpointStore(
+            opensearch_url=url,
+            index=kcfg.get("checkpoint_index", "agent_checkpoints"),
+            aws_region=kcfg.get("aws_region", ""),
+        )
+
+    return FileCheckpointStore(kcfg.get("storage_dir", ""))
+
+
+def save_checkpoint(
+    config: Optional[dict],
+    repo_path: str,
+    repo_url: str,
+    requirements: str,
+    files_changed: list[str],
+    working_memory: "WorkingMemory | dict[str, str]",
+    turns_used: int = 0,
+    max_turns: int = 0,
+    summary: str = "",
+    pending_work: str = "",
+    summarization_calls_used: int = 0,
+    testing_turns_used: int = 0,
+) -> Checkpoint:
+    """Create and persist a checkpoint for an incomplete agent run."""
+    repo_id = compute_repo_id(repo_path, repo_url)
+    req_hash = compute_requirement_hash(requirements)
+
+    wm_dict: dict[str, str]
+    if isinstance(working_memory, WorkingMemory):
+        wm_dict = working_memory.to_dict()
+    else:
+        wm_dict = dict(working_memory)
+
+    checkpoint = Checkpoint(
+        repo_id=repo_id,
+        repo_url=repo_url,
+        requirement_hash=req_hash,
+        requirements_text=requirements[:2000],
+        created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        files_changed=files_changed,
+        summary=summary,
+        pending_work=pending_work,
+        working_memory=wm_dict,
+        turns_used=turns_used,
+        max_turns=max_turns,
+        summarization_calls_used=summarization_calls_used,
+        testing_turns_used=testing_turns_used,
+    )
+
+    try:
+        store = get_checkpoint_store(config)
+        store.save(checkpoint)
+    except Exception as exc:
+        logger.warning("Could not save checkpoint (non-fatal): %s", exc)
+
+    return checkpoint
+
+
+def load_checkpoint(
+    config: Optional[dict],
+    repo_path: str,
+    repo_url: str,
+) -> Optional[Checkpoint]:
+    """Load the most recent checkpoint for a repository (returns None if not found)."""
+    try:
+        repo_id = compute_repo_id(repo_path, repo_url)
+        store = get_checkpoint_store(config)
+        return store.load(repo_id)
+    except Exception as exc:
+        logger.warning("Could not load checkpoint: %s", exc)
+        return None
+
+
+def clear_checkpoint(
+    config: Optional[dict],
+    repo_path: str,
+    repo_url: str,
+) -> None:
+    """Remove the checkpoint for a repository (called on successful completion)."""
+    try:
+        repo_id = compute_repo_id(repo_path, repo_url)
+        store = get_checkpoint_store(config)
+        store.clear(repo_id)
+    except Exception as exc:
+        logger.warning("Could not clear checkpoint (non-fatal): %s", exc)

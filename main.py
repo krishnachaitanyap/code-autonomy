@@ -52,6 +52,7 @@ from src.agent.activity import (
     log_error,
     log_warning,
     log_llm_stats,
+    log_checkpoint_saved,
 )
 from src.platform.reference_pr import get_reference_pr_context
 from src.startup_validator import validate_startup
@@ -75,6 +76,8 @@ def main() -> int:
     parser.add_argument("--testing-strategy", "-t", choices=["bdd", "contract", "integration", "unit", "e2e", "soap", "auto"],
                        help="Java testing strategy (default: auto or from config/changes)")
     parser.add_argument("--rebuild-consciousness", action="store_true", help="Force rebuild of project consciousness cache")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from last checkpoint (requires same requirement)")
     parser.add_argument("--init-knowledge", action="store_true",
                         help="Generate a .code-autonomy.md repo knowledge file from project analysis")
     args = parser.parse_args()
@@ -480,6 +483,8 @@ def main() -> int:
                 "command_allowlist_only": agent_cfg_section.get("command_allowlist_only", False),
                 "allowed_command_prefixes": agent_cfg_section.get("allowed_command_prefixes", []),
                 "blocked_commands": agent_cfg_section.get("blocked_commands", []),
+                "summarization_budget": int(agent_cfg_section.get("summarization_budget", 0)),
+                "testing_budget": int(agent_cfg_section.get("testing_budget", 0)),
             }
             with spinner("Agent implementing modified plan"):
                 result = generate_changes_with_agent(
@@ -536,6 +541,8 @@ def main() -> int:
             "command_allowlist_only": agent_cfg_section.get("command_allowlist_only", False),
             "allowed_command_prefixes": agent_cfg_section.get("allowed_command_prefixes", []),
             "blocked_commands": agent_cfg_section.get("blocked_commands", []),
+            "summarization_budget": int(agent_cfg_section.get("summarization_budget", 0)),
+            "testing_budget": int(agent_cfg_section.get("testing_budget", 0)),
         }
 
         with spinner("Agent exploring, implementing, and testing changes"):
@@ -554,6 +561,7 @@ def main() -> int:
                 repo_url=repo_url,
                 repo_knowledge=repo_knowledge,
                 code_index=code_index,
+                resume=args.resume,
             )
 
         if result.success:
@@ -623,6 +631,9 @@ def main() -> int:
                 modified = apply_changes(str(clone_path), changes)
             log_info(f"Modified: {', '.join(modified)}")
         else:
+            # Show checkpoint summary if one was saved
+            if result.checkpoint:
+                log_checkpoint_saved(result.checkpoint)
             if result.files_changed:
                 # Agent made partial changes but didn't finish
                 modified = result.files_changed

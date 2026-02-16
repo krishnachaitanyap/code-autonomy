@@ -152,6 +152,8 @@ def load_config(config_path: str = "config.ini") -> dict:
             "circuit_breaker_timeout": get_float("agent", "circuit_breaker_timeout", 60.0),
             "rate_limit_max_tokens": get_float("agent", "rate_limit_max_tokens", 10.0),
             "rate_limit_refill_rate": get_float("agent", "rate_limit_refill_rate", 1.0),
+            "summarization_budget": get_int("agent", "summarization_budget", 0),  # 0 = unlimited
+            "testing_budget": get_int("agent", "testing_budget", 0),              # 0 = unlimited
         },
         "knowledge": {
             "backend": get("knowledge", "backend", "file").lower(),
