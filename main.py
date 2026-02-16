@@ -67,8 +67,10 @@ def main() -> int:
     parser.add_argument("--reference-pr", "-r", help="GitHub PR URL to use as template for repetitive changes")
     parser.add_argument("--repo-path", help="Path to an existing local repository (skips clone, branch creation, and push/PR)")
     parser.add_argument("--agent", "-a", action="store_true", help="Use agent mode: AI explores, edits, tests, and fixes code in a single loop (Claude-Code-like)")
-    parser.add_argument("--plan", "-p", action="store_true", help="Plan mode: agent explores read-only and proposes changes as diffs for review before applying (implies --agent)")
-    parser.add_argument("--ask", "-q", action="store_true", help="Ask mode: agent explores repo read-only and answers questions about the codebase")
+    parser.add_argument("--plan", "-p", nargs="?", const=True, default=None,
+                        help="Plan mode: agent explores read-only and proposes changes. Accepts optional inline prompt: --plan \"Add auth\"")
+    parser.add_argument("--ask", "-q", nargs="?", const=True, default=None,
+                        help="Ask mode: agent answers questions about the codebase. Accepts optional inline prompt: --ask \"How does auth work?\"")
     parser.add_argument("--auto-approve", action="store_true", help="Auto-approve plan without prompting (use with --plan)")
     parser.add_argument("--testing-strategy", "-t", choices=["bdd", "contract", "integration", "unit", "e2e", "soap", "auto"],
                        help="Java testing strategy (default: auto or from config/changes)")
@@ -112,13 +114,33 @@ def main() -> int:
     project_root = Path(__file__).parent
     os.chdir(project_root)
 
+    # Inline prompt from --plan "..." or --ask "..." overrides changes.txt
+    inline_prompt = None
+    if isinstance(args.plan, str):
+        inline_prompt = args.plan
+    elif isinstance(args.ask, str):
+        inline_prompt = args.ask
+
     # Load config and requirements
     try:
         config = load_config(args.config)
-        requirements, reference_pr_from_file, framework_repo_url, framework_branch = load_changes_with_reference(args.changes)
+        if inline_prompt:
+            requirements = inline_prompt
+            reference_pr_from_file = ""
+            framework_repo_url = ""
+            framework_branch = ""
+        else:
+            requirements, reference_pr_from_file, framework_repo_url, framework_branch = load_changes_with_reference(args.changes)
     except FileNotFoundError as e:
-        print(f"Error: {e}")
-        return 1
+        if inline_prompt:
+            # changes.txt not found is fine when inline prompt is provided
+            requirements = inline_prompt
+            reference_pr_from_file = ""
+            framework_repo_url = ""
+            framework_branch = ""
+        else:
+            print(f"Error: {e}")
+            return 1
 
     repo_cfg = config["repository"]
     creds = config["github_config"]
