@@ -539,10 +539,7 @@ def generate_changes_with_agent(
             # Nudge the agent to use tools
             consecutive_empty += 1
             if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
-                logger.error(
-                    "Aborting agent loop: %d consecutive empty LLM responses",
-                    consecutive_empty,
-                )
+                print(f"[agent] Aborting agent loop: {consecutive_empty} consecutive empty LLM responses")
                 break
             messages.append({"role": "assistant", "content": content})
             messages.append({
@@ -922,10 +919,7 @@ def generate_plan_with_agent(
                 break
             consecutive_empty += 1
             if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
-                logger.error(
-                    "Aborting plan loop: %d consecutive empty LLM responses",
-                    consecutive_empty,
-                )
+                print(f"[plan] Aborting plan loop: {consecutive_empty} consecutive empty LLM responses")
                 break
             messages.append({"role": "assistant", "content": content})
             messages.append({
