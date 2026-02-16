@@ -10,9 +10,45 @@ Supports circuit breaker and rate limiting when configured.
 import json
 import os
 import time
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from src.resiliency import CircuitBreaker, TokenBucketRateLimiter
+
+
+# ---------------------------------------------------------------------------
+# LLM Usage Statistics (opt-in accumulator)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LLMUsageStats:
+    """Accumulates token usage across multiple LLM calls."""
+
+    calls: list[dict] = field(default_factory=list)
+
+    def record(self, prompt_tokens: int, completion_tokens: int, total_tokens: int) -> None:
+        """Record usage from a single LLM call."""
+        self.calls.append({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        })
+
+    @property
+    def num_calls(self) -> int:
+        return len(self.calls)
+
+    @property
+    def total_prompt_tokens(self) -> int:
+        return sum(c["prompt_tokens"] for c in self.calls)
+
+    @property
+    def total_completion_tokens(self) -> int:
+        return sum(c["completion_tokens"] for c in self.calls)
+
+    @property
+    def total_tokens(self) -> int:
+        return sum(c["total_tokens"] for c in self.calls)
 
 # Provider-specific env var defaults when api_key not in config
 DEFAULT_API_KEY_ENV: dict[str, str] = {
@@ -148,6 +184,13 @@ def _chat_completion_bedrock(
     m = _Msg()
     m.content = content
     m.tool_calls = []
+    # Preserve usage info from Bedrock response (if present)
+    bedrock_usage = out.get("usage", {})
+    m._usage = {
+        "prompt_tokens": bedrock_usage.get("input_tokens", 0),
+        "completion_tokens": bedrock_usage.get("output_tokens", 0),
+        "total_tokens": bedrock_usage.get("input_tokens", 0) + bedrock_usage.get("output_tokens", 0),
+    }
     return content, m
 
 
@@ -158,6 +201,7 @@ def chat_completion(
     tool_choice: str = "auto",
     temperature: float = 0.2,
     full_config: Optional[dict] = None,
+    usage_stats: Optional[LLMUsageStats] = None,
 ) -> tuple[str, Any]:
     """
     Unified chat completion across OpenAI, Anthropic, Gemini.
@@ -171,6 +215,7 @@ def chat_completion(
         tools: Optional list of tool definitions (for agent mode).
         tool_choice: "auto" or "none".
         temperature: Sampling temperature.
+        usage_stats: Optional accumulator for token usage statistics.
 
     Returns:
         (content, message).
@@ -195,6 +240,13 @@ def chat_completion(
                 tool_choice=tool_choice,
                 temperature=temperature,
             )
+            if usage_stats is not None:
+                _usage = getattr(msg, "_usage", None) or {}
+                usage_stats.record(
+                    prompt_tokens=_usage.get("prompt_tokens", 0),
+                    completion_tokens=_usage.get("completion_tokens", 0),
+                    total_tokens=_usage.get("total_tokens", 0),
+                )
             if _circuit_breaker is not None:
                 _circuit_breaker.record_success()
             return content, msg
@@ -218,6 +270,13 @@ def chat_completion(
                 content, msg = _chat_completion_bedrock(
                     messages, ai_cfg, temperature=temperature, max_tokens=1024
                 )
+                if usage_stats is not None:
+                    _usage = getattr(msg, "_usage", None) or {}
+                    usage_stats.record(
+                        prompt_tokens=_usage.get("prompt_tokens", 0),
+                        completion_tokens=_usage.get("completion_tokens", 0),
+                        total_tokens=_usage.get("total_tokens", 0),
+                    )
                 if _circuit_breaker is not None:
                     _circuit_breaker.record_success()
                 return content, msg
@@ -276,6 +335,14 @@ def chat_completion(
             response = litellm.completion(**kwargs)
             msg = response.choices[0].message
             content = (msg.content or "").strip()
+            if usage_stats is not None:
+                _usage = getattr(response, "usage", None)
+                if _usage:
+                    usage_stats.record(
+                        prompt_tokens=getattr(_usage, "prompt_tokens", 0) or 0,
+                        completion_tokens=getattr(_usage, "completion_tokens", 0) or 0,
+                        total_tokens=getattr(_usage, "total_tokens", 0) or 0,
+                    )
             if _circuit_breaker is not None:
                 _circuit_breaker.record_success()
             return content, msg

@@ -478,7 +478,7 @@ ASK_COMPLETION_TOOLS = [_ASK_TASK_COMPLETE_SCHEMA]
 AGENT_TOOLS = list(READ_TOOLS)
 
 
-def build_agent_tools(agent_config: Optional[dict] = None) -> list[dict]:
+def build_agent_tools(agent_config: Optional[dict] = None, code_index: Optional["CodeIndex"] = None) -> list[dict]:
     """Build the full tool list for the new agent mode."""
     tools: list[dict] = []
     tools.extend(READ_TOOLS)
@@ -488,10 +488,13 @@ def build_agent_tools(agent_config: Optional[dict] = None) -> list[dict]:
     tools.extend(COMPLETION_TOOLS)
     if _gcc_enabled(agent_config):
         tools.extend(GCC_TOOLS)
+    if code_index is not None:
+        from src.code_index import CODE_INDEX_TOOLS
+        tools.extend(CODE_INDEX_TOOLS)
     return tools
 
 
-def build_plan_tools(agent_config: Optional[dict] = None) -> list[dict]:
+def build_plan_tools(agent_config: Optional[dict] = None, code_index: Optional["CodeIndex"] = None) -> list[dict]:
     """Build the tool list for plan mode (read-only + propose_change + memory + completion)."""
     tools: list[dict] = []
     tools.extend(READ_TOOLS)
@@ -500,10 +503,13 @@ def build_plan_tools(agent_config: Optional[dict] = None) -> list[dict]:
     tools.extend(COMPLETION_TOOLS)
     if _gcc_enabled(agent_config):
         tools.extend(GCC_TOOLS)
+    if code_index is not None:
+        from src.code_index import CODE_INDEX_TOOLS
+        tools.extend(CODE_INDEX_TOOLS)
     return tools
 
 
-def build_ask_tools(agent_config: Optional[dict] = None) -> list[dict]:
+def build_ask_tools(agent_config: Optional[dict] = None, code_index: Optional["CodeIndex"] = None) -> list[dict]:
     """Build the tool list for ask mode (read-only + memory + answer completion)."""
     tools: list[dict] = []
     tools.extend(READ_TOOLS)
@@ -511,6 +517,9 @@ def build_ask_tools(agent_config: Optional[dict] = None) -> list[dict]:
     tools.extend(ASK_COMPLETION_TOOLS)
     if _gcc_enabled(agent_config):
         tools.extend([_GCC_CONTEXT_SCHEMA, _GCC_COMMIT_SCHEMA])
+    if code_index is not None:
+        from src.code_index import CODE_INDEX_TOOLS
+        tools.extend(CODE_INDEX_TOOLS)
     return tools
 
 
@@ -526,6 +535,7 @@ def execute_tool(
     agent_config: Optional[dict] = None,
     working_memory: Optional[WorkingMemory] = None,
     gcc_controller: Optional["GCCController"] = None,
+    code_index: Optional["CodeIndex"] = None,
 ) -> str:
     """Execute a tool and return the result string.
 
@@ -533,6 +543,7 @@ def execute_tool(
     are added to this set.
     *working_memory*: if provided, used by memory tools.
     *gcc_controller*: if provided, used by gcc_* tools.
+    *code_index*: if provided, used by code_index tools.
     """
     repo = Path(repo_root)
 
@@ -613,6 +624,12 @@ def execute_tool(
     if tool_name == "run_command":
         return run_command(repo, args.get("command", ""), args.get("timeout", 120), agent_config)
 
+    # --- Code index tools ---
+    if code_index is not None:
+        from src.code_index import CODE_INDEX_TOOL_NAMES, execute_code_index_tool
+        if tool_name in CODE_INDEX_TOOL_NAMES:
+            return execute_code_index_tool(code_index, tool_name, args)
+
     return f"Unknown tool: {tool_name}"
 
 
@@ -630,6 +647,7 @@ def execute_plan_tool(
     change_plan: "ChangePlan",
     working_memory: Optional[WorkingMemory] = None,
     gcc_controller: Optional["GCCController"] = None,
+    code_index: Optional["CodeIndex"] = None,
 ) -> str:
     """Execute a tool in plan mode.
 
@@ -726,8 +744,8 @@ def execute_plan_tool(
 
             return "Error: modify action requires either content (full replacement) or old_string+new_string (surgical edit)"
 
-    # --- Delegate read/memory/completion/gcc tools to existing dispatcher ---
-    return execute_tool(repo, tool_name, args, working_memory=working_memory, gcc_controller=gcc_controller)
+    # --- Delegate read/memory/completion/gcc/code_index tools to existing dispatcher ---
+    return execute_tool(repo, tool_name, args, working_memory=working_memory, gcc_controller=gcc_controller, code_index=code_index)
 
 
 # ===================================================================
@@ -743,8 +761,9 @@ def execute_ask_tool(
     args: dict,
     working_memory: Optional[WorkingMemory] = None,
     gcc_controller: Optional["GCCController"] = None,
+    code_index: Optional["CodeIndex"] = None,
 ) -> str:
     """Execute a tool in ask mode (read-only, no writes/exec/propose)."""
     if tool_name in _BLOCKED_IN_ASK:
         return f"Error: {tool_name} is not available in ask mode. Use read tools to explore the codebase."
-    return execute_tool(repo_root, tool_name, args, working_memory=working_memory, gcc_controller=gcc_controller)
+    return execute_tool(repo_root, tool_name, args, working_memory=working_memory, gcc_controller=gcc_controller, code_index=code_index)

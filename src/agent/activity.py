@@ -99,6 +99,33 @@ def log_warning(msg: str) -> None:
         print(f"  ! {msg}")
 
 
+def log_llm_stats(stats) -> None:
+    """Print LLM usage statistics after an agent run.
+
+    Args:
+        stats: An LLMUsageStats instance (or None).
+    """
+    if stats is None or stats.num_calls == 0:
+        return
+
+    if _USE_RICH and _RICH_AVAILABLE and console:
+        table = Table(title="LLM Usage", border_style="dim", show_header=False, padding=(0, 1))
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="bold", justify="right")
+        table.add_row("Calls", f"{stats.num_calls:,}")
+        table.add_row("Prompt tokens", f"{stats.total_prompt_tokens:,}")
+        table.add_row("Completion tokens", f"{stats.total_completion_tokens:,}")
+        table.add_row("Total tokens", f"{stats.total_tokens:,}")
+        console.print(table)
+    else:
+        print(f"\n{'── LLM Usage ─':─<44}")
+        print(f"  Calls:             {stats.num_calls:,}")
+        print(f"  Prompt tokens:     {stats.total_prompt_tokens:,}")
+        print(f"  Completion tokens: {stats.total_completion_tokens:,}")
+        print(f"  Total tokens:      {stats.total_tokens:,}")
+        print(f"{'─' * 44}")
+
+
 def log_agent_activity(
     turn: int,
     tool_name: str,

@@ -86,11 +86,15 @@ def summarize_large_output(
     tool_name: str,
     llm_config: dict,
     full_config: Optional[dict] = None,
+    usage_stats: "Optional[LLMUsageStats]" = None,
 ) -> str:
     """Summarize a large tool result using a fast LLM call.
 
     Only invoked when *content* exceeds ``_SUMMARIZE_THRESHOLD``.
     Preserves error messages, file paths, test counts, and actionable info.
+
+    If *usage_stats* is provided, the summarization LLM call's token usage
+    is recorded so it doesn't become a hidden cost.
     """
     if len(content) < _SUMMARIZE_THRESHOLD:
         return content
@@ -115,6 +119,7 @@ def summarize_large_output(
             config=summary_config,
             temperature=0.0,
             full_config=full_config,
+            usage_stats=usage_stats,
         )
         return f"[Summarized from {len(content)} chars]\n{summary}"
     except Exception:
@@ -136,6 +141,7 @@ def manage_conversation_context(
     llm_config: dict,
     smart_summarization: bool = True,
     full_config: Optional[dict] = None,
+    usage_stats: "Optional[LLMUsageStats]" = None,
 ) -> list[dict]:
     """Compress conversation when approaching context limits.
 
@@ -143,6 +149,8 @@ def manage_conversation_context(
     1. Keep system prompt + initial user message + last 12 messages intact.
     2. Middle messages: summarize large tool results (>2 KB).
     3. If still too large: drop oldest middle messages in pairs.
+
+    If *usage_stats* is provided, any summarization LLM calls are tracked.
     """
     context_limit = get_context_limit(model)
     current_tokens = get_messages_token_count(messages)
@@ -163,7 +171,10 @@ def manage_conversation_context(
         content = msg.get("content", "") or ""
         if msg.get("role") == "tool" and len(content) > 2000:
             if smart_summarization:
-                summarized = summarize_large_output(content, "tool_result", llm_config, full_config=full_config)
+                summarized = summarize_large_output(
+                    content, "tool_result", llm_config,
+                    full_config=full_config, usage_stats=usage_stats,
+                )
             else:
                 summarized = content[:500] + f"\n...(compressed, was {len(content)} chars)"
             compressed_middle.append({**msg, "content": summarized})
