@@ -302,7 +302,9 @@ def main() -> int:
                 )
                 log_info(f"Loaded code index ({code_index.total_symbols} symbols, {code_index.total_files} files)")
             except Exception as _ci_err:
+                import traceback
                 log_warning(f"Could not build code index: {_ci_err}. Proceeding without it.")
+                log_warning(f"Code index traceback: {traceback.format_exc()}")
 
         # Load repo knowledge files (.code-autonomy.md, AGENT.md, or .code-autonomy/ dir)
         repo_knowledge = load_repo_knowledge(str(clone_path))

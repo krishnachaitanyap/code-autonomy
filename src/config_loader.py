@@ -164,6 +164,10 @@ def load_config(config_path: str = "config.ini") -> dict:
             "enabled": get_bool("tracing", "enabled", True),
             "storage_dir": get("tracing", "storage_dir", ""),
         },
+        "code_index": {
+            "cache_dir": get("code_index", "cache_dir", ".code-index"),
+            "max_age_hours": get_float("code_index", "max_age_hours", 24.0),
+        },
     }
 
 
