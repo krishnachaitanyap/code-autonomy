@@ -52,26 +52,39 @@ def build_code_index(
         config: Full config dict (passed to embeddings for API key).
     """
     repo_id = compute_repo_id(repo_path)
+    print(f"[code-index] Building fresh index for: {repo_path}")
 
     # 1. Symbol table
+    print("[code-index]   Step 1/5: Parsing symbol table (AST)...")
     symbol_table = build_symbol_table(repo_path)
+    print(f"[code-index]   Step 1/5: Done — {len(symbol_table)} symbols in {len(symbol_table.all_files)} files")
 
     # 2. Import resolution
+    print("[code-index]   Step 2/5: Resolving imports...")
     import_map = resolve_imports(repo_path, symbol_table)
+    print(f"[code-index]   Step 2/5: Done — {len(import_map)} files resolved")
 
     # 3. Dependency graph
+    print("[code-index]   Step 3/5: Building dependency graph...")
     dependency_graph = build_dependency_graph(repo_path, symbol_table, import_map)
+    print(f"[code-index]   Step 3/5: Done — {len(dependency_graph.forward)} forward edges, {len(dependency_graph.reverse)} reverse edges")
 
     # 4. Class hierarchy
+    print("[code-index]   Step 4/5: Building class hierarchy...")
     class_hierarchy = build_class_hierarchy(symbol_table, import_map)
+    print(f"[code-index]   Step 4/5: Done — {len(class_hierarchy.parents)} classes with parents")
 
     # 5. Entity embeddings (best-effort — no failure if API key missing)
+    print("[code-index]   Step 5/5: Building entity embeddings...")
     embeddings = EntityEmbeddings()
     try:
         embeddings.build(repo_path, symbol_table, config=config)
+        print(f"[code-index]   Step 5/5: Done — {len(embeddings)} embeddings built")
     except Exception as exc:
+        print(f"[code-index]   Step 5/5: Skipped — {exc}")
         logger.warning("Could not build entity embeddings: %s", exc)
 
+    print(f"[code-index] Index built: {len(symbol_table)} symbols, {len(symbol_table.all_files)} files")
     return CodeIndex(
         repo_id=repo_id,
         indexed_at=time.time(),
@@ -178,12 +191,19 @@ def build_or_load_code_index(
     cache_path = _cache_dir(config)
     repo_id = compute_repo_id(repo_path, repo_url or config.get("repository", {}).get("repo_url", ""))
 
+    print(f"[code-index] repo_id={repo_id}, cache_path={cache_path}, max_age_hours={max_age_hours}")
+
     if not force_rebuild:
         cached = _load_code_index(repo_id, cache_path)
         if cached:
             age_hours = (time.time() - cached.indexed_at) / 3600
             if max_age_hours <= 0 or age_hours <= max_age_hours:
+                print(f"[code-index] Loaded from cache ({age_hours:.1f}h old, {cached.total_symbols} symbols, {cached.total_files} files)")
                 return cached
+            else:
+                print(f"[code-index] Cache expired ({age_hours:.1f}h > {max_age_hours}h), rebuilding...")
+        else:
+            print(f"[code-index] No cache found at {cache_path / (repo_id + '.json')}, building fresh...")
 
     # Full rebuild
     code_index = build_code_index(repo_path, consciousness=consciousness, config=config)
@@ -193,7 +213,10 @@ def build_or_load_code_index(
     # Save to cache
     try:
         _save_code_index(code_index, cache_path)
+        json_path = cache_path / f"{repo_id}.json"
+        print(f"[code-index] Saved to cache: {json_path}")
     except Exception as exc:
+        print(f"[code-index] Failed to save cache: {exc}")
         logger.warning("Could not save code index to cache: %s", exc)
 
     return code_index
