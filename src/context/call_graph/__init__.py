@@ -8,11 +8,20 @@ from typing import Optional
 from src.context.call_graph.python_extractor import extract_python_calls
 
 
-def build_call_graph(repo_path: str) -> dict[str, set[str]]:
-    """Build combined call graph from Python and optionally Java."""
+def build_call_graph(
+    repo_path: str,
+    file_asts: "dict[str, object] | None" = None,
+) -> dict[str, set[str]]:
+    """Build combined call graph from Python and optionally Java.
+
+    Args:
+        repo_path: Repository root path.
+        file_asts: Optional pre-parsed AST trees passed through to
+            ``extract_python_calls``.
+    """
     graph: dict[str, set[str]] = {}
 
-    py_graph = extract_python_calls(repo_path)
+    py_graph = extract_python_calls(repo_path, file_asts=file_asts)
     for k, v in py_graph.items():
         graph[k] = graph.get(k, set()) | v
 

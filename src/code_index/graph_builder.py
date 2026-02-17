@@ -58,6 +58,7 @@ def build_dependency_graph(
     repo_path: str,
     symbol_table: SymbolTable,
     import_map: dict[str, dict[str, str]] | None = None,
+    file_asts: "dict[str, object] | None" = None,
 ) -> DependencyGraph:
     """Build the enhanced dependency graph.
 
@@ -65,11 +66,18 @@ def build_dependency_graph(
     2. Resolves callee names through the import map
     3. Inverts to build the reverse graph
     4. Builds file-level import/dependent maps
+
+    Args:
+        repo_path: Repository root path.
+        symbol_table: Built symbol table.
+        import_map: Optional pre-built import map. If None, will be computed.
+        file_asts: Optional pre-parsed AST trees passed through to
+            ``build_call_graph``.
     """
     from src.context.call_graph import build_call_graph
 
     # Step 1: Get raw call graph
-    raw_graph = build_call_graph(repo_path)
+    raw_graph = build_call_graph(repo_path, file_asts=file_asts)
 
     # Step 2: Resolve imports if not provided
     if import_map is None:

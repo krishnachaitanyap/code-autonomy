@@ -9,29 +9,29 @@ from typing import Optional
 from src.constants import CODE_EXTENSIONS, SKIP_DIRS
 
 
-def extract_python_calls(repo_path: str) -> dict[str, set[str]]:
+def extract_python_calls(
+    repo_path: str,
+    file_asts: "dict[str, ast.Module] | None" = None,
+) -> dict[str, set[str]]:
     """
     Build call graph: node -> set of callees.
     Node format: "path/to/file.py::function_name" or "path/to/file.py::ClassName.method_name"
+
+    Args:
+        repo_path: Repository root path.
+        file_asts: Optional pre-parsed AST trees ``{rel_path: ast.Module}``.
+            If provided, iterates cached trees instead of ``rglob`` + ``read_text`` + ``ast.parse``.
     """
     repo = Path(repo_path)
     graph: dict[str, set[str]] = {}
     nodes: set[str] = set()
 
-    for f in repo.rglob("*.py"):
-        if not f.is_file():
-            continue
-        if any(p in f.relative_to(repo).parts for p in SKIP_DIRS):
-            continue
-        rel = str(f.relative_to(repo)).replace("\\", "/")
-        try:
-            content = f.read_text(encoding="utf-8", errors="replace")
-            tree = ast.parse(content)
-        except (SyntaxError, Exception):
-            continue
+    if file_asts is not None:
+        items = file_asts.items()
+    else:
+        items = None
 
-        visitor = _PythonCallVisitor(rel)
-        visitor.visit(tree)
+    def _process_visitor(visitor: "_PythonCallVisitor") -> None:
         for node in visitor.defined:
             nodes.add(node)
             if node not in graph:
@@ -41,6 +41,28 @@ def extract_python_calls(repo_path: str) -> dict[str, set[str]]:
                 graph[caller] = set()
             graph[caller].add(callee)
             nodes.add(callee)
+
+    if items is not None:
+        for rel, tree in items:
+            visitor = _PythonCallVisitor(rel)
+            visitor.visit(tree)
+            _process_visitor(visitor)
+    else:
+        for f in repo.rglob("*.py"):
+            if not f.is_file():
+                continue
+            if any(p in f.relative_to(repo).parts for p in SKIP_DIRS):
+                continue
+            rel = str(f.relative_to(repo)).replace("\\", "/")
+            try:
+                content = f.read_text(encoding="utf-8", errors="replace")
+                tree = ast.parse(content)
+            except (SyntaxError, Exception):
+                continue
+
+            visitor = _PythonCallVisitor(rel)
+            visitor.visit(tree)
+            _process_visitor(visitor)
 
     return graph
 

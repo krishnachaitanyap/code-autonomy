@@ -46,6 +46,7 @@ def _resolve_relative_import(
 def resolve_imports(
     repo_path: str,
     symbol_table: SymbolTable,
+    file_asts: "dict[str, ast.Module] | None" = None,
 ) -> dict[str, dict[str, str]]:
     """Build per-file import resolution map.
 
@@ -53,6 +54,12 @@ def resolve_imports(
 
     Only in-repo modules are resolved.  stdlib and third-party imports are
     silently skipped.
+
+    Args:
+        repo_path: Repository root path.
+        symbol_table: Built symbol table.
+        file_asts: Optional pre-parsed AST trees ``{rel_path: ast.Module}``.
+            If provided, skips ``read_text`` + ``ast.parse`` for cached files.
     """
     repo = Path(repo_path)
     # Reuse file list from symbol table instead of re-walking the repo
@@ -61,12 +68,16 @@ def resolve_imports(
     result: dict[str, dict[str, str]] = {}
 
     for rel_path in existing_files:
-        fpath = repo / rel_path
-        try:
-            content = fpath.read_text(encoding="utf-8", errors="replace")
-            tree = ast.parse(content)
-        except (SyntaxError, UnicodeDecodeError):
-            continue
+        # Use cached AST if available, otherwise read + parse from disk
+        if file_asts is not None and rel_path in file_asts:
+            tree = file_asts[rel_path]
+        else:
+            fpath = repo / rel_path
+            try:
+                content = fpath.read_text(encoding="utf-8", errors="replace")
+                tree = ast.parse(content)
+            except (SyntaxError, UnicodeDecodeError):
+                continue
 
         file_imports: dict[str, str] = {}
 

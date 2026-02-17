@@ -1147,6 +1147,67 @@ def generate_plan_with_agent(
 
 
 # ---------------------------------------------------------------------------
+# Ask-mode fast path
+# ---------------------------------------------------------------------------
+
+_FAST_ANSWER_SYSTEM = """\
+You are an expert software engineer. Answer the user's question using ONLY the \
+provided project context. If the context does not contain enough information to \
+give a confident, accurate answer, respond with exactly: INSUFFICIENT_CONTEXT
+
+Rules:
+- Be specific: reference file paths, function names, and patterns from the context.
+- Do NOT guess or fabricate information not present in the context.
+- If unsure, respond with: INSUFFICIENT_CONTEXT"""
+
+
+def _try_fast_answer(
+    question: str,
+    context: str,
+    llm_config: dict,
+    full_config: Optional[dict] = None,
+    usage_stats: "LLMUsageStats | None" = None,
+) -> Optional[str]:
+    """Attempt to answer *question* from pre-built context in a single LLM call.
+
+    Returns the answer string if the LLM is confident, or ``None`` if the
+    context is insufficient (triggering fallback to the full agent loop).
+    """
+    from src.llm_client import chat_completion
+
+    # Cap context to avoid blowing token limits on the fast path
+    max_context_chars = 15_000
+    trimmed_context = context[:max_context_chars]
+
+    messages = [
+        {"role": "system", "content": _FAST_ANSWER_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                f"## Project context\n{trimmed_context}\n\n"
+                f"## Question\n{question}"
+            ),
+        },
+    ]
+
+    content, _msg = chat_completion(
+        messages=messages,
+        config=llm_config,
+        tools=None,
+        tool_choice="none",
+        temperature=0.1,
+        full_config=full_config,
+        usage_stats=usage_stats,
+        usage_category="ask_fast_path",
+    )
+
+    if not content or "INSUFFICIENT_CONTEXT" in content:
+        return None
+
+    return content.strip()
+
+
+# ---------------------------------------------------------------------------
 # Ask-mode entry point
 # ---------------------------------------------------------------------------
 
@@ -1229,6 +1290,27 @@ def generate_answer_with_agent(
         except Exception:
             pass
     knowledge_section = f"\n\n{knowledge_context}\n" if knowledge_context else ""
+
+    # --- Fast-path: try answering from available context without agent loop ---
+    available_context = (initial_context + repo_knowledge_section + knowledge_section).strip()
+    if available_context and len(available_context) > 200:
+        try:
+            fast_answer = _try_fast_answer(
+                question, available_context, llm_config, config, usage_stats,
+            )
+            if fast_answer is not None:
+                if verbose:
+                    print("  Ask fast-path: answered from existing context (0 tool calls)")
+                return AskResult(
+                    success=True,
+                    answer=fast_answer,
+                    sources=[],
+                    summary="Answered from project context (fast path, no file exploration needed)",
+                    turns_used=1,
+                    usage_stats=usage_stats,
+                )
+        except Exception:
+            pass  # Fall through to full agent loop
 
     user_msg = (
         f"## Question\n{question}\n"
@@ -1437,6 +1519,31 @@ def generate_answer_with_agent(
 
         if task_complete_data:
             break
+
+        # --- Answer deadline nudge ---
+        # At 60% of max_turns, nudge the agent to wrap up.
+        # At 80%, issue a hard deadline.
+        turns_used_so_far = turn + 1
+        deadline_soft = int(max_turns * 0.6)
+        deadline_hard = int(max_turns * 0.8)
+        if turns_used_so_far == deadline_hard:
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"DEADLINE: You have used {turns_used_so_far} of {max_turns} turns. "
+                    "You MUST call task_complete NOW with your best answer based on "
+                    "what you have explored so far. Do NOT explore further."
+                ),
+            })
+        elif turns_used_so_far == deadline_soft:
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Note: You have used {turns_used_so_far} of {max_turns} turns. "
+                    "Start wrapping up your exploration and prepare to call "
+                    "task_complete with a comprehensive answer soon."
+                ),
+            })
 
     # ---- Build result ----
     if task_complete_data:

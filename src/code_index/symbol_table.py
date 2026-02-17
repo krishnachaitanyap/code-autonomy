@@ -157,16 +157,24 @@ def _build_signature(name: str, params: list[str], return_type: str,
     return "\n".join(parts)
 
 
-def extract_symbols_from_source(rel_path: str, content: str) -> list[SymbolEntry]:
+def extract_symbols_from_source(
+    rel_path: str, content: str, tree: "ast.Module | None" = None
+) -> list[SymbolEntry]:
     """Extract all symbols from a Python source file using AST.
 
     Enhanced version of ``_extract_python_signatures_ast`` that captures
     line ranges, docstrings, and parent class context.
+
+    Args:
+        rel_path: Relative file path within the repo.
+        content: Source code text.
+        tree: Optional pre-parsed AST tree. If provided, ``ast.parse`` is skipped.
     """
-    try:
-        tree = ast.parse(content)
-    except SyntaxError:
-        return []
+    if tree is None:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return []
 
     entries: list[SymbolEntry] = []
     _method_locations: set[tuple[int, str]] = set()  # (line_start, name) of methods already added
@@ -253,23 +261,42 @@ def extract_symbols_from_source(rel_path: str, content: str) -> list[SymbolEntry
     return entries
 
 
-def build_symbol_table(repo_path: str) -> SymbolTable:
-    """Walk the repository and build a SymbolTable of all Python symbols."""
-    repo = Path(repo_path)
+def build_symbol_table(
+    repo_path: str,
+    file_contents: "dict[str, str] | None" = None,
+    file_asts: "dict[str, ast.Module] | None" = None,
+) -> SymbolTable:
+    """Walk the repository and build a SymbolTable of all Python symbols.
+
+    Args:
+        repo_path: Repository root path.
+        file_contents: Optional pre-read file contents ``{rel_path: source}``.
+            If provided, skips ``os.walk`` + ``read_text``.
+        file_asts: Optional pre-parsed AST trees ``{rel_path: ast.Module}``.
+            Passed through to ``extract_symbols_from_source``.
+    """
     table = SymbolTable()
 
-    for dirpath, dirnames, filenames in os.walk(repo):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        for fname in filenames:
-            if not fname.endswith(".py"):
-                continue
-            fpath = Path(dirpath) / fname
-            rel_path = str(fpath.relative_to(repo)).replace("\\", "/")
-            try:
-                content = fpath.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            for entry in extract_symbols_from_source(rel_path, content):
+    if file_contents is not None:
+        for rel_path, content in file_contents.items():
+            tree = file_asts.get(rel_path) if file_asts else None
+            for entry in extract_symbols_from_source(rel_path, content, tree=tree):
                 table.add(entry)
+    else:
+        repo = Path(repo_path)
+        for dirpath, dirnames, filenames in os.walk(repo):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+            for fname in filenames:
+                if not fname.endswith(".py"):
+                    continue
+                fpath = Path(dirpath) / fname
+                rel_path = str(fpath.relative_to(repo)).replace("\\", "/")
+                try:
+                    content = fpath.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+                tree = file_asts.get(rel_path) if file_asts else None
+                for entry in extract_symbols_from_source(rel_path, content, tree=tree):
+                    table.add(entry)
 
     return table

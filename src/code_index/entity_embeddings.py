@@ -36,7 +36,11 @@ class EntityEmbeddings:
         return len(self._fqns)
 
     def build(
-        self, repo_path: str, symbol_table: SymbolTable, config: Optional[dict] = None
+        self,
+        repo_path: str,
+        symbol_table: SymbolTable,
+        config: Optional[dict] = None,
+        file_contents: Optional[dict[str, str]] = None,
     ) -> None:
         """Build embeddings for all entities in the symbol table.
 
@@ -44,6 +48,8 @@ class EntityEmbeddings:
             repo_path: Repository root path.
             symbol_table: Built symbol table.
             config: Full config dict (needs ``ai`` section with api_key/provider).
+            file_contents: Optional pre-read file contents ``{rel_path: source}``.
+                If provided, skips reading files from disk.
         """
         self._config = config or {}
         repo = Path(repo_path)
@@ -51,17 +57,18 @@ class EntityEmbeddings:
         texts: list[str] = []
         digests: list[str] = []
 
-        # Read source files for body extraction
-        file_contents: dict[str, str] = {}
-        for file_path in symbol_table.all_files:
-            fpath = repo / file_path
-            if fpath.exists():
-                try:
-                    file_contents[file_path] = fpath.read_text(
-                        encoding="utf-8", errors="replace"
-                    )
-                except Exception:
-                    pass
+        # Use cached contents or read source files for body extraction
+        if file_contents is None:
+            file_contents = {}
+            for file_path in symbol_table.all_files:
+                fpath = repo / file_path
+                if fpath.exists():
+                    try:
+                        file_contents[file_path] = fpath.read_text(
+                            encoding="utf-8", errors="replace"
+                        )
+                    except Exception:
+                        pass
 
         for entry in symbol_table.all_entries:
             # Build entity text: signature + docstring + first 500 chars of body
