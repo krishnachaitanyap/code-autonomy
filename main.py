@@ -59,6 +59,230 @@ from src.startup_validator import validate_startup
 from src.llm_client import configure_resiliency
 
 
+def _build_requirements_from_story(story: dict) -> str:
+    """Convert a JIRA story dict into an agent requirements string."""
+    parts = [f"# {story['key']}: {story['summary']}"]
+    if story.get("description"):
+        parts.append(f"\n## Description\n{story['description']}")
+    if story.get("acceptance_criteria"):
+        parts.append(f"\n## Acceptance Criteria\n{story['acceptance_criteria']}")
+    return "\n".join(parts)
+
+
+def _run_jira_mode(args) -> int:
+    """Pull stories from JIRA and process each with the agent."""
+    from src.jira.client import (
+        fetch_agent_stories,
+        get_jira_token,
+        add_jira_comment,
+        transition_jira_issue,
+    )
+    from src.consciousness.core import build_or_load_consciousness
+    from src.agent.knowledge import load_repo_knowledge
+
+    project_root = Path(__file__).parent
+    os.chdir(project_root)
+
+    try:
+        config = load_config(args.config)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        return 1
+
+    jira_cfg = config.get("jira") or {}
+    if not jira_cfg.get("base_url"):
+        log_error(
+            "Missing [jira] section in config.ini. "
+            "Copy the [jira] block from config.example.ini and fill in your values."
+        )
+        return 1
+
+    ai_cfg = config["ai"]
+    agent_cfg_section = config.get("agent") or {}
+
+    # Resolve repo path
+    if args.repo_path:
+        clone_path = Path(args.repo_path).resolve()
+    else:
+        log_error("--repo-path is required when using --jira mode")
+        return 1
+    if not clone_path.is_dir():
+        log_error(f"--repo-path is not a directory: {clone_path}")
+        return 1
+
+    # Detect repo_url from git remote
+    repo_url = ""
+    try:
+        import subprocess as _sp
+        _out = _sp.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(clone_path), capture_output=True, text=True,
+        )
+        if _out.returncode == 0 and _out.stdout.strip():
+            repo_url = _out.stdout.strip()
+    except Exception:
+        pass
+
+    header("JIRA Mode", f"Repo: {clone_path}")
+
+    # Pre-flight validation
+    from src.startup_validator import validate_startup
+    validation = validate_startup(config, dry_run=False, using_local_repo=True)
+    for w in validation.warnings:
+        log_warning(w)
+    if not validation.is_valid:
+        for e in validation.errors:
+            log_error(e)
+        return 1
+
+    # Initialize resiliency
+    configure_resiliency(
+        circuit_breaker_threshold=int(agent_cfg_section.get("circuit_breaker_threshold", 5)),
+        circuit_breaker_timeout=float(agent_cfg_section.get("circuit_breaker_timeout", 60.0)),
+        rate_limit_max_tokens=float(agent_cfg_section.get("rate_limit_max_tokens", 10.0)),
+        rate_limit_refill_rate=float(agent_cfg_section.get("rate_limit_refill_rate", 1.0)),
+    )
+
+    # Authenticate to JIRA
+    with spinner("Authenticating to JIRA"):
+        try:
+            token = get_jira_token(config)
+        except Exception as e:
+            log_error(f"JIRA authentication failed: {e}")
+            return 1
+    log_success("JIRA authentication successful")
+
+    # Fetch stories
+    with spinner("Fetching stories from JIRA"):
+        try:
+            stories = fetch_agent_stories(config, token=token)
+        except Exception as e:
+            log_error(f"Failed to fetch JIRA stories: {e}")
+            return 1
+
+    if not stories:
+        log_info("No stories found matching the agent label. Nothing to do.")
+        return 0
+
+    log_info(f"Found {len(stories)} story(ies) to process")
+
+    # Build consciousness and code index once (shared across stories)
+    with step("Analyzing codebase"):
+        consciousness = build_or_load_consciousness(
+            str(clone_path), config, repo_url=repo_url,
+        )
+        log_info("Loaded project consciousness")
+
+        code_index = None
+        try:
+            from src.code_index import build_or_load_code_index
+            code_index = build_or_load_code_index(
+                str(clone_path), config, repo_url=repo_url,
+                consciousness=consciousness,
+            )
+            log_info(f"Loaded code index ({code_index.total_symbols} symbols)")
+        except Exception as _ci_err:
+            log_warning(f"Could not build code index: {_ci_err}")
+
+        repo_knowledge = load_repo_knowledge(str(clone_path))
+
+    # Agent config (reused per story)
+    agent_config = {
+        "max_turns": int(agent_cfg_section.get("max_turns", 50)),
+        "smart_summarization": agent_cfg_section.get("smart_summarization", True),
+        "truncation_limit": int(agent_cfg_section.get("truncation_limit", 30000)),
+        "command_allowlist_only": agent_cfg_section.get("command_allowlist_only", False),
+        "allowed_command_prefixes": agent_cfg_section.get("allowed_command_prefixes", []),
+        "blocked_commands": agent_cfg_section.get("blocked_commands", []),
+        "summarization_budget": int(agent_cfg_section.get("summarization_budget", 0)),
+        "testing_budget": int(agent_cfg_section.get("testing_budget", 0)),
+    }
+
+    # Process each story
+    results: list[dict] = []
+    for i, story in enumerate(stories, 1):
+        key = story["key"]
+        log_info(f"\n[{i}/{len(stories)}] Processing {key}: {story['summary']}")
+
+        requirements = _build_requirements_from_story(story)
+
+        # Transition to "In Progress" if configured
+        if jira_cfg.get("auto_transition_start"):
+            try:
+                transition_jira_issue(config, key, "In Progress", token=token)
+                log_info(f"  Transitioned {key} → In Progress")
+            except Exception as te:
+                log_warning(f"  Could not transition {key}: {te}")
+
+        # Run agent
+        with spinner(f"Agent working on {key}"):
+            result = generate_changes_with_agent(
+                requirements,
+                str(clone_path),
+                llm_config=ai_cfg,
+                verbose=ai_cfg.get("verbose", False),
+                consciousness=consciousness,
+                agent_config=agent_config,
+                config=config,
+                repo_url=repo_url,
+                repo_knowledge=repo_knowledge,
+                code_index=code_index,
+            )
+
+        if result.success:
+            log_success(f"  {key}: Agent completed — {len(result.files_changed)} file(s) modified")
+
+            # Add success comment to JIRA
+            comment = (
+                f"[code-autonomy] Agent completed successfully.\n"
+                f"Files modified: {', '.join(result.files_changed) or 'none'}\n"
+                f"Summary: {result.summary}"
+            )
+            try:
+                add_jira_comment(config, key, comment, token=token)
+            except Exception as ce:
+                log_warning(f"  Could not comment on {key}: {ce}")
+
+            # Transition to "Done" if configured
+            if jira_cfg.get("auto_transition_done"):
+                try:
+                    transition_jira_issue(config, key, "Done", token=token)
+                    log_info(f"  Transitioned {key} → Done")
+                except Exception as te:
+                    log_warning(f"  Could not transition {key}: {te}")
+
+            results.append({"key": key, "status": "success", "files": len(result.files_changed)})
+        else:
+            log_error(f"  {key}: Agent did not complete — {result.summary}")
+
+            # Add failure comment to JIRA
+            comment = (
+                f"[code-autonomy] Agent did not complete.\n"
+                f"Error: {result.summary}"
+            )
+            try:
+                add_jira_comment(config, key, comment, token=token)
+            except Exception as ce:
+                log_warning(f"  Could not comment on {key}: {ce}")
+
+            results.append({"key": key, "status": "failed", "files": 0})
+
+    # Summary
+    print(f"\n{'=' * 60}")
+    print("JIRA Processing Summary")
+    print(f"{'=' * 60}")
+    succeeded = sum(1 for r in results if r["status"] == "success")
+    failed = sum(1 for r in results if r["status"] == "failed")
+    print(f"  Total: {len(results)}  |  Succeeded: {succeeded}  |  Failed: {failed}")
+    print(f"{'─' * 60}")
+    for r in results:
+        icon = "OK" if r["status"] == "success" else "FAIL"
+        print(f"  [{icon}] {r['key']}  ({r['files']} files)")
+    print(f"{'=' * 60}\n")
+
+    return 0 if failed == 0 else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Autonomous code generation and PR creation")
     parser.add_argument("--config", default="config.ini", help="Path to config.ini")
@@ -80,6 +304,8 @@ def main() -> int:
                         help="Resume from last checkpoint (requires same requirement)")
     parser.add_argument("--init-knowledge", action="store_true",
                         help="Generate a .code-autonomy.md repo knowledge file from project analysis")
+    parser.add_argument("--jira", action="store_true",
+                        help="Pull stories from JIRA labeled for code-autonomy and process each with the agent")
     args = parser.parse_args()
 
     # --init-knowledge: generate .code-autonomy.md and exit (no config needed)
@@ -113,6 +339,10 @@ def main() -> int:
         log_success(f"Created {output_path} ({len(content)} chars)")
         log_info("Look for <!-- TODO --> markers and fill in project-specific details.")
         return 0
+
+    # --jira: pull stories from JIRA and process each with the agent
+    if args.jira:
+        return _run_jira_mode(args)
 
     project_root = Path(__file__).parent
     os.chdir(project_root)
