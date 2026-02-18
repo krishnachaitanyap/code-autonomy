@@ -306,39 +306,48 @@ def _run_jira_mode(args) -> int:
         # Run agent (with auto-retry via resume on turn exhaustion)
         max_retries = int(jira_cfg.get("max_retries", 2))
         result = None
-        for attempt in range(1, max_retries + 1):
-            # Resume if: retrying after turn exhaustion OR resuming an interrupted story
-            is_resume = attempt > 1 or (attempt == 1 and story_was_in_progress)
-            if attempt == 1 and story_was_in_progress:
-                label = f"Agent resuming {key} (from previous session)"
-            elif attempt == 1:
-                label = f"Agent working on {key}"
-            else:
-                label = f"Agent resuming {key} (attempt {attempt}/{max_retries})"
-            with spinner(label):
-                result = generate_changes_with_agent(
-                    requirements,
-                    str(clone_path),
-                    llm_config=ai_cfg,
-                    verbose=ai_cfg.get("verbose", False),
-                    consciousness=consciousness,
-                    agent_config=agent_config,
-                    config=config,
-                    repo_url=repo_url,
-                    repo_knowledge=repo_knowledge,
-                    code_index=code_index,
-                    resume=is_resume,
-                    initial_working_memory=accumulated_wm or None,
-                )
+        try:
+            for attempt in range(1, max_retries + 1):
+                # Resume if: retrying after turn exhaustion OR resuming an interrupted story
+                is_resume = attempt > 1 or (attempt == 1 and story_was_in_progress)
+                if attempt == 1 and story_was_in_progress:
+                    label = f"Agent resuming {key} (from previous session)"
+                elif attempt == 1:
+                    label = f"Agent working on {key}"
+                else:
+                    label = f"Agent resuming {key} (attempt {attempt}/{max_retries})"
+                with spinner(label):
+                    result = generate_changes_with_agent(
+                        requirements,
+                        str(clone_path),
+                        llm_config=ai_cfg,
+                        verbose=ai_cfg.get("verbose", False),
+                        consciousness=consciousness,
+                        agent_config=agent_config,
+                        config=config,
+                        repo_url=repo_url,
+                        repo_knowledge=repo_knowledge,
+                        code_index=code_index,
+                        resume=is_resume,
+                        initial_working_memory=accumulated_wm or None,
+                    )
 
-            if result.success:
-                break
+                if result.success:
+                    break
 
-            # Only retry if agent ran out of turns (checkpoint saved) and made partial progress
-            if result.checkpoint and result.files_changed and attempt < max_retries:
-                log_warning(f"  {key}: Agent ran out of turns ({len(result.files_changed)} file(s) so far) — resuming...")
-            else:
-                break
+                # Only retry if agent ran out of turns (checkpoint saved) and made partial progress
+                if result.checkpoint and result.files_changed and attempt < max_retries:
+                    log_warning(f"  {key}: Agent ran out of turns ({len(result.files_changed)} file(s) so far) — resuming...")
+                else:
+                    break
+        except Exception as exc:
+            log_error(f"  {key}: Agent crashed — {exc}")
+            # Save crash context to session so resume can pick it up
+            if session:
+                session.mark_story(key, STATUS_FAILED, error=f"crash: {exc}")
+                save_jira_session(session)
+            results.append({"key": key, "status": "failed", "files": 0})
+            continue
 
         # Accumulate working memory from this story's run (success or failure)
         if result.working_memory:
