@@ -155,6 +155,11 @@ def load_config(config_path: str = "config.ini") -> dict:
             "rate_limit_refill_rate": get_float("agent", "rate_limit_refill_rate", 1.0),
             "summarization_budget": get_int("agent", "summarization_budget", 0),  # 0 = unlimited
             "testing_budget": get_int("agent", "testing_budget", 0),              # 0 = unlimited
+            # Deadline nudges (advisory turn-budget hints)
+            "nudge_enabled": get_bool("agent", "nudge_enabled", True),
+            "explore_budget_pct": get_float("agent", "explore_budget_pct", 0.30),
+            "soft_deadline_pct": get_float("agent", "soft_deadline_pct", 0.60),
+            "hard_deadline_pct": get_float("agent", "hard_deadline_pct", 0.80),
         },
         "knowledge": {
             "backend": get("knowledge", "backend", "file").lower(),

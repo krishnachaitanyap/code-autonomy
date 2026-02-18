@@ -369,7 +369,13 @@ class FileTraceStore:
         self._dir.mkdir(parents=True, exist_ok=True)
         filename = f"{trace.trace_id}_{trace.repo_id[:8]}.json"
         path = self._dir / filename
-        path.write_text(json.dumps(trace.to_dict(), indent=2), encoding="utf-8")
+        try:
+            data = trace.to_dict()
+            path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        except (TypeError, ValueError) as ser_err:
+            # Fallback: serialize with default=str for non-JSON types
+            logger.warning("Trace serialization issue (%s), retrying with default=str", ser_err)
+            path.write_text(json.dumps(trace.to_dict(), indent=2, default=str), encoding="utf-8")
         logger.info("Trace saved to %s", path)
         return path
 

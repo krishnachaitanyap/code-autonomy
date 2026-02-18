@@ -89,7 +89,7 @@ class AskResult:
 # ---------------------------------------------------------------------------
 # Guard: abort after N consecutive empty LLM responses
 # ---------------------------------------------------------------------------
-MAX_CONSECUTIVE_EMPTY = 3
+MAX_CONSECUTIVE_EMPTY = 5
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +136,29 @@ You are an expert software engineer with tools to explore AND modify the codebas
 4. **VERIFY** — Run tests with run_command after making changes (e.g., `pytest -v`, `mvn test`).
 5. **FIX** — If tests fail, read the error output, edit files to fix the issues, and re-run tests.
 6. **COMPLETE** — Call task_complete with a summary and the list of files changed.
+
+## Working with large files (properties, config, XML, CSV, etc.)
+Large files (env.properties, application.yml, pom.xml, etc.) WILL be truncated if you read them fully.
+**Do NOT repeatedly read_file on large files hoping to see more.** Instead:
+1. Use `grep(property_name)` to find the exact line number and surrounding context.
+2. Use `read_file(path, start_line, end_line)` with a narrow line range around the match.
+3. Use `edit_file` with the exact old_string from that narrow read.
+4. To ADD a new property: grep for a nearby existing property in the same section, read that area, then edit_file to insert your new line after it.
+5. If grep returns no matches, the property does NOT exist in the file yet — you need to add it.
+
+## Property defaults in Java/Spring projects
+When a property is NOT present in a config file (env.properties, application.yml, etc.), Java code
+typically uses a hardcoded default value. Common patterns:
+- `@Value("${prop.name:defaultValue}")` — Spring annotation with default after colon
+- `env.getProperty("prop.name", "default")` — Environment.getProperty with fallback
+- `config.getOrDefault("prop.name", "default")` — Map-style lookup
+- `Optional.ofNullable(props.get("key")).orElse("default")` — Optional fallback
+
+When adding a new property:
+1. First grep the Java source for the property name to find where it's consumed and what default is used.
+2. Add the property to the config file with the appropriate value.
+3. If the Java code does NOT reference the property yet, you need to add both the config entry AND the Java code that reads it.
+4. Record these patterns in working memory with `update_memory("property_patterns", ...)`.
 
 ## Rules
 - ALWAYS explore before modifying. Read existing files to understand conventions and structure.
@@ -351,6 +374,22 @@ def _build_agent_context(
     return user_msg, knowledge_context
 
 
+def _resolve_model_name(llm_config: dict) -> str:
+    """Return the effective model/deployment name for tracing and logging.
+
+    For Azure OpenAI the deployment_name is the actual model identifier.
+    Falls back to the generic ``model`` field.
+    """
+    provider = llm_config.get("provider", "").lower()
+    if provider == "azure":
+        return llm_config.get("deployment_name") or llm_config.get("model", "gpt-4o")
+    if provider in ("bedrock", "cdao"):
+        # ARN can be long; take the last segment
+        model = llm_config.get("model", "")
+        return model.rsplit("/", 1)[-1] if "/" in model else model or "bedrock"
+    return llm_config.get("model", "gpt-4o")
+
+
 # ---------------------------------------------------------------------------
 # Agent entry point
 # ---------------------------------------------------------------------------
@@ -421,7 +460,7 @@ def generate_changes_with_agent(
         collector = TraceCollector(
             repo_id=_repo_id,
             repo_url=repo_url,
-            model=llm_config.get("model", "gpt-4o"),
+            model=_resolve_model_name(llm_config),
             requirements=requirements,
         )
 
@@ -491,7 +530,7 @@ def generate_changes_with_agent(
     stuck_count = 0
     consecutive_empty = 0
 
-    model_name = llm_config.get("model", "gpt-4o")
+    model_name = _resolve_model_name(llm_config)
 
     for turn in range(max_turns):
         # --- Context management (token-aware) ---
@@ -580,24 +619,51 @@ def generate_changes_with_agent(
                             files_changed=[], summary="Legacy JSON output mode",
                         )
                         legacy_result.trace_id = trace.trace_id
-                        get_trace_store(config).save(trace)
-                    except Exception:
-                        pass
+                        trace_path = get_trace_store(config).save(trace)
+                        print(f"  [trace] Saved: {trace_path}")
+                    except Exception as _trace_err:
+                        print(f"  [trace] Failed to save trace: {_trace_err}")
                 return legacy_result
 
-            # Nudge the agent to use tools
+            # Nudge the agent to use tools (escalating messages)
             consecutive_empty += 1
             if consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
                 print(f"[agent] Aborting agent loop: {consecutive_empty} consecutive empty LLM responses")
                 break
-            messages.append({"role": "assistant", "content": content})
-            messages.append({
-                "role": "user",
-                "content": (
-                    "Please use the tools to implement the changes. "
+            messages.append({"role": "assistant", "content": content or ""})
+
+            # Build escalating nudge with context recovery
+            if consecutive_empty == 1:
+                nudge_text = (
+                    "Please use the available tools to implement the changes. "
+                    "Start with read_file or grep to explore, then edit_file to modify code. "
                     "When everything is done and tests pass, call task_complete."
-                ),
-            })
+                )
+            elif consecutive_empty == 2:
+                # Include working memory recap so LLM can recover lost context
+                wm_recap = ""
+                if not working_memory.is_empty():
+                    wm_recap = f"\n\nHere is what you've learned so far:\n{working_memory.read_all()}\n"
+                nudge_text = (
+                    f"Your previous response was empty. You have tools available: "
+                    f"read_file, grep, list_dir, edit_file, write_file, run_command, task_complete.{wm_recap}\n"
+                    f"Files modified so far: {sorted(changes_tracker) if changes_tracker else 'none'}. "
+                    f"Please call a tool now."
+                )
+            else:
+                # Last attempts: provide explicit next step
+                if not changes_tracker:
+                    nudge_text = (
+                        "You have not made any changes yet. Please start by calling "
+                        "grep to find the relevant code, then edit_file to make changes. "
+                        "If you cannot proceed, call task_complete with a summary of what you found."
+                    )
+                else:
+                    nudge_text = (
+                        f"You have modified {len(changes_tracker)} file(s): {sorted(changes_tracker)}. "
+                        "Please call run_command to test your changes, or call task_complete if done."
+                    )
+            messages.append({"role": "user", "content": nudge_text})
             continue
 
         # ---- Process tool calls ----
@@ -717,7 +783,8 @@ def generate_changes_with_agent(
                     })
 
             # Intelligent summarization for large outputs
-            if len(result) > truncation_limit:
+            _was_truncated = len(result) > truncation_limit
+            if _was_truncated:
                 try:
                     from src.agent.context import summarize_large_output
 
@@ -739,6 +806,21 @@ def generate_changes_with_agent(
                 "tool_call_id": tc.id,
                 "content": result,
             })
+
+            # --- Hint when read_file output was truncated ---
+            if name == "read_file" and _was_truncated:
+                _read_path = args.get("path", "")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Note: {_read_path} is a large file and was truncated. "
+                        "Do NOT re-read the full file. Instead:\n"
+                        f"1. Use grep(\"property_name\") to find the exact line number.\n"
+                        f"2. Use read_file(\"{_read_path}\", start_line=N-5, end_line=N+5) for a narrow range.\n"
+                        "3. Then use edit_file with the exact text from that narrow read.\n"
+                        "4. If grep finds no match, the property does not exist yet — add it near related properties."
+                    ),
+                })
 
             # --- Inject working memory / GCC context into system prompt ---
             if (name == "update_memory" and not working_memory.is_empty()) or \
@@ -774,6 +856,61 @@ def generate_changes_with_agent(
 
         if task_complete_data:
             break
+
+        # --- Advisory deadline nudges (configurable, can be disabled) ---
+        _nudge_enabled = agent_cfg.get("nudge_enabled", True)
+        if _nudge_enabled:
+            has_writes = len(changes_tracker) > 0
+            has_plan = not working_memory.is_empty()
+            explore_pct = float(agent_cfg.get("explore_budget_pct", 0.30))
+            soft_pct = float(agent_cfg.get("soft_deadline_pct", 0.60))
+            hard_pct = float(agent_cfg.get("hard_deadline_pct", 0.80))
+            explore_limit = max(5, int(max_turns * explore_pct))
+            soft_deadline = int(max_turns * soft_pct)
+            hard_deadline = int(max_turns * hard_pct)
+
+            if turn + 1 == explore_limit and not has_writes and not has_plan:
+                # Only nudge if agent hasn't recorded anything useful yet
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Hint: You have used {turn + 1} of {max_turns} turns exploring. "
+                        "Consider whether you have enough context to start implementing. "
+                        "If you need to edit a large file, use grep to find the exact location first, "
+                        "then read_file with a narrow line range, then edit_file."
+                    ),
+                })
+            elif turn + 1 == soft_deadline:
+                if has_writes:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Progress check: {turn + 1}/{max_turns} turns used, "
+                            f"{len(changes_tracker)} file(s) modified so far. "
+                            "Consider running tests to verify your changes, then call task_complete."
+                        ),
+                    })
+                else:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Note: {turn + 1}/{max_turns} turns used and no files modified yet. "
+                            "If you have enough understanding, start implementing changes. "
+                            "For large config files: use grep to locate properties, read a narrow range, "
+                            "then edit_file. If a property doesn't exist, add it near related entries."
+                        ),
+                    })
+            elif turn + 1 == hard_deadline:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Note: {turn + 1}/{max_turns} turns used, {max_turns - turn - 1} remaining. "
+                        + (f"{len(changes_tracker)} file(s) modified. "
+                           "Consider running final tests and calling task_complete."
+                           if has_writes else
+                           "No files modified yet. Focus on making the required changes now.")
+                    ),
+                })
 
     # ------------------------------------------------------------------ #
     # Build result + finalize trace
@@ -833,10 +970,9 @@ def generate_changes_with_agent(
             result_obj.trace_id = trace.trace_id
             store = get_trace_store(config)
             trace_path = store.save(trace)
-            if verbose:
-                print(f"  Trace saved: {trace_path} ({trace.metrics.get('total_spans', 0)} spans)")
-        except Exception:
-            pass  # tracing is non-fatal
+            print(f"  [trace] Saved: {trace_path} ({trace.metrics.get('total_spans', 0)} spans)")
+        except Exception as _trace_err:
+            print(f"  [trace] Failed to save trace: {_trace_err}")
 
     return result_obj
 
@@ -898,7 +1034,7 @@ def generate_plan_with_agent(
         collector = TraceCollector(
             repo_id=_repo_id,
             repo_url=repo_url,
-            model=llm_config.get("model", "gpt-4o"),
+            model=_resolve_model_name(llm_config),
             requirements=requirements,
         )
 
@@ -936,7 +1072,7 @@ def generate_plan_with_agent(
 
     task_complete_data: Optional[dict] = None
     consecutive_empty = 0
-    model_name = llm_config.get("model", "gpt-4o")
+    model_name = _resolve_model_name(llm_config)
 
     for turn in range(max_turns):
         # --- Context management ---
@@ -1152,9 +1288,10 @@ def generate_plan_with_agent(
             )
             plan_result.trace_id = trace.trace_id
             store = get_trace_store(config)
-            store.save(trace)
-        except Exception:
-            pass
+            trace_path = store.save(trace)
+            print(f"  [trace] Saved: {trace_path} ({trace.metrics.get('total_spans', 0)} spans)")
+        except Exception as _trace_err:
+            print(f"  [trace] Failed to save trace: {_trace_err}")
 
     return plan_result
 
@@ -1272,7 +1409,7 @@ def generate_answer_with_agent(
         collector = TraceCollector(
             repo_id=_repo_id,
             repo_url=repo_url,
-            model=llm_config.get("model", "gpt-4o"),
+            model=_resolve_model_name(llm_config),
             requirements=question,
         )
 
@@ -1345,7 +1482,7 @@ def generate_answer_with_agent(
 
     task_complete_data: Optional[dict] = None
     consecutive_empty = 0
-    model_name = llm_config.get("model", "gpt-4o")
+    model_name = _resolve_model_name(llm_config)
 
     for turn in range(max_turns):
         # --- Context management ---
@@ -1592,8 +1729,9 @@ def generate_answer_with_agent(
             )
             ask_result.trace_id = trace.trace_id
             store = get_trace_store(config)
-            store.save(trace)
-        except Exception:
-            pass
+            trace_path = store.save(trace)
+            print(f"  [trace] Saved: {trace_path} ({trace.metrics.get('total_spans', 0)} spans)")
+        except Exception as _trace_err:
+            print(f"  [trace] Failed to save trace: {_trace_err}")
 
     return ask_result
