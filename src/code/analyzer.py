@@ -137,7 +137,7 @@ Produce the JSON array of file changes to implement the requirements (adapt path
             {"role": "user", "content": user_prompt},
         ],
         config=llm_config,
-        temperature=0.2,
+        temperature=float(llm_config.get("temperature", 0.2)),
         full_config=full_config,
     )
     if verbose:
@@ -242,7 +242,7 @@ Produce the JSON array of file changes to FIX these errors."""
             {"role": "user", "content": user_prompt},
         ],
         config=llm_config,
-        temperature=0.2,
+        temperature=float(llm_config.get("temperature", 0.2)),
         full_config=full_config,
     )
     if verbose:

@@ -4,6 +4,9 @@ Code index agent tools: 5 new tools for the agent to query the code index.
 Uses ``_tool()`` from ``src/agent/tools`` for schema construction.
 """
 
+import os
+import subprocess
+
 from src.agent.tools import _tool
 from src.code_index.storage import CodeIndex
 
@@ -125,6 +128,24 @@ _PREDICT_BREAKAGE_SCHEMA = _tool(
     required=["file_path"],
 )
 
+_FIND_ALL_USAGES_SCHEMA = _tool(
+    "find_all_usages",
+    "Find ALL files that use a property, field, config key, or symbol. "
+    "Returns ranked results: HIGH (AST-confirmed), MEDIUM (grep code), LOW (grep comments). "
+    "Use for bulk updates across the codebase.",
+    {
+        "name": {
+            "type": "string",
+            "description": "Property, field, or config key name to search for (e.g., 'timeout', 'max_retries')",
+        },
+        "include_grep": {
+            "type": "boolean",
+            "description": "Also run grep fallback to find non-AST usages (default true)",
+        },
+    },
+    required=["name"],
+)
+
 CODE_INDEX_TOOLS = [
     _FIND_CALLERS_SCHEMA,
     _FIND_DEPENDENTS_SCHEMA,
@@ -133,6 +154,7 @@ CODE_INDEX_TOOLS = [
     _FIND_SIMILAR_SCHEMA,
     _CONTEXT_FOR_EDIT_SCHEMA,
     _PREDICT_BREAKAGE_SCHEMA,
+    _FIND_ALL_USAGES_SCHEMA,
 ]
 
 
@@ -166,13 +188,18 @@ def execute_code_index_tool(
             code_index, args.get("file_path", ""),
             args.get("changes_description"),
         )
+    if tool_name == "find_all_usages":
+        return _find_all_usages(
+            code_index, args.get("name", ""),
+            args.get("include_grep", True),
+        )
     return f"Unknown code_index tool: {tool_name}"
 
 
 CODE_INDEX_TOOL_NAMES = {
     "find_callers", "find_dependents", "impact_analysis",
     "describe_entity", "find_similar", "context_for_edit",
-    "predict_breakage",
+    "predict_breakage", "find_all_usages",
 }
 
 
@@ -557,3 +584,117 @@ def _predict_breakage(
                     lines.append(f"  - {fqn} (score: {score:.3f}) at {entry.file_path}:{entry.line_start}")
 
     return "\n".join(lines)
+
+
+def _find_all_usages(
+    code_index: CodeIndex,
+    name: str,
+    include_grep: bool = True,
+) -> str:
+    """Find all usages of a property/field/config key across the codebase."""
+    if not name:
+        return "Error: 'name' parameter is required."
+
+    # Collect results as (file, line, snippet, confidence)
+    seen: set[tuple[str, int]] = set()
+    results: list[tuple[str, int, str, str]] = []
+
+    # 1. PropertyIndex lookup → HIGH confidence
+    pi_entries = code_index.property_index.lookup(name)
+    for file_path, line, snippet in pi_entries:
+        key = (file_path, line)
+        if key not in seen:
+            seen.add(key)
+            results.append((file_path, line, snippet, "HIGH"))
+
+    # 2. Dependency graph reverse lookup (callers of matching symbols) → HIGH
+    matching_symbols = code_index.symbol_table.get_by_name(name)
+    for sym in matching_symbols:
+        callers = code_index.dependency_graph.get_callers(sym.fqn)
+        for caller_fqn in callers:
+            caller_entry = code_index.symbol_table.get_by_fqn(caller_fqn)
+            if caller_entry:
+                key = (caller_entry.file_path, caller_entry.line_start)
+                if key not in seen:
+                    seen.add(key)
+                    results.append((
+                        caller_entry.file_path,
+                        caller_entry.line_start,
+                        f"calls {sym.fqn}",
+                        "HIGH",
+                    ))
+
+    # 3. Grep fallback → MEDIUM (code) / LOW (comments)
+    if include_grep and code_index.repo_path:
+        grep_results = _grep_for_name(code_index.repo_path, name)
+        for file_path, line, snippet, is_comment in grep_results:
+            key = (file_path, line)
+            if key not in seen:
+                seen.add(key)
+                confidence = "LOW" if is_comment else "MEDIUM"
+                results.append((file_path, line, snippet, confidence))
+
+    if not results:
+        return f"No usages found for: {name}"
+
+    # Group by confidence
+    high = [(f, l, s) for f, l, s, c in results if c == "HIGH"]
+    medium = [(f, l, s) for f, l, s, c in results if c == "MEDIUM"]
+    low = [(f, l, s) for f, l, s, c in results if c == "LOW"]
+
+    lines = [f"## All usages of '{name}' ({len(results)} total)"]
+
+    if high:
+        lines.append(f"\n### HIGH confidence — AST-confirmed ({len(high)})")
+        for f, l, s in sorted(high):
+            lines.append(f"  - {f}:{l}  {s}")
+
+    if medium:
+        lines.append(f"\n### MEDIUM confidence — grep code ({len(medium)})")
+        for f, l, s in sorted(medium):
+            lines.append(f"  - {f}:{l}  {s}")
+
+    if low:
+        lines.append(f"\n### LOW confidence — grep comments/strings ({len(low)})")
+        for f, l, s in sorted(low):
+            lines.append(f"  - {f}:{l}  {s}")
+
+    return "\n".join(lines)
+
+
+def _grep_for_name(
+    repo_path: str, name: str,
+) -> list[tuple[str, int, str, bool]]:
+    """Run grep on the repo for a property name.
+
+    Returns list of (rel_path, line_number, snippet, is_comment).
+    """
+    try:
+        result = subprocess.run(
+            ["grep", "-rn", "--include=*.py", "--include=*.java", name, repo_path],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+
+    entries: list[tuple[str, int, str, bool]] = []
+    for line in result.stdout.splitlines():
+        # Format: /abs/path:linenum:content
+        parts = line.split(":", 2)
+        if len(parts) < 3:
+            continue
+        abs_path, linenum_str, content = parts[0], parts[1], parts[2]
+        try:
+            linenum = int(linenum_str)
+        except ValueError:
+            continue
+        # Convert to relative path
+        if abs_path.startswith(repo_path):
+            rel_path = abs_path[len(repo_path):].lstrip(os.sep).replace("\\", "/")
+        else:
+            rel_path = abs_path.replace("\\", "/")
+        snippet = content.strip()
+        is_comment = snippet.lstrip().startswith("#") or snippet.lstrip().startswith("//")
+        entries.append((rel_path, linenum, snippet, is_comment))
+
+    return entries

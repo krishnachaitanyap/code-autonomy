@@ -77,8 +77,19 @@ def _run_jira_mode(args) -> int:
         add_jira_comment,
         transition_jira_issue,
     )
+    from src.jira.session import (
+        JiraSession,
+        create_jira_session,
+        save_jira_session,
+        load_jira_session,
+        clear_jira_session,
+        STATUS_PENDING,
+        STATUS_IN_PROGRESS,
+        STATUS_SUCCESS,
+        STATUS_FAILED,
+    )
     from src.consciousness.core import build_or_load_consciousness
-    from src.agent.knowledge import load_repo_knowledge
+    from src.agent.knowledge import load_repo_knowledge, compute_repo_id
 
     project_root = Path(__file__).parent
     os.chdir(project_root)
@@ -152,19 +163,75 @@ def _run_jira_mode(args) -> int:
             return 1
     log_success("JIRA authentication successful")
 
-    # Fetch stories
-    with spinner("Fetching stories from JIRA"):
-        try:
-            stories = fetch_agent_stories(config, token=token)
-        except Exception as e:
-            log_error(f"Failed to fetch JIRA stories: {e}")
-            return 1
+    # Compute repo_id for session tracking
+    repo_id = compute_repo_id(str(clone_path), repo_url)
 
-    if not stories:
-        log_info("No stories found matching the agent label. Nothing to do.")
-        return 0
+    # Resume: load saved session if --resume is set
+    resume_mode = getattr(args, "resume", False)
+    session: JiraSession | None = None
+    stories: list[dict] = []
+    # Accumulate working memory from all completed stories so subsequent
+    # stories benefit from file understanding gathered in earlier runs.
+    accumulated_wm: dict[str, str] = {}
 
-    log_info(f"Found {len(stories)} story(ies) to process")
+    if resume_mode:
+        session = load_jira_session(repo_id)
+        if session and session.resumable_stories():
+            succeeded = session.succeeded_stories()
+            resumable = session.resumable_stories()
+            failed_count = sum(1 for s in resumable if s.status == STATUS_FAILED)
+            log_info(
+                f"Resuming JIRA session: {len(succeeded)} succeeded, "
+                f"{len(resumable)} remaining"
+                + (f" ({failed_count} previously failed)" if failed_count else "")
+            )
+            # Reset failed stories back to pending so they are retried
+            # (preserve working_memory — it contains useful file understanding)
+            for s in resumable:
+                if s.status == STATUS_FAILED:
+                    s.status = STATUS_PENDING
+                    s.error = ""
+            save_jira_session(session)
+            # Seed accumulated working memory from ALL prior stories (even failed)
+            for s in session.stories:
+                if s.working_memory:
+                    accumulated_wm.update(s.working_memory)
+            # Re-fetch full story data from JIRA for resumable stories
+            resumable_keys = {s.key for s in resumable}
+            with spinner("Fetching stories from JIRA"):
+                try:
+                    all_stories = fetch_agent_stories(config, token=token)
+                except Exception as e:
+                    log_error(f"Failed to fetch JIRA stories: {e}")
+                    return 1
+            stories = [s for s in all_stories if s["key"] in resumable_keys]
+            if not stories:
+                log_info("No resumable stories found in JIRA. Session complete.")
+                clear_jira_session(repo_id)
+                return 0
+            log_info(f"Found {len(stories)} story(ies) to resume")
+        else:
+            log_info("No resumable JIRA session found — starting fresh")
+            resume_mode = False  # fall through to fresh start
+
+    if not resume_mode or not stories:
+        # Fresh start: fetch stories from JIRA
+        with spinner("Fetching stories from JIRA"):
+            try:
+                stories = fetch_agent_stories(config, token=token)
+            except Exception as e:
+                log_error(f"Failed to fetch JIRA stories: {e}")
+                return 1
+
+        if not stories:
+            log_info("No stories found matching the agent label. Nothing to do.")
+            return 0
+
+        log_info(f"Found {len(stories)} story(ies) to process")
+
+        # Create and save a fresh session
+        session = create_jira_session(repo_id, stories)
+        save_jira_session(session)
 
     # Build consciousness and code index once (shared across stories)
     with step("Analyzing codebase"):
@@ -198,11 +265,26 @@ def _run_jira_mode(args) -> int:
         "testing_budget": int(agent_cfg_section.get("testing_budget", 0)),
     }
 
-    # Process each story
+    # Collect results from previously succeeded stories (for summary)
     results: list[dict] = []
+    if resume_mode and session:
+        for s in session.succeeded_stories():
+            results.append({
+                "key": s.key,
+                "status": "success",
+                "files": s.files_changed,
+                "resumed": True,
+            })
+
+    # Process each story
     for i, story in enumerate(stories, 1):
         key = story["key"]
         log_info(f"\n[{i}/{len(stories)}] Processing {key}: {story['summary']}")
+
+        # Mark story as in_progress in session
+        if session:
+            session.mark_story(key, STATUS_IN_PROGRESS)
+            save_jira_session(session)
 
         requirements = _build_requirements_from_story(story)
 
@@ -214,23 +296,64 @@ def _run_jira_mode(args) -> int:
             except Exception as te:
                 log_warning(f"  Could not transition {key}: {te}")
 
-        # Run agent
-        with spinner(f"Agent working on {key}"):
-            result = generate_changes_with_agent(
-                requirements,
-                str(clone_path),
-                llm_config=ai_cfg,
-                verbose=ai_cfg.get("verbose", False),
-                consciousness=consciousness,
-                agent_config=agent_config,
-                config=config,
-                repo_url=repo_url,
-                repo_knowledge=repo_knowledge,
-                code_index=code_index,
-            )
+        # Determine if first attempt should resume (from a prior interrupted run)
+        story_was_in_progress = False
+        if resume_mode and session:
+            ss = session.get_story(key)
+            if ss and ss.status == STATUS_IN_PROGRESS:
+                story_was_in_progress = True
+
+        # Run agent (with auto-retry via resume on turn exhaustion)
+        max_retries = int(jira_cfg.get("max_retries", 2))
+        result = None
+        for attempt in range(1, max_retries + 1):
+            # Resume if: retrying after turn exhaustion OR resuming an interrupted story
+            is_resume = attempt > 1 or (attempt == 1 and story_was_in_progress)
+            if attempt == 1 and story_was_in_progress:
+                label = f"Agent resuming {key} (from previous session)"
+            elif attempt == 1:
+                label = f"Agent working on {key}"
+            else:
+                label = f"Agent resuming {key} (attempt {attempt}/{max_retries})"
+            with spinner(label):
+                result = generate_changes_with_agent(
+                    requirements,
+                    str(clone_path),
+                    llm_config=ai_cfg,
+                    verbose=ai_cfg.get("verbose", False),
+                    consciousness=consciousness,
+                    agent_config=agent_config,
+                    config=config,
+                    repo_url=repo_url,
+                    repo_knowledge=repo_knowledge,
+                    code_index=code_index,
+                    resume=is_resume,
+                    initial_working_memory=accumulated_wm or None,
+                )
+
+            if result.success:
+                break
+
+            # Only retry if agent ran out of turns (checkpoint saved) and made partial progress
+            if result.checkpoint and result.files_changed and attempt < max_retries:
+                log_warning(f"  {key}: Agent ran out of turns ({len(result.files_changed)} file(s) so far) — resuming...")
+            else:
+                break
+
+        # Accumulate working memory from this story's run (success or failure)
+        if result.working_memory:
+            accumulated_wm.update(result.working_memory)
 
         if result.success:
             log_success(f"  {key}: Agent completed — {len(result.files_changed)} file(s) modified")
+
+            # Update session state (including working memory for resume)
+            if session:
+                session.mark_story(key, STATUS_SUCCESS, files_changed=len(result.files_changed))
+                story_state = session.get_story(key)
+                if story_state and result.working_memory:
+                    story_state.working_memory = result.working_memory
+                save_jira_session(session)
 
             # Add success comment to JIRA
             comment = (
@@ -255,6 +378,14 @@ def _run_jira_mode(args) -> int:
         else:
             log_error(f"  {key}: Agent did not complete — {result.summary}")
 
+            # Update session state (including working memory for resume)
+            if session:
+                session.mark_story(key, STATUS_FAILED, error=result.summary)
+                story_state = session.get_story(key)
+                if story_state and result.working_memory:
+                    story_state.working_memory = result.working_memory
+                save_jira_session(session)
+
             # Add failure comment to JIRA
             comment = (
                 f"[code-autonomy] Agent did not complete.\n"
@@ -266,6 +397,19 @@ def _run_jira_mode(args) -> int:
                 log_warning(f"  Could not comment on {key}: {ce}")
 
             results.append({"key": key, "status": "failed", "files": 0})
+
+    # Clear session only if all stories succeeded; otherwise persist for --resume
+    if session:
+        if session.all_succeeded():
+            clear_jira_session(repo_id)
+        else:
+            save_jira_session(session)
+            failed_count = len([r for r in results if r["status"] == "failed"])
+            if failed_count:
+                log_info(
+                    f"Session saved — {failed_count} story(ies) failed. "
+                    f"Run with --jira --resume to retry."
+                )
 
     # Summary
     print(f"\n{'=' * 60}")

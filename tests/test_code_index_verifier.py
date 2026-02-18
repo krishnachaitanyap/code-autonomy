@@ -15,6 +15,7 @@ from src.code_index.symbol_table import SymbolTable, SymbolEntry
 from src.code_index.graph_builder import DependencyGraph
 from src.code_index.hierarchy import ClassHierarchy
 from src.code_index.entity_embeddings import EntityEmbeddings
+from src.code_index.property_index import PropertyIndex
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +127,7 @@ class TestCallerCheck:
             dependency_graph=graph,
             class_hierarchy=ClassHierarchy(),
             embeddings=EntityEmbeddings(),
+            property_index=PropertyIndex(),
             total_symbols=1, total_files=1,
         )
 
@@ -172,6 +174,7 @@ class TestPostEditVerificationGate:
             dependency_graph=DependencyGraph(),
             class_hierarchy=ClassHierarchy(),
             embeddings=EntityEmbeddings(),
+            property_index=PropertyIndex(),
             total_symbols=1, total_files=1,
         )
 
@@ -184,6 +187,7 @@ class TestPostEditVerificationGate:
             dependency_graph=DependencyGraph(),
             class_hierarchy=ClassHierarchy(),
             embeddings=EntityEmbeddings(),
+            property_index=PropertyIndex(),
             total_symbols=0, total_files=0,
         )
         result = post_edit_verification_gate(str(tmp_path), ["data.json"], idx, {})
@@ -196,6 +200,7 @@ class TestPostEditVerificationGate:
             dependency_graph=DependencyGraph(),
             class_hierarchy=ClassHierarchy(),
             embeddings=EntityEmbeddings(),
+            property_index=PropertyIndex(),
             total_symbols=0, total_files=0,
         )
         result = post_edit_verification_gate(str(tmp_path), ["broken.py"], idx, {})
@@ -269,6 +274,7 @@ class TestGenerateRepairSuggestions:
             dependency_graph=graph,
             class_hierarchy=ClassHierarchy(),
             embeddings=EntityEmbeddings(),
+            property_index=PropertyIndex(),
             total_symbols=2, total_files=2,
         )
 

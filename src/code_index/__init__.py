@@ -12,6 +12,7 @@ Public API:
 
 from src.code_index.storage import CodeIndex, build_code_index, build_or_load_code_index
 from src.code_index.tools import CODE_INDEX_TOOLS, CODE_INDEX_TOOL_NAMES, execute_code_index_tool
+from src.code_index.property_index import PropertyIndex, build_property_index
 from src.code_index.verifier import post_edit_verification_gate, VerificationResult, generate_repair_suggestions
 
 __all__ = [
@@ -21,6 +22,8 @@ __all__ = [
     "CODE_INDEX_TOOLS",
     "CODE_INDEX_TOOL_NAMES",
     "execute_code_index_tool",
+    "PropertyIndex",
+    "build_property_index",
     "post_edit_verification_gate",
     "VerificationResult",
     "generate_repair_suggestions",

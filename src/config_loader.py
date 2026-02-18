@@ -90,6 +90,7 @@ def load_config(config_path: str = "config.ini") -> dict:
             "api_key": api_key,
             "api_key_env": api_key_env,
             "model": get("ai", "model", "gpt-4o"),
+            "temperature": get_float("ai", "temperature", 0.2),
             "base_url": get("ai", "base_url", ""),
             "verbose": get_bool("ai", "verbose", False),
             # Bedrock/cdao (when provider is bedrock or cdao)
@@ -178,6 +179,7 @@ def load_config(config_path: str = "config.ini") -> dict:
             "max_stories": get_int("jira", "max_stories", 50),
             "auto_transition_start": get_bool("jira", "auto_transition_start", True),
             "auto_transition_done": get_bool("jira", "auto_transition_done", False),
+            "max_retries": get_int("jira", "max_retries", 2),
         },
         "tracing": {
             "enabled": get_bool("tracing", "enabled", True),

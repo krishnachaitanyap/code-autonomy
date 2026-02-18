@@ -23,6 +23,7 @@ from src.code_index.import_resolver import resolve_imports
 from src.code_index.graph_builder import DependencyGraph, build_dependency_graph
 from src.code_index.hierarchy import ClassHierarchy, build_class_hierarchy
 from src.code_index.entity_embeddings import EntityEmbeddings
+from src.code_index.property_index import PropertyIndex, build_property_index
 from src.constants import SKIP_DIRS
 
 logger = logging.getLogger(__name__)
@@ -38,8 +39,10 @@ class CodeIndex:
     dependency_graph: DependencyGraph
     class_hierarchy: ClassHierarchy
     embeddings: EntityEmbeddings
+    property_index: PropertyIndex
     total_symbols: int
     total_files: int
+    repo_path: str = ""
 
 
 def _read_and_parse(fpath: Path, rel_path: str) -> tuple[str, str, "ast.Module | None"]:
@@ -123,34 +126,39 @@ def build_code_index(
     }
 
     # 1. Symbol table
-    print("[code-index]   Step 1/5: Parsing symbol table (AST)...")
+    print("[code-index]   Step 1/6: Parsing symbol table (AST)...")
     symbol_table = build_symbol_table(repo_path, file_contents=file_contents, file_asts=file_asts)
-    print(f"[code-index]   Step 1/5: Done — {len(symbol_table)} symbols in {len(symbol_table.all_files)} files")
+    print(f"[code-index]   Step 1/6: Done — {len(symbol_table)} symbols in {len(symbol_table.all_files)} files")
 
     # 2. Import resolution
-    print("[code-index]   Step 2/5: Resolving imports...")
+    print("[code-index]   Step 2/6: Resolving imports...")
     import_map = resolve_imports(repo_path, symbol_table, file_asts=file_asts)
-    print(f"[code-index]   Step 2/5: Done — {len(import_map)} files resolved")
+    print(f"[code-index]   Step 2/6: Done — {len(import_map)} files resolved")
 
     # 3. Dependency graph
-    print("[code-index]   Step 3/5: Building dependency graph...")
+    print("[code-index]   Step 3/6: Building dependency graph...")
     dependency_graph = build_dependency_graph(repo_path, symbol_table, import_map, file_asts=file_asts)
-    print(f"[code-index]   Step 3/5: Done — {len(dependency_graph.forward)} forward edges, {len(dependency_graph.reverse)} reverse edges")
+    print(f"[code-index]   Step 3/6: Done — {len(dependency_graph.forward)} forward edges, {len(dependency_graph.reverse)} reverse edges")
 
     # 4. Class hierarchy
-    print("[code-index]   Step 4/5: Building class hierarchy...")
+    print("[code-index]   Step 4/6: Building class hierarchy...")
     class_hierarchy = build_class_hierarchy(symbol_table, import_map)
-    print(f"[code-index]   Step 4/5: Done — {len(class_hierarchy.parents)} classes with parents")
+    print(f"[code-index]   Step 4/6: Done — {len(class_hierarchy.parents)} classes with parents")
 
     # 5. Entity embeddings (best-effort — no failure if API key missing)
-    print("[code-index]   Step 5/5: Building entity embeddings...")
+    print("[code-index]   Step 5/6: Building entity embeddings...")
     embeddings = EntityEmbeddings()
     try:
         embeddings.build(repo_path, symbol_table, config=config, file_contents=file_contents)
-        print(f"[code-index]   Step 5/5: Done — {len(embeddings)} embeddings built")
+        print(f"[code-index]   Step 5/6: Done — {len(embeddings)} embeddings built")
     except Exception as exc:
-        print(f"[code-index]   Step 5/5: Skipped — {exc}")
+        print(f"[code-index]   Step 5/6: Skipped — {exc}")
         logger.warning("Could not build entity embeddings: %s", exc)
+
+    # 6. Property index
+    print("[code-index]   Step 6/6: Building property index...")
+    property_index = build_property_index(repo_path, file_contents, file_asts)
+    print(f"[code-index]   Step 6/6: Done — {len(property_index.index)} unique property names")
 
     print(f"[code-index] Index built: {len(symbol_table)} symbols, {len(symbol_table.all_files)} files")
     return CodeIndex(
@@ -160,8 +168,10 @@ def build_code_index(
         dependency_graph=dependency_graph,
         class_hierarchy=class_hierarchy,
         embeddings=embeddings,
+        property_index=property_index,
         total_symbols=len(symbol_table),
         total_files=len(symbol_table.all_files),
+        repo_path=repo_path,
     )
 
 
@@ -183,9 +193,11 @@ def _save_code_index(code_index: CodeIndex, cache_path: Path) -> None:
         "indexed_at": code_index.indexed_at,
         "total_symbols": code_index.total_symbols,
         "total_files": code_index.total_files,
+        "repo_path": code_index.repo_path,
         "symbol_table": code_index.symbol_table.to_dict(),
         "dependency_graph": code_index.dependency_graph.to_dict(),
         "class_hierarchy": code_index.class_hierarchy.to_dict(),
+        "property_index": code_index.property_index.to_dict(),
     }
     json_path = cache_path / f"{code_index.repo_id}.json"
     # Atomic write: temp file + rename to prevent corrupt cache on crash
@@ -221,6 +233,7 @@ def _load_code_index(repo_id: str, cache_path: Path) -> Optional[CodeIndex]:
         symbol_table = SymbolTable.from_dict(data.get("symbol_table", []))
         dependency_graph = DependencyGraph.from_dict(data.get("dependency_graph", {}))
         class_hierarchy = ClassHierarchy.from_dict(data.get("class_hierarchy", {}))
+        property_index = PropertyIndex.from_dict(data.get("property_index", {}))
 
         embeddings = EntityEmbeddings()
         emb_path = cache_path / f"{repo_id}_embeddings.pkl"
@@ -233,8 +246,10 @@ def _load_code_index(repo_id: str, cache_path: Path) -> Optional[CodeIndex]:
             dependency_graph=dependency_graph,
             class_hierarchy=class_hierarchy,
             embeddings=embeddings,
+            property_index=property_index,
             total_symbols=data.get("total_symbols", len(symbol_table)),
             total_files=data.get("total_files", len(symbol_table.all_files)),
+            repo_path=data.get("repo_path", ""),
         )
     except Exception:
         return None

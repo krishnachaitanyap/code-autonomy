@@ -57,6 +57,8 @@ class AgentResult:
     usage_stats: "LLMUsageStats | None" = None
     # Checkpoint from an incomplete run (populated when agent exhausts turns)
     checkpoint: "Checkpoint | None" = None
+    # Working memory accumulated during the run (file notes, patterns, etc.)
+    working_memory: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -370,6 +372,7 @@ def generate_changes_with_agent(
     repo_knowledge: str = "",
     code_index: "CodeIndex | None" = None,
     resume: bool = False,
+    initial_working_memory: Optional[dict[str, str]] = None,
 ) -> AgentResult:
     """Run the agentic loop: explore → edit → test → fix → complete.
 
@@ -398,6 +401,9 @@ def generate_changes_with_agent(
 
     # Working memory (survives context compression)
     working_memory = WorkingMemory()
+    if initial_working_memory:
+        for k, v in initial_working_memory.items():
+            working_memory.update(k, v)
 
     # --- GCC (opt-in structured versioned memory) ---
     gcc_controller: Optional[GCCController] = None
@@ -472,6 +478,11 @@ def generate_changes_with_agent(
         else:
             print("  [resume] No checkpoint found — starting fresh")
 
+    # Inject pre-populated working memory into system prompt
+    # (covers initial_working_memory from prior JIRA stories when NOT resuming from checkpoint)
+    if not working_memory.is_empty() and "<working_memory>" not in messages[0]["content"]:
+        messages[0]["content"] = system_prompt + "\n" + working_memory.to_message_block()
+
     # ------------------------------------------------------------------ #
     # Agent loop
     # ------------------------------------------------------------------ #
@@ -522,7 +533,7 @@ def generate_changes_with_agent(
             llm_span_id = collector.start_span(
                 SPAN_LLM_CALL, model_name, turn,
                 inputs={"message_count": len(messages), "tokens_est": tokens_est},
-                metadata={"model": model_name, "temperature": 0.2},
+                metadata={"model": model_name, "temperature": float(llm_config.get("temperature", 0.2))},
             )
 
         content, msg = chat_completion(
@@ -530,7 +541,7 @@ def generate_changes_with_agent(
             config=llm_config,
             tools=all_tools,
             tool_choice="auto",
-            temperature=0.2,
+            temperature=float(llm_config.get("temperature", 0.2)),
             full_config=config,
             usage_stats=usage_stats,
         )
@@ -780,6 +791,7 @@ def generate_changes_with_agent(
             turns_used=turn + 1,
             tests_passed=True,
             usage_stats=usage_stats,
+            working_memory=working_memory.to_dict(),
         )
     else:
         # Agent exhausted turns without completing — save checkpoint
@@ -806,6 +818,7 @@ def generate_changes_with_agent(
             turns_used=max_turns,
             usage_stats=usage_stats,
             checkpoint=checkpoint,
+            working_memory=working_memory.to_dict(),
         )
 
     # --- Save execution trace ---
@@ -961,7 +974,7 @@ def generate_plan_with_agent(
             llm_span_id = collector.start_span(
                 SPAN_LLM_CALL, model_name, turn,
                 inputs={"message_count": len(messages), "tokens_est": tokens_est},
-                metadata={"model": model_name, "temperature": 0.2},
+                metadata={"model": model_name, "temperature": float(llm_config.get("temperature", 0.2))},
             )
 
         content, msg = chat_completion(
@@ -969,7 +982,7 @@ def generate_plan_with_agent(
             config=llm_config,
             tools=all_tools,
             tool_choice="auto",
-            temperature=0.2,
+            temperature=float(llm_config.get("temperature", 0.2)),
             full_config=config,
             usage_stats=usage_stats,
         )
@@ -1370,7 +1383,7 @@ def generate_answer_with_agent(
             llm_span_id = collector.start_span(
                 SPAN_LLM_CALL, model_name, turn,
                 inputs={"message_count": len(messages), "tokens_est": tokens_est},
-                metadata={"model": model_name, "temperature": 0.2},
+                metadata={"model": model_name, "temperature": float(llm_config.get("temperature", 0.2))},
             )
 
         content, msg = chat_completion(
@@ -1378,7 +1391,7 @@ def generate_answer_with_agent(
             config=llm_config,
             tools=all_tools,
             tool_choice="auto",
-            temperature=0.2,
+            temperature=float(llm_config.get("temperature", 0.2)),
             full_config=config,
             usage_stats=usage_stats,
         )

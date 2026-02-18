@@ -311,6 +311,38 @@ class TestBuildRequirementsFromStory:
 
 
 # ---------------------------------------------------------------------------
+# max_retries config default
+# ---------------------------------------------------------------------------
+
+class TestMaxRetriesConfig:
+    def test_default_max_retries(self, tmp_path):
+        """max_retries defaults to 2 when not set."""
+        ini = tmp_path / "config.ini"
+        ini.write_text(
+            "[ai]\nprovider = openai\napi_key = test\nmodel = gpt-4o\n"
+            "[repository]\nrepo_url = https://github.com/o/r.git\n"
+            "[jira]\nbase_url = https://j.example.com/rest/api/2\n"
+        )
+        from src.config_loader import load_config
+
+        cfg = load_config(str(ini))
+        assert cfg["jira"]["max_retries"] == 2
+
+    def test_custom_max_retries(self, tmp_path):
+        ini = tmp_path / "config.ini"
+        ini.write_text(
+            "[ai]\nprovider = openai\napi_key = test\nmodel = gpt-4o\n"
+            "[repository]\nrepo_url = https://github.com/o/r.git\n"
+            "[jira]\nbase_url = https://j.example.com/rest/api/2\n"
+            "max_retries = 5\n"
+        )
+        from src.config_loader import load_config
+
+        cfg = load_config(str(ini))
+        assert cfg["jira"]["max_retries"] == 5
+
+
+# ---------------------------------------------------------------------------
 # config_loader: [jira] section
 # ---------------------------------------------------------------------------
 

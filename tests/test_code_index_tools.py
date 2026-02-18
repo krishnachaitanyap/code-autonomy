@@ -7,6 +7,7 @@ from src.code_index.symbol_table import SymbolTable, SymbolEntry
 from src.code_index.graph_builder import DependencyGraph
 from src.code_index.hierarchy import ClassHierarchy
 from src.code_index.entity_embeddings import EntityEmbeddings
+from src.code_index.property_index import PropertyIndex
 from src.code_index.tools import (
     CODE_INDEX_TOOLS,
     CODE_INDEX_TOOL_NAMES,
@@ -64,6 +65,7 @@ def code_index():
         dependency_graph=graph,
         class_hierarchy=hierarchy,
         embeddings=embeddings,
+        property_index=PropertyIndex(),
         total_symbols=4,
         total_files=2,
     )
@@ -75,7 +77,7 @@ def code_index():
 
 class TestToolSchemas:
     def test_all_tools_present(self):
-        assert len(CODE_INDEX_TOOLS) == 7
+        assert len(CODE_INDEX_TOOLS) == 8
 
     def test_tool_names_match(self):
         schema_names = {t["function"]["name"] for t in CODE_INDEX_TOOLS}
@@ -275,6 +277,7 @@ def high_risk_code_index():
         dependency_graph=graph,
         class_hierarchy=hierarchy,
         embeddings=EntityEmbeddings(),
+        property_index=PropertyIndex(),
         total_symbols=st.__len__(),
         total_files=len(st.all_files),
     )
