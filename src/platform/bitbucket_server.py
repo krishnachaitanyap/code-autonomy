@@ -9,6 +9,7 @@ Supports:
 - SSH and HTTPS URL parsing for project_key/repo_slug extraction
 """
 
+import logging
 import re
 from typing import Optional
 from urllib.parse import urlparse
@@ -17,12 +18,18 @@ import requests
 
 from src.platform.pr_platform import PRPlatform
 
+logger = logging.getLogger(__name__)
+
 
 class BitbucketServerClient:
     """Client for Bitbucket Server / Data Center REST API 1.0."""
 
     def __init__(self, base_url: str, token: str, verify_ssl: bool = False):
-        self.base_url = base_url.rstrip("/")
+        # Extract just scheme://host:port (strip any trailing path)
+        parsed = urlparse(base_url.rstrip("/"))
+        self.base_url = f"{parsed.scheme}://{parsed.hostname}"
+        if parsed.port:
+            self.base_url += f":{parsed.port}"
         self.token = token
         self.verify_ssl = verify_ssl
         self._session = requests.Session()
@@ -33,7 +40,10 @@ class BitbucketServerClient:
         self._session.verify = verify_ssl
 
     def _api_url(self, project_key: str, repo_slug: str, path: str = "") -> str:
-        """Build a REST API 1.0 URL for the given project/repo."""
+        """Build a REST API 1.0 URL for the given project/repo.
+
+        Example: https://host/rest/api/1.0/projects/PROJ/repos/my-repo/branches
+        """
         return (
             f"{self.base_url}/rest/api/1.0/projects/{project_key}"
             f"/repos/{repo_slug}{path}"
@@ -42,9 +52,13 @@ class BitbucketServerClient:
     def get_branches(self, project_key: str, repo_slug: str) -> list[dict]:
         """List branches for a repository."""
         url = self._api_url(project_key, repo_slug, "/branches")
+        logger.debug("Fetching branches from: %s", url)
         resp = self._session.get(url, params={"limit": 100})
         resp.raise_for_status()
-        return resp.json().get("values", [])
+        data = resp.json()
+        branches = [b["displayId"] for b in data.get("values", [])]
+        logger.debug("Fetched branches: %s", branches)
+        return data.get("values", [])
 
     def get_default_branch(self, project_key: str, repo_slug: str) -> str:
         """Get the default branch name for a repository."""
@@ -83,6 +97,8 @@ class BitbucketServerClient:
                 },
             },
         }
+        logger.debug("Creating PR at: %s", url)
+        logger.debug("PR payload: %s", payload)
         resp = self._session.post(url, json=payload)
         if resp.status_code in (200, 201):
             data = resp.json()
@@ -92,8 +108,9 @@ class BitbucketServerClient:
                 f"{self.base_url}/projects/{project_key}/repos/{repo_slug}"
                 f"/pull-requests/{pr_id}"
             )
+            logger.info("PR created: %s", pr_url)
             return pr_url
-        print(f"Bitbucket Server PR creation failed: {resp.status_code} - {resp.text}")
+        logger.error("PR creation failed: %s - %s", resp.status_code, resp.text)
         return None
 
     def add_pr_comment(
