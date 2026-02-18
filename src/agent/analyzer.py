@@ -90,6 +90,18 @@ class AskResult:
 # Guard: abort after N consecutive empty LLM responses
 # ---------------------------------------------------------------------------
 MAX_CONSECUTIVE_EMPTY = 5
+MAX_CONSECUTIVE_API_ERRORS = 3
+
+
+def _format_tool_breakdown(tool_call_counts: dict, tool_errors: dict) -> list[str]:
+    """Format tool call counts for end-of-run report."""
+    if not tool_call_counts:
+        return []
+    lines = [f"Tool calls ({sum(tool_call_counts.values())} total):"]
+    for tname in sorted(tool_call_counts, key=tool_call_counts.get, reverse=True):
+        err_suffix = f" ({tool_errors.get(tname, 0)} errors)" if tool_errors.get(tname, 0) else ""
+        lines.append(f"  - {tname}: {tool_call_counts[tname]}{err_suffix}")
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -161,9 +173,9 @@ When adding a new property:
 4. Record these patterns in working memory with `update_memory("property_patterns", ...)`.
 
 ## Rules
-- ALWAYS explore before modifying. Read existing files to understand conventions and structure.
+- Explore briefly before modifying — read a few key files to understand conventions, then start making changes. Do NOT over-read; 2-3 reads of relevant files is enough.
 - Use update_memory to record project knowledge after initial exploration (language, build tool, patterns, key files).
-- The old_string in edit_file MUST match exactly (including whitespace and indentation). Include enough surrounding context to make the match unique.
+- The old_string in edit_file MUST match exactly (including whitespace and indentation). If a file is large, use grep to find the line, then read_file with a narrow start_line/end_line range to get exact text.
 - Run tests after making changes. Fix failures within this session — do not leave broken tests.
 - When framework context is provided: it is REFERENCE ONLY. Do NOT modify framework files.
 - When generating Java tests, follow the testing strategy guidance when provided."""
@@ -439,7 +451,13 @@ def generate_changes_with_agent(
     changes_tracker: set[str] = set()
     # Track files the agent read and edit attempts (for end-of-run summary)
     reads_tracker: set[str] = set()
+    read_counts: dict[str, int] = {}  # per-file read count to detect repeated reads
     failed_edits: list[str] = []  # brief descriptions of failed edit_file calls
+    consecutive_reads_without_write = 0  # reads since last successful write
+    tool_call_counts: dict[str, int] = {}    # ALL tool calls by name
+    tool_errors: dict[str, int] = {}          # errors per tool
+    consecutive_api_errors = 0                 # consecutive LLM API failures
+    turns_without_write = 0                    # ANY turn without edit/write
 
     # Working memory (survives context compression)
     working_memory = WorkingMemory()
@@ -578,15 +596,44 @@ def generate_changes_with_agent(
                 metadata={"model": model_name, "temperature": float(llm_config.get("temperature", 0.2))},
             )
 
-        content, msg = chat_completion(
-            messages=messages,
-            config=llm_config,
-            tools=all_tools,
-            tool_choice="auto",
-            temperature=float(llm_config.get("temperature", 0.2)),
-            full_config=config,
-            usage_stats=usage_stats,
-        )
+        try:
+            content, msg = chat_completion(
+                messages=messages,
+                config=llm_config,
+                tools=all_tools,
+                tool_choice="auto",
+                temperature=float(llm_config.get("temperature", 0.2)),
+                full_config=config,
+                usage_stats=usage_stats,
+            )
+            consecutive_api_errors = 0
+        except Exception as api_err:
+            consecutive_api_errors += 1
+            print(f"  [agent] LLM API error (attempt {consecutive_api_errors}): {api_err}")
+            if collector and llm_span_id:
+                collector.end_span(
+                    llm_span_id,
+                    output_summary=f"API error: {str(api_err)[:100]}",
+                    success=False,
+                    error=str(api_err)[:200],
+                )
+                llm_span_id = None
+            if consecutive_api_errors >= MAX_CONSECUTIVE_API_ERRORS:
+                print(f"  [agent] Aborting: {consecutive_api_errors} consecutive API errors")
+                break
+            # For 400 errors: trim messages to system + last 10 and retry
+            err_str = str(api_err)
+            if "400" in err_str or "Bad Request" in err_str:
+                if len(messages) > 11:
+                    messages = [messages[0]] + messages[-10:]
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"The previous LLM call failed with: {str(api_err)[:200]}. "
+                    "Please continue with the task."
+                ),
+            })
+            continue
 
         tool_calls = getattr(msg, "tool_calls", None)
 
@@ -694,6 +741,9 @@ def generate_changes_with_agent(
             except json.JSONDecodeError:
                 args = {}
 
+            # --- Count every tool call ---
+            tool_call_counts[name] = tool_call_counts.get(name, 0) + 1
+
             # --- Start tool span ---
             tool_span_id = None
             if collector:
@@ -745,11 +795,17 @@ def generate_changes_with_agent(
                 )
                 # --- Track reads and failed edits for end-of-run summary ---
                 if name == "read_file" and not result.startswith("Error"):
-                    reads_tracker.add(args.get("path", ""))
-                elif name == "edit_file" and result.startswith("Error"):
+                    _rpath = args.get("path", "")
+                    reads_tracker.add(_rpath)
+                    read_counts[_rpath] = read_counts.get(_rpath, 0) + 1
+                    consecutive_reads_without_write += 1
+                elif name in ("edit_file", "write_file") and result.startswith("Error"):
                     failed_edits.append(f"{args.get('path', '?')}: {result[:120]}")
-                elif name == "write_file" and result.startswith("Error"):
-                    failed_edits.append(f"{args.get('path', '?')}: {result[:120]}")
+                elif name in ("edit_file", "write_file", "delete_file") and not result.startswith("Error"):
+                    consecutive_reads_without_write = 0  # successful write resets counter
+                # --- Track tool errors ---
+                if result.startswith("Error"):
+                    tool_errors[name] = tool_errors.get(name, 0) + 1
                 # --- End tool span with reward ---
                 if collector and tool_span_id:
                     is_error = result.startswith("Error:")
@@ -832,6 +888,49 @@ def generate_changes_with_agent(
                     ),
                 })
 
+            # --- Detect repeated reads on the same file ---
+            if name == "read_file" and not result.startswith("Error"):
+                _rpath2 = args.get("path", "")
+                if read_counts.get(_rpath2, 0) >= 3:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"You have read {_rpath2} {read_counts[_rpath2]} times. "
+                            "Stop re-reading this file. You have enough context. "
+                            "If you need to edit it, use the content you already have. "
+                            "If edit_file fails, use grep to find the exact line, then "
+                            "read_file with a narrow start_line/end_line range (e.g., 5 lines), "
+                            "and copy the exact text into old_string."
+                        ),
+                    })
+
+            # --- Corrective injection after failed edit_file ---
+            if name == "edit_file" and result.startswith("Error"):
+                _epath = args.get("path", "")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Your edit to {_epath} failed. To fix this:\n"
+                        "1. Use grep to find the exact text you want to change (search for a unique keyword from old_string).\n"
+                        f"2. Use read_file(\"{_epath}\", start_line=LINE-2, end_line=LINE+2) to get the exact content.\n"
+                        "3. Copy the EXACT text (including all whitespace) from that read_file output into old_string.\n"
+                        "4. Retry edit_file with the corrected old_string.\n"
+                        "Do NOT re-read the entire file."
+                    ),
+                })
+
+            # --- Nudge after many consecutive reads without any write ---
+            if consecutive_reads_without_write == 8:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"You have read {consecutive_reads_without_write} files in a row without making any edits. "
+                        "You should have enough context by now. Please make your changes using edit_file or write_file. "
+                        "If you are struggling to match old_string for edit_file, use grep to find the exact line, "
+                        "then read_file with a narrow line range to get the precise text."
+                    ),
+                })
+
             # --- Inject working memory / GCC context into system prompt ---
             if (name == "update_memory" and not working_memory.is_empty()) or \
                (name.startswith("gcc_") and gcc_controller):
@@ -863,6 +962,44 @@ def generate_changes_with_agent(
                         ),
                     })
                     stuck_count = 0
+
+        # --- Track turns without any write ---
+        wrote_this_turn = any(
+            tc.function.name in ("edit_file", "write_file", "delete_file")
+            and not (
+                tc.function.name == "task_complete"
+                or any(
+                    m.get("tool_call_id") == tc.id
+                    and m.get("content", "").startswith("Error")
+                    for m in messages[-len(tool_calls):]
+                )
+            )
+            for tc in tool_calls
+        )
+        if wrote_this_turn:
+            turns_without_write = 0
+        else:
+            turns_without_write += 1
+
+        if turns_without_write == 5:
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"You have spent {turns_without_write} turns exploring without making any edits. "
+                    "You have enough context. "
+                    "Please call edit_file or write_file NOW to implement the required changes. "
+                    "If you cannot determine the exact text to edit, use grep to find the line, "
+                    "then read_file with start_line/end_line for a narrow range, then edit_file."
+                ),
+            })
+        elif turns_without_write >= 12:
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"WARNING: {turns_without_write} turns with no edits. If you do not call edit_file or write_file "
+                    "on the next turn, the session will be considered failed. Make your best attempt NOW."
+                ),
+            })
 
         if task_complete_data:
             break
@@ -949,6 +1086,7 @@ def generate_changes_with_agent(
             activity_lines.append(f"Failed edits ({len(failed_edits)}):")
             for fe in failed_edits[-10:]:  # last 10
                 activity_lines.append(f"  - {fe}")
+        activity_lines.extend(_format_tool_breakdown(tool_call_counts, tool_errors))
         wm_summary = ""
         if not working_memory.is_empty():
             wm_summary = f"\nWorking memory:\n{working_memory.read_all()}"
@@ -993,6 +1131,8 @@ def generate_changes_with_agent(
             print(f"  Failed edits ({len(failed_edits)}):")
             for fe in failed_edits[-5:]:
                 print(f"    - {fe}")
+        for _tb_line in _format_tool_breakdown(tool_call_counts, tool_errors):
+            print(f"  {_tb_line}")
         if reflection_summary:
             print(f"  Reflection: {reflection_summary[:200]}")
 
@@ -1137,6 +1277,9 @@ def generate_plan_with_agent(
 
     task_complete_data: Optional[dict] = None
     consecutive_empty = 0
+    tool_call_counts: dict[str, int] = {}
+    tool_errors: dict[str, int] = {}
+    consecutive_api_errors = 0
     model_name = _resolve_model_name(llm_config)
 
     for turn in range(max_turns):
@@ -1178,15 +1321,43 @@ def generate_plan_with_agent(
                 metadata={"model": model_name, "temperature": float(llm_config.get("temperature", 0.2))},
             )
 
-        content, msg = chat_completion(
-            messages=messages,
-            config=llm_config,
-            tools=all_tools,
-            tool_choice="auto",
-            temperature=float(llm_config.get("temperature", 0.2)),
-            full_config=config,
-            usage_stats=usage_stats,
-        )
+        try:
+            content, msg = chat_completion(
+                messages=messages,
+                config=llm_config,
+                tools=all_tools,
+                tool_choice="auto",
+                temperature=float(llm_config.get("temperature", 0.2)),
+                full_config=config,
+                usage_stats=usage_stats,
+            )
+            consecutive_api_errors = 0
+        except Exception as api_err:
+            consecutive_api_errors += 1
+            print(f"  [plan] LLM API error (attempt {consecutive_api_errors}): {api_err}")
+            if collector and llm_span_id:
+                collector.end_span(
+                    llm_span_id,
+                    output_summary=f"API error: {str(api_err)[:100]}",
+                    success=False,
+                    error=str(api_err)[:200],
+                )
+                llm_span_id = None
+            if consecutive_api_errors >= MAX_CONSECUTIVE_API_ERRORS:
+                print(f"  [plan] Aborting: {consecutive_api_errors} consecutive API errors")
+                break
+            err_str = str(api_err)
+            if "400" in err_str or "Bad Request" in err_str:
+                if len(messages) > 11:
+                    messages = [messages[0]] + messages[-10:]
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"The previous LLM call failed with: {str(api_err)[:200]}. "
+                    "Please continue with the task."
+                ),
+            })
+            continue
 
         tool_calls = getattr(msg, "tool_calls", None)
 
@@ -1243,6 +1414,8 @@ def generate_plan_with_agent(
             except json.JSONDecodeError:
                 args = {}
 
+            tool_call_counts[name] = tool_call_counts.get(name, 0) + 1
+
             tool_span_id = None
             if collector:
                 span_type = SPAN_GCC_COMMAND if name.startswith("gcc_") else SPAN_TOOL_CALL
@@ -1278,6 +1451,8 @@ def generate_plan_with_agent(
                     gcc_controller=gcc_controller,
                     code_index=code_index,
                 )
+                if result.startswith("Error"):
+                    tool_errors[name] = tool_errors.get(name, 0) + 1
                 if agent_cfg.get("show_activity", True):
                     log_agent_activity(turn, name, args, summarize_tool_result(result, name))
                 if collector and tool_span_id:
@@ -1334,10 +1509,18 @@ def generate_plan_with_agent(
             usage_stats=usage_stats,
         )
     else:
+        _tb_lines = _format_tool_breakdown(tool_call_counts, tool_errors)
+        _tb_str = "\n".join(_tb_lines)
+        plan_summary = f"Agent did not call task_complete within {max_turns} turns"
+        if _tb_str:
+            plan_summary += f"\n{_tb_str}"
+            print(f"\n  [plan] End-of-run report:")
+            for _tb_line in _tb_lines:
+                print(f"  {_tb_line}")
         plan_result = PlanResult(
             success=not change_plan.is_empty,
             plan=change_plan,
-            summary=f"Agent did not call task_complete within {max_turns} turns",
+            summary=plan_summary,
             turns_used=max_turns,
             usage_stats=usage_stats,
         )
@@ -1547,6 +1730,9 @@ def generate_answer_with_agent(
 
     task_complete_data: Optional[dict] = None
     consecutive_empty = 0
+    tool_call_counts: dict[str, int] = {}
+    tool_errors: dict[str, int] = {}
+    consecutive_api_errors = 0
     model_name = _resolve_model_name(llm_config)
 
     for turn in range(max_turns):
@@ -1588,15 +1774,43 @@ def generate_answer_with_agent(
                 metadata={"model": model_name, "temperature": float(llm_config.get("temperature", 0.2))},
             )
 
-        content, msg = chat_completion(
-            messages=messages,
-            config=llm_config,
-            tools=all_tools,
-            tool_choice="auto",
-            temperature=float(llm_config.get("temperature", 0.2)),
-            full_config=config,
-            usage_stats=usage_stats,
-        )
+        try:
+            content, msg = chat_completion(
+                messages=messages,
+                config=llm_config,
+                tools=all_tools,
+                tool_choice="auto",
+                temperature=float(llm_config.get("temperature", 0.2)),
+                full_config=config,
+                usage_stats=usage_stats,
+            )
+            consecutive_api_errors = 0
+        except Exception as api_err:
+            consecutive_api_errors += 1
+            print(f"  [ask] LLM API error (attempt {consecutive_api_errors}): {api_err}")
+            if collector and llm_span_id:
+                collector.end_span(
+                    llm_span_id,
+                    output_summary=f"API error: {str(api_err)[:100]}",
+                    success=False,
+                    error=str(api_err)[:200],
+                )
+                llm_span_id = None
+            if consecutive_api_errors >= MAX_CONSECUTIVE_API_ERRORS:
+                print(f"  [ask] Aborting: {consecutive_api_errors} consecutive API errors")
+                break
+            err_str = str(api_err)
+            if "400" in err_str or "Bad Request" in err_str:
+                if len(messages) > 11:
+                    messages = [messages[0]] + messages[-10:]
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"The previous LLM call failed with: {str(api_err)[:200]}. "
+                    "Please continue with the task."
+                ),
+            })
+            continue
 
         tool_calls = getattr(msg, "tool_calls", None)
 
@@ -1652,6 +1866,8 @@ def generate_answer_with_agent(
             except json.JSONDecodeError:
                 args = {}
 
+            tool_call_counts[name] = tool_call_counts.get(name, 0) + 1
+
             tool_span_id = None
             if collector:
                 span_type = SPAN_GCC_COMMAND if name.startswith("gcc_") else SPAN_TOOL_CALL
@@ -1689,6 +1905,8 @@ def generate_answer_with_agent(
                 # Track sources from successful read_file calls
                 if name == "read_file" and not result.startswith("Error:"):
                     sources_consulted.add(args.get("path", ""))
+                if result.startswith("Error"):
+                    tool_errors[name] = tool_errors.get(name, 0) + 1
                 if agent_cfg.get("show_activity", True):
                     log_agent_activity(turn, name, args, summarize_tool_result(result, name))
                 if collector and tool_span_id:
@@ -1774,11 +1992,19 @@ def generate_answer_with_agent(
             usage_stats=usage_stats,
         )
     else:
+        _tb_lines = _format_tool_breakdown(tool_call_counts, tool_errors)
+        _tb_str = "\n".join(_tb_lines)
+        ask_summary = f"Agent did not call task_complete within {max_turns} turns"
+        if _tb_str:
+            ask_summary += f"\n{_tb_str}"
+            print(f"\n  [ask] End-of-run report:")
+            for _tb_line in _tb_lines:
+                print(f"  {_tb_line}")
         ask_result = AskResult(
             success=False,
             answer="",
             sources=sorted(sources_consulted),
-            summary=f"Agent did not call task_complete within {max_turns} turns",
+            summary=ask_summary,
             turns_used=max_turns,
             usage_stats=usage_stats,
         )
