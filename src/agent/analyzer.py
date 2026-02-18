@@ -437,6 +437,9 @@ def generate_changes_with_agent(
 
     # Track every file the agent creates / edits / deletes
     changes_tracker: set[str] = set()
+    # Track files the agent read and edit attempts (for end-of-run summary)
+    reads_tracker: set[str] = set()
+    failed_edits: list[str] = []  # brief descriptions of failed edit_file calls
 
     # Working memory (survives context compression)
     working_memory = WorkingMemory()
@@ -740,6 +743,13 @@ def generate_changes_with_agent(
                     gcc_controller=gcc_controller,
                     code_index=code_index,
                 )
+                # --- Track reads and failed edits for end-of-run summary ---
+                if name == "read_file" and not result.startswith("Error"):
+                    reads_tracker.add(args.get("path", ""))
+                elif name == "edit_file" and result.startswith("Error"):
+                    failed_edits.append(f"{args.get('path', '?')}: {result[:120]}")
+                elif name == "write_file" and result.startswith("Error"):
+                    failed_edits.append(f"{args.get('path', '?')}: {result[:120]}")
                 # --- End tool span with reward ---
                 if collector and tool_span_id:
                     is_error = result.startswith("Error:")
@@ -931,13 +941,68 @@ def generate_changes_with_agent(
             working_memory=working_memory.to_dict(),
         )
     else:
+        # --- Build detailed end-of-run summary ---
+        activity_lines = [f"Turns used: {max_turns}"]
+        activity_lines.append(f"Files read: {sorted(reads_tracker) if reads_tracker else 'none'}")
+        activity_lines.append(f"Files modified: {sorted(changes_tracker) if changes_tracker else 'none'}")
+        if failed_edits:
+            activity_lines.append(f"Failed edits ({len(failed_edits)}):")
+            for fe in failed_edits[-10:]:  # last 10
+                activity_lines.append(f"  - {fe}")
+        wm_summary = ""
+        if not working_memory.is_empty():
+            wm_summary = f"\nWorking memory:\n{working_memory.read_all()}"
+        activity_report = "\n".join(activity_lines) + wm_summary
+
+        # --- Force a reflection call to get a useful failure summary ---
+        reflection_summary = ""
+        try:
+            reflection_prompt = (
+                "The agent session has ended without calling task_complete. "
+                "Based on the conversation so far, provide a brief summary (3-5 sentences) covering:\n"
+                "1. What files were reviewed and what was understood\n"
+                "2. What changes were attempted (if any) and what went wrong\n"
+                "3. Why the task could not be completed\n"
+                "4. What specific steps should be taken on the next attempt\n\n"
+                f"Activity report:\n{activity_report}"
+            )
+            reflection_content, _ = chat_completion(
+                messages=[
+                    {"role": "system", "content": "You are summarizing an incomplete agent session. Be concise and specific."},
+                    {"role": "user", "content": reflection_prompt},
+                ],
+                config=llm_config,
+                temperature=0.1,
+                full_config=config,
+            )
+            reflection_summary = reflection_content.strip() if reflection_content else ""
+        except Exception:
+            pass  # reflection is best-effort
+
+        detailed_summary = (
+            f"Agent did not call task_complete within {max_turns} turns.\n"
+            f"{activity_report}"
+        )
+        if reflection_summary:
+            detailed_summary += f"\n\nReflection:\n{reflection_summary}"
+
+        print(f"\n  [agent] End-of-run report:")
+        print(f"  Files read ({len(reads_tracker)}): {sorted(reads_tracker) if reads_tracker else 'none'}")
+        print(f"  Files modified ({len(changes_tracker)}): {sorted(changes_tracker) if changes_tracker else 'none'}")
+        if failed_edits:
+            print(f"  Failed edits ({len(failed_edits)}):")
+            for fe in failed_edits[-5:]:
+                print(f"    - {fe}")
+        if reflection_summary:
+            print(f"  Reflection: {reflection_summary[:200]}")
+
         # Agent exhausted turns without completing — save checkpoint
         checkpoint = save_checkpoint(
             config, repo_path, repo_url, requirements,
             sorted(changes_tracker), working_memory,
             turns_used=max_turns, max_turns=max_turns,
-            summary=f"Agent used {max_turns} turns, changed {len(changes_tracker)} file(s).",
-            pending_work="Agent ran out of turns before calling task_complete.",
+            summary=detailed_summary[:500],
+            pending_work=reflection_summary or "Agent ran out of turns before calling task_complete.",
             summarization_calls_used=usage_stats.calls_by_category("summarization") if usage_stats else 0,
             testing_turns_used=testing_turns_used,
         )
@@ -951,7 +1016,7 @@ def generate_changes_with_agent(
         result_obj = AgentResult(
             success=False,
             files_changed=sorted(changes_tracker),
-            summary=f"Agent did not call task_complete within {max_turns} turns",
+            summary=detailed_summary,
             turns_used=max_turns,
             usage_stats=usage_stats,
             checkpoint=checkpoint,

@@ -175,9 +175,27 @@ def run_edit_file(
 
     count = content.count(old_string)
     if count == 0:
+        # Help the agent by showing the closest matching line
+        hint = ""
+        first_line = old_string.strip().split("\n")[0].strip() if old_string.strip() else ""
+        if first_line and len(first_line) > 5:
+            lines = content.splitlines()
+            for i, line in enumerate(lines):
+                if first_line in line:
+                    # Show the actual line so the agent can see the difference
+                    start = max(0, i - 1)
+                    end = min(len(lines), i + 2)
+                    snippet = "\n".join(f"  {start + j + 1}: {lines[start + j]}" for j in range(end - start))
+                    hint = (
+                        f"\nThe first line of old_string was found near line {i + 1}. "
+                        f"Actual content around that line:\n{snippet}\n"
+                        "Use read_file with start_line/end_line to get the exact text, then retry edit_file."
+                    )
+                    break
         return (
             f"Error: old_string not found in {path}. "
             "Make sure it matches exactly (including whitespace and indentation)."
+            + hint
         )
     if count > 1:
         return (
