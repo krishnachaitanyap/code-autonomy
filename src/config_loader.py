@@ -144,7 +144,7 @@ def load_config(config_path: str = "config.ini") -> dict:
             "max_turns": get_int("agent", "max_turns", 50),
             "plan_max_turns": get_int("agent", "plan_max_turns", 30),
             "smart_summarization": get_bool("agent", "smart_summarization", True),
-            "truncation_limit": get_int("agent", "truncation_limit", 50000),
+            "truncation_limit": get_int("agent", "truncation_limit", 100000),
             "show_activity": get_bool("agent", "show_activity", True),
             "command_allowlist_only": get_bool("agent", "command_allowlist_only", False),
             "allowed_command_prefixes": get_list("agent", "allowed_command_prefixes"),

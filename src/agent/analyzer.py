@@ -150,14 +150,14 @@ You are an expert software engineer with tools to explore AND modify the codebas
 6. **COMPLETE** — Call task_complete with a summary and the list of files changed.
 
 ## Working with large files (properties, config, XML, CSV, etc.)
-Files over ~1000 lines WILL be truncated if you read them fully.
+Files over ~2000 lines WILL be truncated if you read them fully.
 **Do NOT repeatedly read_file on large files hoping to see more.** Instead:
 1. Use `grep(property_name)` to find the exact line number and surrounding context.
-2. Use `read_file(path, start_line, end_line)` with a reasonable range (e.g. ±30 lines around the match).
+2. Use `read_file(path, start_line, end_line)` with a reasonable range (e.g. ±1000 lines around the match).
 3. Use `edit_file` with the exact old_string from that read.
 4. To ADD a new property: grep for a nearby existing property in the same section, read that area, then edit_file to insert your new line after it.
 5. If grep returns no matches, the property does NOT exist in the file yet — you need to add it.
-Most source files (under ~1000 lines) can be read fully in one call — no need for line ranges on normal-sized files.
+Most source files (under ~2000 lines) can be read fully in one call — no need for line ranges on normal-sized files.
 
 ## Property defaults in Java/Spring projects
 When a property is NOT present in a config file (env.properties, application.yml, etc.), Java code
@@ -176,7 +176,7 @@ When adding a new property:
 ## Rules
 - Explore briefly before modifying — read a few key files to understand conventions, then start making changes. Do NOT over-read; 2-3 reads of relevant files is enough.
 - Use update_memory to record project knowledge after initial exploration (language, build tool, patterns, key files).
-- The old_string in edit_file MUST match exactly (including whitespace and indentation). If a file is large (over ~1000 lines), use grep to find the line, then read_file with start_line/end_line (±30 lines) to get exact text.
+- The old_string in edit_file MUST match exactly (including whitespace and indentation). If a file is large (over ~2000 lines), use grep to find the line, then read_file with start_line/end_line (±1000 lines) to get exact text.
 - Run tests after making changes. Fix failures within this session — do not leave broken tests.
 - When framework context is provided: it is REFERENCE ONLY. Do NOT modify framework files.
 - When generating Java tests, follow the testing strategy guidance when provided."""
@@ -441,7 +441,7 @@ def generate_changes_with_agent(
     # LLM usage tracking
     usage_stats = LLMUsageStats()
     smart_summarization = agent_cfg.get("smart_summarization", True)
-    truncation_limit = agent_cfg.get("truncation_limit", 30_000)
+    truncation_limit = agent_cfg.get("truncation_limit", 100_000)
 
     # Budget tracking
     summarization_budget = agent_cfg.get("summarization_budget", 0)
@@ -898,7 +898,7 @@ def generate_changes_with_agent(
                         f"Note: {_read_path} is a large file and was truncated. "
                         "Do NOT re-read the full file. Instead:\n"
                         f"1. Use grep(\"property_name\") to find the exact line number.\n"
-                        f"2. Use read_file(\"{_read_path}\", start_line=N-30, end_line=N+30) for a focused range.\n"
+                        f"2. Use read_file(\"{_read_path}\", start_line=N-1000, end_line=N+1000) for a focused range.\n"
                         "3. Then use edit_file with the exact text from that read.\n"
                         "4. If grep finds no match, the property does not exist yet — add it near related properties."
                     ),
@@ -915,7 +915,7 @@ def generate_changes_with_agent(
                             "Stop re-reading this file. You have enough context. "
                             "If you need to edit it, use the content you already have. "
                             "If edit_file fails, use grep to find the exact line, then "
-                            "read_file with a narrow start_line/end_line range (e.g., 5 lines), "
+                            "read_file with start_line/end_line (e.g., ±1000 lines around the match), "
                             "and copy the exact text into old_string."
                         ),
                     })
@@ -928,10 +928,9 @@ def generate_changes_with_agent(
                     "content": (
                         f"Your edit to {_epath} failed. To fix this:\n"
                         "1. Use grep to find the exact text you want to change (search for a unique keyword from old_string).\n"
-                        f"2. Use read_file(\"{_epath}\", start_line=LINE-2, end_line=LINE+2) to get the exact content.\n"
+                        f"2. Use read_file(\"{_epath}\", start_line=LINE-1000, end_line=LINE+1000) to get the exact content with context.\n"
                         "3. Copy the EXACT text (including all whitespace) from that read_file output into old_string.\n"
-                        "4. Retry edit_file with the corrected old_string.\n"
-                        "Do NOT re-read the entire file."
+                        "4. Retry edit_file with the corrected old_string."
                     ),
                 })
 
