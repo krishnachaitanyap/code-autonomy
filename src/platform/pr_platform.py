@@ -112,10 +112,19 @@ class BitbucketPR(PRPlatform):
         return None
 
 
-def get_pr_platform(platform: str, auth_token: str) -> PRPlatform:
-    """Factory for PR platform."""
+def get_pr_platform(platform: str, auth_token: str, **kwargs) -> PRPlatform:
+    """Factory for PR platform.
+
+    For ``bitbucket_server``, pass ``base_url`` and optionally ``verify_ssl``
+    via *kwargs*.
+    """
     if platform == "github":
         return GitHubPR(auth_token)
     if platform == "bitbucket":
         return BitbucketPR(auth_token)
+    if platform == "bitbucket_server":
+        from src.platform.bitbucket_server import BitbucketServerPR
+        base_url = kwargs.get("base_url", "")
+        verify_ssl = kwargs.get("verify_ssl", False)
+        return BitbucketServerPR(base_url, auth_token, verify_ssl)
     raise ValueError(f"Unsupported platform: {platform}")

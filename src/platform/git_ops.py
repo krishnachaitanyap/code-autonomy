@@ -5,6 +5,7 @@ Handles clone, checkout, commit, and push.
 
 import os
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -50,15 +51,40 @@ def clone_repo(
 
     url = repo_url
     if auth_token:
-        # Inject token: https://user:TOKEN@github.com/owner/repo.git
+        # Inject token: https://user:TOKEN@host/owner/repo.git
         if "github.com" in repo_url:
             url = repo_url.replace("https://", f"https://x-access-token:{auth_token}@")
         elif "bitbucket.org" in repo_url:
-            # Bitbucket: https://user:app_password@bitbucket.org/workspace/repo.git
+            # Bitbucket Cloud: https://user:app_password@bitbucket.org/workspace/repo.git
+            url = repo_url.replace("https://", f"https://x-token-auth:{auth_token}@")
+        elif repo_url.startswith("https://"):
+            # Generic HTTPS (e.g. Bitbucket Server): inject token as user
             url = repo_url.replace("https://", f"https://x-token-auth:{auth_token}@")
 
     repo = Repo.clone_from(url, target_dir, branch=branch, depth=1)
     return repo
+
+
+def clone_repo_ssh(
+    ssh_url: str,
+    target_dir: str,
+    branch: str = "main",
+) -> Repo:
+    """Clone a repository via SSH (relies on SSH key auth configured on the host).
+
+    Uses subprocess to invoke git directly so SSH agent / key-based auth works
+    without token injection.
+    """
+    target = Path(target_dir)
+    if target.exists() and any(target.iterdir()):
+        raise FileExistsError(f"Target directory not empty: {target_dir}")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ["git", "clone", "--branch", branch, "--depth", "1", ssh_url, str(target)]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise GitCommandError(cmd, result.returncode, result.stderr)
+    return Repo(str(target))
 
 
 def checkout_branch(repo: Repo, branch_name: str, create: bool = True) -> None:

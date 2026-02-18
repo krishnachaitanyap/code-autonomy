@@ -150,13 +150,14 @@ You are an expert software engineer with tools to explore AND modify the codebas
 6. **COMPLETE** — Call task_complete with a summary and the list of files changed.
 
 ## Working with large files (properties, config, XML, CSV, etc.)
-Large files (env.properties, application.yml, pom.xml, etc.) WILL be truncated if you read them fully.
+Files over ~1000 lines WILL be truncated if you read them fully.
 **Do NOT repeatedly read_file on large files hoping to see more.** Instead:
 1. Use `grep(property_name)` to find the exact line number and surrounding context.
-2. Use `read_file(path, start_line, end_line)` with a narrow line range around the match.
-3. Use `edit_file` with the exact old_string from that narrow read.
+2. Use `read_file(path, start_line, end_line)` with a reasonable range (e.g. ±30 lines around the match).
+3. Use `edit_file` with the exact old_string from that read.
 4. To ADD a new property: grep for a nearby existing property in the same section, read that area, then edit_file to insert your new line after it.
 5. If grep returns no matches, the property does NOT exist in the file yet — you need to add it.
+Most source files (under ~1000 lines) can be read fully in one call — no need for line ranges on normal-sized files.
 
 ## Property defaults in Java/Spring projects
 When a property is NOT present in a config file (env.properties, application.yml, etc.), Java code
@@ -175,7 +176,7 @@ When adding a new property:
 ## Rules
 - Explore briefly before modifying — read a few key files to understand conventions, then start making changes. Do NOT over-read; 2-3 reads of relevant files is enough.
 - Use update_memory to record project knowledge after initial exploration (language, build tool, patterns, key files).
-- The old_string in edit_file MUST match exactly (including whitespace and indentation). If a file is large, use grep to find the line, then read_file with a narrow start_line/end_line range to get exact text.
+- The old_string in edit_file MUST match exactly (including whitespace and indentation). If a file is large (over ~1000 lines), use grep to find the line, then read_file with start_line/end_line (±30 lines) to get exact text.
 - Run tests after making changes. Fix failures within this session — do not leave broken tests.
 - When framework context is provided: it is REFERENCE ONLY. Do NOT modify framework files.
 - When generating Java tests, follow the testing strategy guidance when provided."""
@@ -503,7 +504,22 @@ def generate_changes_with_agent(
         repo_knowledge=repo_knowledge,
     )
 
+    skip_tests = agent_cfg.get("skip_tests", False)
+
     system_prompt = _SYSTEM_PROMPT
+    if skip_tests:
+        # Remove VERIFY/FIX steps and instruct agent not to run tests
+        system_prompt = system_prompt.replace(
+            "4. **VERIFY** — Run tests with run_command after making changes (e.g., `pytest -v`, `mvn test`).\n"
+            "5. **FIX** — If tests fail, read the error output, edit files to fix the issues, and re-run tests.\n"
+            "6. **COMPLETE** — Call task_complete with a summary and the list of files changed.",
+            "4. **COMPLETE** — Call task_complete with a summary and the list of files changed.",
+        )
+        system_prompt += (
+            "\n\n## IMPORTANT: Skip Tests\n"
+            "Do NOT run any tests or build commands. Skip the VERIFY and FIX steps entirely. "
+            "Focus on EXPLORE → RECORD → IMPLEMENT → COMPLETE."
+        )
     if gcc_controller:
         system_prompt += _GCC_PROMPT_SECTION
 
@@ -836,8 +852,8 @@ def generate_changes_with_agent(
                 if agent_cfg.get("show_activity", True):
                     log_agent_activity(turn, name, args, summarize_tool_result(result, name))
 
-            # Track testing turns
-            if name == "run_command":
+            # Track testing turns (skip enforcement when skip_tests is active)
+            if name == "run_command" and not skip_tests:
                 testing_turns_used += 1
                 if testing_budget > 0 and testing_turns_used >= testing_budget:
                     messages.append({
@@ -882,8 +898,8 @@ def generate_changes_with_agent(
                         f"Note: {_read_path} is a large file and was truncated. "
                         "Do NOT re-read the full file. Instead:\n"
                         f"1. Use grep(\"property_name\") to find the exact line number.\n"
-                        f"2. Use read_file(\"{_read_path}\", start_line=N-5, end_line=N+5) for a narrow range.\n"
-                        "3. Then use edit_file with the exact text from that narrow read.\n"
+                        f"2. Use read_file(\"{_read_path}\", start_line=N-30, end_line=N+30) for a focused range.\n"
+                        "3. Then use edit_file with the exact text from that read.\n"
                         "4. If grep finds no match, the property does not exist yet — add it near related properties."
                     ),
                 })

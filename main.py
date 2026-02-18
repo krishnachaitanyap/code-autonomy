@@ -111,15 +111,64 @@ def _run_jira_mode(args) -> int:
     ai_cfg = config["ai"]
     agent_cfg_section = config.get("agent") or {}
 
-    # Resolve repo path
-    if args.repo_path:
+    # Bitbucket Server integration (optional)
+    bb_cfg = config.get("bitbucket") or {}
+    bb_enabled = bb_cfg.get("enabled", False)
+    bb_repo: "Repo | None" = None
+
+    # Resolve repo path — Bitbucket can clone for us if no --repo-path
+    if bb_enabled and not args.repo_path:
+        from src.jira.bitbucket_bridge import clone_bitbucket_repo
+        clone_url = bb_cfg.get("clone_url", "")
+        if not clone_url:
+            # Derive clone URL from base_url + project_key + repo_slug
+            bb_base = bb_cfg["base_url"].rstrip("/")
+            pkey = bb_cfg["project_key"]
+            rslug = bb_cfg["repo_slug"]
+            protocol = bb_cfg.get("clone_protocol", "ssh")
+            if protocol == "ssh":
+                # Standard Bitbucket Server SSH URL
+                from urllib.parse import urlparse as _urlparse
+                _parsed = _urlparse(bb_base)
+                clone_url = f"ssh://git@{_parsed.hostname}:7999/{pkey}/{rslug}.git"
+            else:
+                clone_url = f"{bb_base}/scm/{pkey}/{rslug}.git"
+
+        work_dir = Path(config.get("workflow", {}).get("work_dir", "./workspace")).resolve()
+        target_dir = work_dir / f"jira-{bb_cfg.get('repo_slug', 'repo')}"
+
+        with spinner("Cloning from Bitbucket Server"):
+            try:
+                bb_repo = clone_bitbucket_repo(
+                    clone_url,
+                    str(target_dir),
+                    branch=bb_cfg.get("base_branch", "main"),
+                    auth_token=bb_cfg.get("user_token", ""),
+                    protocol=bb_cfg.get("clone_protocol", "ssh"),
+                )
+                clone_path = target_dir.resolve()
+                log_success(f"Cloned to {clone_path}")
+            except Exception as e:
+                log_error(f"Bitbucket clone failed: {e}")
+                return 1
+    elif args.repo_path:
         clone_path = Path(args.repo_path).resolve()
     else:
-        log_error("--repo-path is required when using --jira mode")
+        log_error("--repo-path is required when using --jira mode (unless [bitbucket] is enabled)")
         return 1
+
     if not clone_path.is_dir():
-        log_error(f"--repo-path is not a directory: {clone_path}")
+        log_error(f"Repo path is not a directory: {clone_path}")
         return 1
+
+    # Open as Repo object if Bitbucket is enabled and we haven't already
+    if bb_enabled and bb_repo is None:
+        try:
+            from git import Repo as _Repo
+            bb_repo = _Repo(str(clone_path))
+        except Exception:
+            log_warning("Could not open clone_path as git repo — Bitbucket git ops disabled")
+            bb_enabled = False
 
     # Detect repo_url from git remote
     repo_url = ""
@@ -134,7 +183,7 @@ def _run_jira_mode(args) -> int:
     except Exception:
         pass
 
-    header("JIRA Mode", f"Repo: {clone_path}")
+    header("JIRA Mode", f"Repo: {clone_path}" + (" (Bitbucket Server)" if bb_enabled else ""))
 
     # Pre-flight validation
     from src.startup_validator import validate_startup
@@ -254,6 +303,7 @@ def _run_jira_mode(args) -> int:
         repo_knowledge = load_repo_knowledge(str(clone_path))
 
     # Agent config (reused per story)
+    skip_tests = getattr(args, "skip_tests", False) or agent_cfg_section.get("skip_tests", False)
     agent_config = {
         "max_turns": int(agent_cfg_section.get("max_turns", 50)),
         "smart_summarization": agent_cfg_section.get("smart_summarization", True),
@@ -263,6 +313,7 @@ def _run_jira_mode(args) -> int:
         "blocked_commands": agent_cfg_section.get("blocked_commands", []),
         "summarization_budget": int(agent_cfg_section.get("summarization_budget", 0)),
         "testing_budget": int(agent_cfg_section.get("testing_budget", 0)),
+        "skip_tests": skip_tests,
     }
 
     # Collect results from previously succeeded stories (for summary)
@@ -295,6 +346,23 @@ def _run_jira_mode(args) -> int:
                 log_info(f"  Transitioned {key} → In Progress")
             except Exception as te:
                 log_warning(f"  Could not transition {key}: {te}")
+
+        # Create a feature branch for this story (Bitbucket flow)
+        story_branch = ""
+        if bb_enabled and bb_repo:
+            try:
+                from src.jira.bitbucket_bridge import prepare_story_branch
+                story_branch = prepare_story_branch(
+                    bb_repo, key, bb_cfg.get("base_branch", "main"),
+                )
+                log_info(f"  Created branch: {story_branch}")
+            except Exception as be:
+                log_error(f"  {key}: Could not create branch — {be}")
+                results.append({"key": key, "status": "failed", "files": 0, "pr_url": ""})
+                if session:
+                    session.mark_story(key, STATUS_FAILED, error=f"branch creation: {be}")
+                    save_jira_session(session)
+                continue
 
         # Determine if first attempt should resume (from a prior interrupted run)
         story_was_in_progress = False
@@ -342,11 +410,15 @@ def _run_jira_mode(args) -> int:
                     break
         except Exception as exc:
             log_error(f"  {key}: Agent crashed — {exc}")
+            # Discard changes and return to base branch
+            if bb_enabled and bb_repo:
+                from src.jira.bitbucket_bridge import discard_story_changes
+                discard_story_changes(bb_repo, bb_cfg.get("base_branch", "main"))
             # Save crash context to session so resume can pick it up
             if session:
                 session.mark_story(key, STATUS_FAILED, error=f"crash: {exc}")
                 save_jira_session(session)
-            results.append({"key": key, "status": "failed", "files": 0})
+            results.append({"key": key, "status": "failed", "files": 0, "pr_url": ""})
             continue
 
         # Accumulate working memory from this story's run (success or failure)
@@ -356,6 +428,28 @@ def _run_jira_mode(args) -> int:
         if result.success:
             log_success(f"  {key}: Agent completed — {len(result.files_changed)} file(s) modified")
 
+            # Bitbucket: commit, push, create PR
+            pr_url = ""
+            if bb_enabled and bb_repo and story_branch:
+                from src.jira.bitbucket_bridge import commit_and_push_story, create_story_pr
+                pushed = commit_and_push_story(
+                    bb_repo, story_branch, key,
+                    result.summary, result.files_changed,
+                )
+                if pushed:
+                    log_success(f"  {key}: Pushed branch {story_branch}")
+                    pr_url = create_story_pr(
+                        bb_cfg, repo_url, story_branch,
+                        bb_cfg.get("base_branch", "main"),
+                        key, story["summary"], result.summary,
+                    ) or ""
+                    if pr_url:
+                        log_success(f"  {key}: PR created → {pr_url}")
+                    else:
+                        log_warning(f"  {key}: Push succeeded but PR creation failed")
+                else:
+                    log_warning(f"  {key}: No changes to commit/push")
+
             # Update session state (including working memory for resume)
             if session:
                 session.mark_story(key, STATUS_SUCCESS, files_changed=len(result.files_changed))
@@ -364,12 +458,14 @@ def _run_jira_mode(args) -> int:
                     story_state.working_memory = result.working_memory
                 save_jira_session(session)
 
-            # Add success comment to JIRA
+            # Add success comment to JIRA (include PR URL if available)
             comment = (
                 f"[code-autonomy] Agent completed successfully.\n"
                 f"Files modified: {', '.join(result.files_changed) or 'none'}\n"
                 f"Summary: {result.summary}"
             )
+            if pr_url:
+                comment += f"\nPull Request: {pr_url}"
             try:
                 add_jira_comment(config, key, comment, token=token)
             except Exception as ce:
@@ -383,9 +479,14 @@ def _run_jira_mode(args) -> int:
                 except Exception as te:
                     log_warning(f"  Could not transition {key}: {te}")
 
-            results.append({"key": key, "status": "success", "files": len(result.files_changed)})
+            results.append({"key": key, "status": "success", "files": len(result.files_changed), "pr_url": pr_url})
         else:
             log_error(f"  {key}: Agent did not complete — {result.summary}")
+
+            # Discard changes and return to base branch
+            if bb_enabled and bb_repo:
+                from src.jira.bitbucket_bridge import discard_story_changes
+                discard_story_changes(bb_repo, bb_cfg.get("base_branch", "main"))
 
             # Update session state (including working memory for resume)
             if session:
@@ -405,7 +506,7 @@ def _run_jira_mode(args) -> int:
             except Exception as ce:
                 log_warning(f"  Could not comment on {key}: {ce}")
 
-            results.append({"key": key, "status": "failed", "files": 0})
+            results.append({"key": key, "status": "failed", "files": 0, "pr_url": ""})
 
     # Clear session only if all stories succeeded; otherwise persist for --resume
     if session:
@@ -430,7 +531,8 @@ def _run_jira_mode(args) -> int:
     print(f"{'─' * 60}")
     for r in results:
         icon = "OK" if r["status"] == "success" else "FAIL"
-        print(f"  [{icon}] {r['key']}  ({r['files']} files)")
+        pr_info = f"  PR: {r['pr_url']}" if r.get("pr_url") else ""
+        print(f"  [{icon}] {r['key']}  ({r['files']} files){pr_info}")
     print(f"{'=' * 60}\n")
 
     return 0 if failed == 0 else 1
@@ -926,6 +1028,7 @@ def main() -> int:
             "blocked_commands": agent_cfg_section.get("blocked_commands", []),
             "summarization_budget": int(agent_cfg_section.get("summarization_budget", 0)),
             "testing_budget": int(agent_cfg_section.get("testing_budget", 0)),
+            "skip_tests": args.skip_tests or agent_cfg_section.get("skip_tests", False),
         }
 
         with spinner("Agent exploring, implementing, and testing changes"):
