@@ -6,6 +6,7 @@ for each JIRA story processed by the agent.
 """
 
 import re
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -27,7 +28,8 @@ def clone_bitbucket_repo(
     """Clone a Bitbucket Server repository.
 
     Uses SSH clone (key-based auth) when *protocol* is ``'ssh'``, otherwise
-    falls back to HTTPS with optional token injection.
+    uses HTTPS with Bearer token via ``http.extraHeader`` (bypasses credential
+    helpers like wincred/manager).
     """
     target = Path(target_dir)
     if target.exists() and any(target.iterdir()):
@@ -39,17 +41,59 @@ def clone_bitbucket_repo(
     if protocol == "ssh":
         return clone_repo_ssh(clone_url, target_dir, branch=branch)
     else:
-        return clone_repo(clone_url, target_dir, branch=branch, auth_token=auth_token)
+        return _clone_https_bearer(clone_url, target_dir, branch=branch, token=auth_token)
 
 
-def prepare_story_branch(repo: Repo, story_key: str, base_branch: str) -> str:
+def _clone_https_bearer(
+    https_url: str,
+    target_dir: str,
+    branch: str = "main",
+    token: Optional[str] = None,
+) -> Repo:
+    """Clone via HTTPS using Bearer token in http.extraHeader.
+
+    This avoids URL-embedded credentials which are overridden by system
+    credential helpers (wincred, osxkeychain, manager) on many machines.
+    """
+    target = Path(target_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = ["git"]
+    if token:
+        cmd += ["-c", f"http.extraHeader=Authorization: Bearer {token}"]
+    cmd += ["clone", "--branch", branch, "--depth", "1", https_url, str(target)]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise GitCommandError(cmd, result.returncode, result.stderr)
+    return Repo(str(target))
+
+
+def prepare_story_branch(
+    repo: Repo,
+    story_key: str,
+    base_branch: str,
+    auth_token: Optional[str] = None,
+) -> str:
     """Create a feature branch for a story from the base branch.
 
     Returns the branch name (``feature/auto-{STORY_KEY}-{timestamp}``).
     """
     # Ensure we're on the base branch first
     repo.git.checkout(base_branch)
-    repo.git.pull("origin", base_branch)
+
+    # Pull with Bearer token if provided (bypasses credential helpers)
+    if auth_token:
+        cmd = [
+            "git", "-c", f"http.extraHeader=Authorization: Bearer {auth_token}",
+            "pull", "origin", base_branch,
+        ]
+        subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120,
+            cwd=str(repo.working_dir),
+        )
+    else:
+        repo.git.pull("origin", base_branch)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     safe_key = re.sub(r"[^\w\-]", "-", story_key.strip()).strip("-")
@@ -64,10 +108,12 @@ def commit_and_push_story(
     story_key: str,
     summary: str,
     files_changed: list[str],
+    auth_token: Optional[str] = None,
 ) -> bool:
     """Stage all changes, commit, and push the story branch.
 
-    Returns True on success, False on failure.
+    When *auth_token* is provided, uses Bearer token header for the push
+    (bypasses credential helpers).  Returns True on success, False on failure.
     """
     try:
         if not (repo.is_dirty() or repo.untracked_files):
@@ -75,7 +121,21 @@ def commit_and_push_story(
 
         commit_msg = f"{story_key}: {summary}"
         stage_and_commit(repo, commit_msg)
-        push_branch(repo, branch_name)
+
+        if auth_token:
+            # Push with Bearer token header (bypasses wincred/osxkeychain)
+            cmd = [
+                "git", "-c", f"http.extraHeader=Authorization: Bearer {auth_token}",
+                "push", "origin", branch_name,
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120,
+                cwd=str(repo.working_dir),
+            )
+            if result.returncode != 0:
+                raise GitCommandError(cmd, result.returncode, result.stderr)
+        else:
+            push_branch(repo, branch_name)
         return True
     except (GitCommandError, Exception) as e:
         print(f"Commit/push failed for {story_key}: {e}")

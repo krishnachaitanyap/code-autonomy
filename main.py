@@ -122,17 +122,20 @@ def _run_jira_mode(args) -> int:
         clone_url = bb_cfg.get("clone_url", "")
         if not clone_url:
             # Derive clone URL from base_url + project_key + repo_slug
-            bb_base = bb_cfg["base_url"].rstrip("/")
+            # Strip any path from base_url to get just the scheme + host
+            from urllib.parse import urlparse as _urlparse
+            _parsed = _urlparse(bb_cfg["base_url"].rstrip("/"))
+            bb_origin = f"{_parsed.scheme}://{_parsed.hostname}"
+            if _parsed.port:
+                bb_origin += f":{_parsed.port}"
             pkey = bb_cfg["project_key"]
             rslug = bb_cfg["repo_slug"]
             protocol = bb_cfg.get("clone_protocol", "ssh")
             if protocol == "ssh":
                 # Standard Bitbucket Server SSH URL
-                from urllib.parse import urlparse as _urlparse
-                _parsed = _urlparse(bb_base)
                 clone_url = f"ssh://git@{_parsed.hostname}:7999/{pkey}/{rslug}.git"
             else:
-                clone_url = f"{bb_base}/scm/{pkey}/{rslug}.git"
+                clone_url = f"{bb_origin}/scm/{pkey}/{rslug}.git"
 
         work_dir = Path(config.get("workflow", {}).get("work_dir", "./workspace")).resolve()
         target_dir = work_dir / f"jira-{bb_cfg.get('repo_slug', 'repo')}"
@@ -352,8 +355,10 @@ def _run_jira_mode(args) -> int:
         if bb_enabled and bb_repo:
             try:
                 from src.jira.bitbucket_bridge import prepare_story_branch
+                _bb_pull_token = bb_cfg.get("user_token", "") if bb_cfg.get("clone_protocol", "ssh") == "https" else None
                 story_branch = prepare_story_branch(
                     bb_repo, key, bb_cfg.get("base_branch", "main"),
+                    auth_token=_bb_pull_token,
                 )
                 log_info(f"  Created branch: {story_branch}")
             except Exception as be:
@@ -432,9 +437,11 @@ def _run_jira_mode(args) -> int:
             pr_url = ""
             if bb_enabled and bb_repo and story_branch:
                 from src.jira.bitbucket_bridge import commit_and_push_story, create_story_pr
+                _bb_token = bb_cfg.get("user_token", "") if bb_cfg.get("clone_protocol", "ssh") == "https" else None
                 pushed = commit_and_push_story(
                     bb_repo, story_branch, key,
                     result.summary, result.files_changed,
+                    auth_token=_bb_token,
                 )
                 if pushed:
                     log_success(f"  {key}: Pushed branch {story_branch}")
