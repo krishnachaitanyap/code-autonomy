@@ -185,6 +185,70 @@ def log_checkpoint_saved(checkpoint) -> None:
         print(f"{'─' * 50}")
 
 
+def _classify_command(command: str) -> str:
+    """Classify a shell command into a human-readable category."""
+    cmd = command.strip().lower()
+    # Maven
+    if "mvn " in cmd or "./mvnw " in cmd or "mvnw " in cmd:
+        # Split into tokens to check Maven goals (ignore flags like -DskipTests)
+        goals = [t for t in cmd.split() if not t.startswith("-") and t not in ("mvn", "./mvnw", "mvnw")]
+        if "test" in goals:
+            return "Running Maven tests"
+        if "compile" in goals:
+            return "Running Maven compile"
+        if "package" in goals:
+            return "Running Maven package"
+        if "install" in goals:
+            return "Running Maven install"
+        if "clean" in goals and len(goals) == 1:
+            return "Running Maven clean"
+        return "Running Maven build"
+    # Gradle
+    if "gradle " in cmd or "./gradlew " in cmd or "gradlew " in cmd:
+        goals = [t for t in cmd.split() if not t.startswith("-") and t not in ("gradle", "./gradlew", "gradlew")]
+        if "test" in goals:
+            return "Running Gradle tests"
+        if "build" in goals:
+            return "Running Gradle build"
+        if "compile" in goals or "compileJava" in goals:
+            return "Running Gradle compile"
+        return "Running Gradle task"
+    # Python
+    if "pytest" in cmd or "python -m pytest" in cmd:
+        return "Running pytest"
+    if "python -m unittest" in cmd or "unittest" in cmd:
+        return "Running unittest"
+    # Node
+    if "npm test" in cmd or "npx jest" in cmd or "npm run test" in cmd:
+        return "Running npm tests"
+    if "npm " in cmd:
+        return "Running npm command"
+    # Generic test/build detection
+    if "test" in cmd:
+        return "Running tests"
+    if "build" in cmd or "compile" in cmd:
+        return "Running build"
+    return "Running command"
+
+
+def log_agent_tool_start(turn: int, tool_name: str, args: dict) -> None:
+    """Log when a potentially long-running tool starts (before execution).
+
+    Only emits a message for run_command so the user can see what the agent
+    is doing during long builds/tests.
+    """
+    if tool_name != "run_command":
+        return
+    command = args.get("command", "")
+    category = _classify_command(command)
+    short_cmd = command[:80] + ("..." if len(command) > 80 else "")
+    msg = f"[turn {turn + 1}] {category}: {short_cmd}"
+    if _USE_RICH and _RICH_AVAILABLE and console:
+        console.print(f"  [bold yellow]⏳[/] [dim]{msg}[/]")
+    else:
+        print(f"  ⏳ {msg}")
+
+
 def log_agent_activity(
     turn: int,
     tool_name: str,

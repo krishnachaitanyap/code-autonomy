@@ -18,7 +18,7 @@ from src.agent.knowledge import (
 )
 from src.agent.gcc import GCCController
 from src.agent.ai_utils import parse_ai_changes
-from src.agent.activity import log_agent_activity, summarize_tool_result
+from src.agent.activity import log_agent_activity, log_agent_tool_start, summarize_tool_result
 from src.agent.tracing import (
     TraceCollector,
     FileTraceStore,
@@ -801,6 +801,10 @@ def generate_changes_with_agent(
                 if agent_cfg.get("show_activity", True):
                     log_agent_activity(turn, name, args, f"done — {args.get('summary', '')[:50]}")
             else:
+                # Log before execution so long-running commands show activity
+                if agent_cfg.get("show_activity", True):
+                    log_agent_tool_start(turn, name, args)
+
                 result = execute_tool(
                     repo_root, name, args,
                     changes_tracker=changes_tracker,
