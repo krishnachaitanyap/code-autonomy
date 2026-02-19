@@ -114,7 +114,7 @@ def _run_jira_mode(args) -> int:
     # Bitbucket Server integration (optional)
     bb_cfg = config.get("bitbucket") or {}
     bb_enabled = bb_cfg.get("enabled", False)
-    bb_repo: "Repo | None" = None
+    bb_repo_dir: str = ""
 
     # Resolve repo path — Bitbucket can clone for us if no --repo-path
     if bb_enabled and not args.repo_path:
@@ -142,14 +142,14 @@ def _run_jira_mode(args) -> int:
 
         with spinner("Cloning from Bitbucket Server"):
             try:
-                bb_repo = clone_bitbucket_repo(
+                bb_repo_dir = clone_bitbucket_repo(
                     clone_url,
                     str(target_dir),
                     branch=bb_cfg.get("base_branch", "main"),
                     auth_token=bb_cfg.get("user_token", ""),
                     protocol=bb_cfg.get("clone_protocol", "ssh"),
                 )
-                clone_path = target_dir.resolve()
+                clone_path = Path(bb_repo_dir).resolve()
                 log_success(f"Cloned to {clone_path}")
             except Exception as e:
                 log_error(f"Bitbucket clone failed: {e}")
@@ -164,14 +164,9 @@ def _run_jira_mode(args) -> int:
         log_error(f"Repo path is not a directory: {clone_path}")
         return 1
 
-    # Open as Repo object if Bitbucket is enabled and we haven't already
-    if bb_enabled and bb_repo is None:
-        try:
-            from git import Repo as _Repo
-            bb_repo = _Repo(str(clone_path))
-        except Exception:
-            log_warning("Could not open clone_path as git repo — Bitbucket git ops disabled")
-            bb_enabled = False
+    # If Bitbucket is enabled and we used --repo-path (no clone), set bb_repo_dir
+    if bb_enabled and not bb_repo_dir:
+        bb_repo_dir = str(clone_path)
 
     # Detect repo_url from git remote
     repo_url = ""
@@ -352,12 +347,12 @@ def _run_jira_mode(args) -> int:
 
         # Create a feature branch for this story (Bitbucket flow)
         story_branch = ""
-        if bb_enabled and bb_repo:
+        if bb_enabled and bb_repo_dir:
             try:
                 from src.jira.bitbucket_bridge import prepare_story_branch
                 _bb_pull_token = bb_cfg.get("user_token", "") if bb_cfg.get("clone_protocol", "ssh") == "https" else None
                 story_branch = prepare_story_branch(
-                    bb_repo, key, bb_cfg.get("base_branch", "main"),
+                    bb_repo_dir, key, bb_cfg.get("base_branch", "main"),
                     auth_token=_bb_pull_token,
                 )
                 log_info(f"  Created branch: {story_branch}")
@@ -416,9 +411,9 @@ def _run_jira_mode(args) -> int:
         except Exception as exc:
             log_error(f"  {key}: Agent crashed — {exc}")
             # Discard changes and return to base branch
-            if bb_enabled and bb_repo:
+            if bb_enabled and bb_repo_dir:
                 from src.jira.bitbucket_bridge import discard_story_changes
-                discard_story_changes(bb_repo, bb_cfg.get("base_branch", "main"))
+                discard_story_changes(bb_repo_dir, bb_cfg.get("base_branch", "main"))
             # Save crash context to session so resume can pick it up
             if session:
                 session.mark_story(key, STATUS_FAILED, error=f"crash: {exc}")
@@ -435,11 +430,11 @@ def _run_jira_mode(args) -> int:
 
             # Bitbucket: commit, push, create PR
             pr_url = ""
-            if bb_enabled and bb_repo and story_branch:
+            if bb_enabled and bb_repo_dir and story_branch:
                 from src.jira.bitbucket_bridge import commit_and_push_story, create_story_pr
                 _bb_token = bb_cfg.get("user_token", "") if bb_cfg.get("clone_protocol", "ssh") == "https" else None
                 pushed = commit_and_push_story(
-                    bb_repo, story_branch, key,
+                    bb_repo_dir, story_branch, key,
                     result.summary, result.files_changed,
                     auth_token=_bb_token,
                 )
@@ -491,9 +486,9 @@ def _run_jira_mode(args) -> int:
             log_error(f"  {key}: Agent did not complete — {result.summary}")
 
             # Discard changes and return to base branch
-            if bb_enabled and bb_repo:
+            if bb_enabled and bb_repo_dir:
                 from src.jira.bitbucket_bridge import discard_story_changes
-                discard_story_changes(bb_repo, bb_cfg.get("base_branch", "main"))
+                discard_story_changes(bb_repo_dir, bb_cfg.get("base_branch", "main"))
 
             # Update session state (including working memory for resume)
             if session:
