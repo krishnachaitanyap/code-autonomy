@@ -23,6 +23,215 @@ Autonomous code generation and feature building that integrates with **GitHub** 
 - Commit and push changes
 - Create a Pull Request
 
+## Architecture
+
+```mermaid
+graph TB
+    subgraph Entry["Entry Points"]
+        CLI["main.py<br/>(Orchestrator)"]
+        Fork["fork_and_run.py"]
+    end
+
+    subgraph Config["Configuration"]
+        CL["config_loader.py<br/>config.ini + env vars"]
+        SV["startup_validator.py<br/>Pre-flight checks"]
+    end
+
+    subgraph Modes["Execution Modes"]
+        STD["Standard Mode<br/>One-shot generation + test/retry"]
+        AGT["Agent Mode (--agent)<br/>Explore → Edit → Test → Fix loop"]
+        PLN["Plan Mode (--plan)<br/>Propose diffs → Review → Apply"]
+        ASK["Ask Mode (--ask)<br/>Read-only Q&A"]
+        JIRA["JIRA Mode (--jira)<br/>Process stories → Branch → PR"]
+    end
+
+    subgraph Agent["Agent Loop (src/agent/)"]
+        ANA["analyzer.py<br/>Turn-based agent loop"]
+        TLS["tools.py<br/>9 base tools: read, write,<br/>edit, delete, grep, list,<br/>find, run_command, task_complete"]
+        MEM["knowledge.py<br/>Working memory +<br/>cross-run persistence"]
+        GCC["gcc.py<br/>Git Context Controller<br/>commit/branch/merge"]
+        TRC["tracing.py<br/>Execution spans +<br/>reward signals"]
+        ACT["activity.py<br/>Spinners + logging"]
+        PLM["plan.py + plan_display.py<br/>Propose changes + diff render"]
+    end
+
+    subgraph CodeIntel["Code Intelligence (src/code_index/)"]
+        CIS["storage.py<br/>Build / load / cache"]
+        SYM["symbol_table.py<br/>AST → functions, classes"]
+        IMP["import_resolver.py<br/>Cross-file imports"]
+        GRB["graph_builder.py<br/>Bidirectional call graph"]
+        HIR["hierarchy.py<br/>Class inheritance"]
+        EMB["entity_embeddings.py<br/>Semantic vectors"]
+        CIT["tools.py<br/>7 tools: find_callers,<br/>find_dependents, impact_analysis,<br/>context_for_edit, predict_breakage"]
+        VER["verifier.py<br/>Post-edit verification gate"]
+    end
+
+    subgraph Understand["Project Understanding"]
+        CON["consciousness/core.py<br/>Structure, conventions,<br/>samples, frameworks"]
+        CTX["context/pipeline.py<br/>Grep + similarity + call graph"]
+        RK["Repo Knowledge<br/>.code-autonomy.md / AGENT.md"]
+    end
+
+    subgraph LLM["LLM Layer"]
+        LLC["llm_client.py<br/>Multi-provider unified API"]
+        RES["resiliency.py<br/>Circuit breaker +<br/>rate limiter"]
+        OAI["OpenAI"]
+        ANT["Anthropic"]
+        GEM["Gemini"]
+        AZR["Azure OpenAI"]
+        BED["AWS Bedrock"]
+    end
+
+    subgraph Platform["VCS & PR (src/platform/)"]
+        GIT["git_ops.py<br/>Clone, checkout, commit,<br/>push (subprocess)"]
+        PRP["pr_platform.py<br/>GitHub / Bitbucket /<br/>Bitbucket Server PR"]
+        BBS["bitbucket_server.py<br/>REST API 1.0 client"]
+        REF["reference_pr.py<br/>Fetch template PR"]
+    end
+
+    subgraph JiraInt["JIRA Integration (src/jira/)"]
+        JCL["client.py<br/>OAuth, search, comment,<br/>transition"]
+        JSS["session.py<br/>Persistent JiraSession<br/>(resume support)"]
+        BBR["bitbucket_bridge.py<br/>clone_and_prepare_branch<br/>commit_and_push"]
+    end
+
+    subgraph CodeGen["Standard Code Gen (src/code/)"]
+        SAN["analyzer.py<br/>One-shot LLM generation"]
+        EXE["executor.py<br/>pytest / Maven / Gradle"]
+        TST["testing_strategies.py<br/>BDD, Contract, Unit, E2E, SOAP"]
+    end
+
+    %% Entry → Config
+    CLI --> CL
+    CLI --> SV
+    Fork --> CLI
+
+    %% Config → Modes
+    CL --> STD
+    CL --> AGT
+    CL --> PLN
+    CL --> ASK
+    CL --> JIRA
+
+    %% Modes → Components
+    STD --> SAN
+    STD --> EXE
+    AGT --> ANA
+    PLN --> ANA
+    ASK --> ANA
+    JIRA --> JCL
+    JIRA --> ANA
+
+    %% Agent internals
+    ANA --> TLS
+    ANA --> MEM
+    ANA --> GCC
+    ANA --> TRC
+    ANA --> ACT
+    ANA --> PLM
+    ANA --> CIT
+
+    %% Agent → LLM
+    ANA --> LLC
+    SAN --> LLC
+    LLC --> RES
+    RES --> OAI
+    RES --> ANT
+    RES --> GEM
+    RES --> AZR
+    RES --> BED
+
+    %% Understanding
+    CLI --> CON
+    CLI --> RK
+    STD --> CTX
+    ANA --> CON
+
+    %% Code Intelligence
+    CIS --> SYM
+    CIS --> IMP
+    CIS --> GRB
+    CIS --> HIR
+    CIS --> EMB
+    CIT --> CIS
+    VER --> CIS
+    ANA --> VER
+
+    %% Platform
+    CLI --> GIT
+    CLI --> PRP
+    PRP --> BBS
+    CLI --> REF
+
+    %% JIRA flow
+    JCL --> JSS
+    JIRA --> BBR
+    BBR --> GIT
+    BBR --> BBS
+
+    %% Styling
+    classDef entry fill:#4A90D9,stroke:#2C5F8A,color:#fff
+    classDef mode fill:#7B68EE,stroke:#5A4BC6,color:#fff
+    classDef agent fill:#FF8C42,stroke:#CC6E33,color:#fff
+    classDef intel fill:#50C878,stroke:#3A9659,color:#fff
+    classDef llm fill:#FF6B6B,stroke:#CC5555,color:#fff
+    classDef platform fill:#DDA0DD,stroke:#A97BA9,color:#000
+    classDef jira fill:#FFD700,stroke:#CCB000,color:#000
+    classDef understand fill:#87CEEB,stroke:#6BA3BD,color:#000
+    classDef codegen fill:#F5DEB3,stroke:#C4B08F,color:#000
+
+    class CLI,Fork entry
+    class STD,AGT,PLN,ASK,JIRA mode
+    class ANA,TLS,MEM,GCC,TRC,ACT,PLM agent
+    class CIS,SYM,IMP,GRB,HIR,EMB,CIT,VER intel
+    class LLC,RES,OAI,ANT,GEM,AZR,BED llm
+    class GIT,PRP,BBS,REF platform
+    class JCL,JSS,BBR jira
+    class CON,CTX,RK understand
+    class SAN,EXE,TST codegen
+    class CL,SV entry
+```
+
+### JIRA + Bitbucket Server Flow
+
+```mermaid
+graph LR
+    subgraph JIRA["JIRA Server"]
+        ST["Stories<br/>(labeled code-autonomy)"]
+    end
+
+    subgraph Agent["Code Autonomy"]
+        FETCH["Fetch Stories"]
+        CLONE["clone_and_prepare_branch<br/>(subprocess git)"]
+        RUN["Agent Loop<br/>(explore → edit → test → fix)"]
+        COMMIT["commit_and_push<br/>(subprocess git)"]
+        PR["create_story_pr<br/>(REST API 1.0)"]
+        COMMENT["Add JIRA Comment<br/>(with PR URL)"]
+    end
+
+    subgraph BB["Bitbucket Server"]
+        REPO["Repository"]
+        BRANCH["Feature Branch<br/>feature/auto-STORY-KEY-ts"]
+        PULLREQ["Pull Request"]
+    end
+
+    ST -->|"OAuth + JQL"| FETCH
+    FETCH -->|"per story"| CLONE
+    CLONE -->|"git clone + checkout -b"| REPO
+    REPO --> BRANCH
+    CLONE --> RUN
+    RUN -->|"success"| COMMIT
+    COMMIT -->|"git add + commit + push"| BRANCH
+    BRANCH --> PR
+    PR -->|"POST /rest/api/1.0/.../pull-requests"| PULLREQ
+    PULLREQ -->|"PR URL"| COMMENT
+    COMMENT -->|"POST comment"| ST
+
+    style JIRA fill:#FFD700,stroke:#CCB000
+    style Agent fill:#FF8C42,stroke:#CC6E33,color:#fff
+    style BB fill:#DDA0DD,stroke:#A97BA9
+```
+
 ## Sequence Diagram
 
 ```mermaid

@@ -1,8 +1,5 @@
 # Autonomous Code Generation - Dependencies
 
-# Git operations
-GitPython>=3.1.40
-
 # GitHub API
 PyGithub>=2.1.1
 

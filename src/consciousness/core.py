@@ -640,27 +640,21 @@ def get_store(backend: str, cache_dir: str, opensearch_url: str = "", opensearch
 
 def _get_changed_files_since(repo_path: Path, since_timestamp: float) -> Optional[list]:
     """Get files changed since a timestamp using git log. Returns None if git unavailable."""
-    try:
-        from git import Repo as GitRepo, InvalidGitRepositoryError
-    except ImportError:
-        return None
+    import subprocess
+    import datetime as _dt
 
     try:
-        git_repo = GitRepo(str(repo_path))
-    except (InvalidGitRepositoryError, Exception):
-        return None
-
-    try:
-        import datetime
-        since_date = datetime.datetime.fromtimestamp(since_timestamp).isoformat()
-        # Get list of changed files since timestamp
-        log_output = git_repo.git.log(
-            f"--since={since_date}", "--name-only", "--pretty=format:"
+        since_date = _dt.datetime.fromtimestamp(since_timestamp).isoformat()
+        result = subprocess.run(
+            ["git", "log", f"--since={since_date}", "--name-only", "--pretty=format:"],
+            cwd=str(repo_path), capture_output=True, text=True, timeout=30,
         )
-        if not log_output.strip():
+        if result.returncode != 0:
+            return None
+        if not result.stdout.strip():
             return []
         files = list(set(
-            f.strip() for f in log_output.strip().split("\n") if f.strip()
+            f.strip() for f in result.stdout.strip().split("\n") if f.strip()
         ))
         return files
     except Exception:
