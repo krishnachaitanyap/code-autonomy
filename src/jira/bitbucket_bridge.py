@@ -9,6 +9,7 @@ Uses only subprocess git commands + requests (no GitPython dependency).
 
 import logging
 import re
+import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -34,83 +35,70 @@ def _git(repo_dir: str, *args: str, token: Optional[str] = None, timeout: int = 
     return result
 
 
-def clone_bitbucket_repo(
+def clone_and_prepare_branch(
     clone_url: str,
-    target_dir: str,
-    branch: str = "main",
+    branch_name: str,
+    from_branch: str = "main",
+    target_dir: Optional[str] = None,
     auth_token: Optional[str] = None,
     protocol: str = "ssh",
-) -> str:
-    """Clone a Bitbucket Server repository.
+) -> Optional[str]:
+    """Clone a repository and prepare a feature branch in one step.
 
-    Returns the path to the cloned repo directory.
-    SSH uses key-based auth; HTTPS uses Bearer token via http.extraHeader.
+    1. Clone *clone_url* into *target_dir* (or a temp directory).
+    2. Checkout *from_branch* (fetch if needed).
+    3. Create *branch_name* from *from_branch*.
+
+    Returns the path to the cloned repo directory, or None on failure.
     """
-    target = Path(target_dir)
-    if target.exists() and any(target.iterdir()):
-        # Already cloned — just return the path
-        logger.info("Repo already exists at %s, reusing", target_dir)
-        return str(target)
+    import tempfile
 
-    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_dir = target_dir or tempfile.mkdtemp()
+    target = Path(temp_dir)
 
-    cmd = ["git"]
-    if protocol == "https" and auth_token:
-        cmd += ["-c", f"http.extraHeader=Authorization: Bearer {auth_token}"]
-    cmd += ["clone", "--branch", branch, "--depth", "1", clone_url, str(target)]
+    try:
+        if target.exists() and any(target.iterdir()):
+            # Already cloned — reuse
+            logger.info("Repo already exists at %s, reusing", temp_dir)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            cmd = ["git"]
+            if protocol == "https" and auth_token:
+                cmd += ["-c", f"http.extraHeader=Authorization: Bearer {auth_token}"]
+            cmd += ["clone", clone_url, temp_dir]
 
-    logger.info("Cloning %s (protocol=%s, branch=%s)", clone_url, protocol, branch)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"git clone failed (exit {result.returncode}): {result.stderr.strip()}"
-        )
-    return str(target)
+            logger.info("Cloning %s (protocol=%s)", clone_url, protocol)
+            subprocess.check_call(cmd, timeout=600)
 
+        # Checkout the target branch (fetch if not available locally)
+        try:
+            subprocess.check_call(["git", "checkout", branch_name], cwd=temp_dir)
+        except subprocess.CalledProcessError:
+            cmd = ["git", "fetch"]
+            if protocol == "https" and auth_token:
+                cmd = ["git", "-c", f"http.extraHeader=Authorization: Bearer {auth_token}", "fetch"]
+            subprocess.check_call(cmd, cwd=temp_dir)
+            subprocess.check_call(
+                ["git", "checkout", "-b", branch_name, f"origin/{from_branch}"],
+                cwd=temp_dir,
+            )
 
-def prepare_story_branch(
-    repo_dir: str,
-    story_key: str,
-    base_branch: str,
-    auth_token: Optional[str] = None,
-) -> str:
-    """Create a feature branch for a story from the base branch.
+        logger.info("Prepared branch %s from %s in %s", branch_name, from_branch, temp_dir)
+        return temp_dir
 
-    Returns the branch name (``feature/auto-{STORY_KEY}-{timestamp}``).
-    """
-    # Checkout base branch
-    r = _git(repo_dir, "checkout", base_branch)
-    if r.returncode != 0:
-        # Branch might not exist locally — fetch and try again
-        _git(repo_dir, "fetch", "origin", token=auth_token)
-        r = _git(repo_dir, "checkout", base_branch)
-        if r.returncode != 0:
-            _git(repo_dir, "checkout", "-b", base_branch, f"origin/{base_branch}")
-
-    # Pull latest
-    _git(repo_dir, "pull", "origin", base_branch, token=auth_token)
-
-    # Create feature branch
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    safe_key = re.sub(r"[^\w\-]", "-", story_key.strip()).strip("-")
-    branch_name = f"feature/auto-{safe_key}-{timestamp}"
-    r = _git(repo_dir, "checkout", "-b", branch_name)
-    if r.returncode != 0:
-        raise RuntimeError(f"Failed to create branch {branch_name}: {r.stderr.strip()}")
-
-    logger.info("Created branch: %s", branch_name)
-    return branch_name
+    except Exception as e:
+        logger.error("Error preparing branch: %s", e)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return None
 
 
-def commit_and_push_story(
+def commit_and_push(
     repo_dir: str,
     branch_name: str,
-    story_key: str,
-    summary: str,
-    files_changed: list[str],
+    commit_msg: str,
     auth_token: Optional[str] = None,
 ) -> bool:
-    """Stage all changes, commit, and push the story branch.
+    """Stage all changes, commit, and push.
 
     Returns True on success, False on failure.
     """
@@ -118,7 +106,7 @@ def commit_and_push_story(
         # Check if there are changes to commit
         status = _git(repo_dir, "status", "--porcelain")
         if not status.stdout.strip():
-            logger.info("No changes to commit for %s", story_key)
+            logger.info("No changes to commit")
             return False
 
         # Stage all changes
@@ -129,22 +117,21 @@ def commit_and_push_story(
         _git(repo_dir, "config", "user.email", "auto@coder.local")
 
         # Commit
-        commit_msg = f"{story_key}: {summary}"
         r = _git(repo_dir, "commit", "-m", commit_msg)
         if r.returncode != 0:
-            logger.error("Commit failed for %s: %s", story_key, r.stderr.strip())
+            logger.error("Commit failed: %s", r.stderr.strip())
             return False
 
         # Push
         r = _git(repo_dir, "push", "origin", branch_name, token=auth_token)
         if r.returncode != 0:
-            logger.error("Push failed for %s: %s", story_key, r.stderr.strip())
+            logger.error("Push failed: %s", r.stderr.strip())
             return False
 
-        logger.info("Pushed %s to origin/%s", story_key, branch_name)
+        logger.info("Pushed to origin/%s", branch_name)
         return True
     except Exception as e:
-        logger.error("Commit/push failed for %s: %s", story_key, e)
+        logger.error("Commit/push failed: %s", e)
         return False
 
 

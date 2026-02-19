@@ -115,14 +115,13 @@ def _run_jira_mode(args) -> int:
     bb_cfg = config.get("bitbucket") or {}
     bb_enabled = bb_cfg.get("enabled", False)
     bb_repo_dir: str = ""
+    bb_clone_url: str = bb_cfg.get("clone_url", "") if bb_enabled else ""
 
     # Resolve repo path — Bitbucket can clone for us if no --repo-path
     if bb_enabled and not args.repo_path:
-        from src.jira.bitbucket_bridge import clone_bitbucket_repo
-        clone_url = bb_cfg.get("clone_url", "")
-        if not clone_url:
+        from src.jira.bitbucket_bridge import clone_and_prepare_branch
+        if not bb_clone_url:
             # Derive clone URL from base_url + project_key + repo_slug
-            # Strip any path from base_url to get just the scheme + host
             from urllib.parse import urlparse as _urlparse
             _parsed = _urlparse(bb_cfg["base_url"].rstrip("/"))
             bb_origin = f"{_parsed.scheme}://{_parsed.hostname}"
@@ -130,30 +129,30 @@ def _run_jira_mode(args) -> int:
                 bb_origin += f":{_parsed.port}"
             pkey = bb_cfg["project_key"]
             rslug = bb_cfg["repo_slug"]
-            protocol = bb_cfg.get("clone_protocol", "ssh")
-            if protocol == "ssh":
-                # Standard Bitbucket Server SSH URL
-                clone_url = f"ssh://git@{_parsed.hostname}:7999/{pkey}/{rslug}.git"
+            bb_protocol = bb_cfg.get("clone_protocol", "ssh")
+            if bb_protocol == "ssh":
+                bb_clone_url = f"ssh://git@{_parsed.hostname}:7999/{pkey}/{rslug}.git"
             else:
-                clone_url = f"{bb_origin}/scm/{pkey}/{rslug}.git"
+                bb_clone_url = f"{bb_origin}/scm/{pkey}/{rslug}.git"
 
         work_dir = Path(config.get("workflow", {}).get("work_dir", "./workspace")).resolve()
         target_dir = work_dir / f"jira-{bb_cfg.get('repo_slug', 'repo')}"
 
         with spinner("Cloning from Bitbucket Server"):
-            try:
-                bb_repo_dir = clone_bitbucket_repo(
-                    clone_url,
-                    str(target_dir),
-                    branch=bb_cfg.get("base_branch", "main"),
-                    auth_token=bb_cfg.get("user_token", ""),
-                    protocol=bb_cfg.get("clone_protocol", "ssh"),
-                )
-                clone_path = Path(bb_repo_dir).resolve()
-                log_success(f"Cloned to {clone_path}")
-            except Exception as e:
-                log_error(f"Bitbucket clone failed: {e}")
+            base = bb_cfg.get("base_branch", "main")
+            bb_repo_dir = clone_and_prepare_branch(
+                bb_clone_url,
+                branch_name=base,
+                from_branch=base,
+                target_dir=str(target_dir),
+                auth_token=bb_cfg.get("user_token", ""),
+                protocol=bb_cfg.get("clone_protocol", "ssh"),
+            )
+            if bb_repo_dir is None:
+                log_error("Bitbucket clone failed")
                 return 1
+            clone_path = Path(bb_repo_dir).resolve()
+            log_success(f"Cloned to {clone_path}")
     elif args.repo_path:
         clone_path = Path(args.repo_path).resolve()
     else:
@@ -167,6 +166,21 @@ def _run_jira_mode(args) -> int:
     # If Bitbucket is enabled and we used --repo-path (no clone), set bb_repo_dir
     if bb_enabled and not bb_repo_dir:
         bb_repo_dir = str(clone_path)
+
+    # Derive clone URL if not set (needed for per-story branch creation)
+    if bb_enabled and not bb_clone_url:
+        from urllib.parse import urlparse as _urlparse
+        _parsed = _urlparse(bb_cfg["base_url"].rstrip("/"))
+        bb_origin = f"{_parsed.scheme}://{_parsed.hostname}"
+        if _parsed.port:
+            bb_origin += f":{_parsed.port}"
+        pkey = bb_cfg["project_key"]
+        rslug = bb_cfg["repo_slug"]
+        bb_protocol = bb_cfg.get("clone_protocol", "ssh")
+        if bb_protocol == "ssh":
+            bb_clone_url = f"ssh://git@{_parsed.hostname}:7999/{pkey}/{rslug}.git"
+        else:
+            bb_clone_url = f"{bb_origin}/scm/{pkey}/{rslug}.git"
 
     # Detect repo_url from git remote
     repo_url = ""
@@ -348,21 +362,29 @@ def _run_jira_mode(args) -> int:
         # Create a feature branch for this story (Bitbucket flow)
         story_branch = ""
         if bb_enabled and bb_repo_dir:
-            try:
-                from src.jira.bitbucket_bridge import prepare_story_branch
-                _bb_pull_token = bb_cfg.get("user_token", "") if bb_cfg.get("clone_protocol", "ssh") == "https" else None
-                story_branch = prepare_story_branch(
-                    bb_repo_dir, key, bb_cfg.get("base_branch", "main"),
-                    auth_token=_bb_pull_token,
-                )
-                log_info(f"  Created branch: {story_branch}")
-            except Exception as be:
-                log_error(f"  {key}: Could not create branch — {be}")
+            from src.jira.bitbucket_bridge import clone_and_prepare_branch as _prepare
+            from datetime import datetime as _dt
+            import re as _re
+            _ts = _dt.now().strftime("%Y%m%d-%H%M%S")
+            _safe_key = _re.sub(r"[^\w\-]", "-", key.strip()).strip("-")
+            story_branch = f"feature/auto-{_safe_key}-{_ts}"
+            _bb_token = bb_cfg.get("user_token", "") if bb_cfg.get("clone_protocol", "ssh") == "https" else None
+            result_dir = _prepare(
+                bb_clone_url,
+                branch_name=story_branch,
+                from_branch=bb_cfg.get("base_branch", "main"),
+                target_dir=bb_repo_dir,
+                auth_token=_bb_token,
+                protocol=bb_cfg.get("clone_protocol", "ssh"),
+            )
+            if result_dir is None:
+                log_error(f"  {key}: Could not create branch {story_branch}")
                 results.append({"key": key, "status": "failed", "files": 0, "pr_url": ""})
                 if session:
-                    session.mark_story(key, STATUS_FAILED, error=f"branch creation: {be}")
+                    session.mark_story(key, STATUS_FAILED, error=f"branch creation failed")
                     save_jira_session(session)
                 continue
+            log_info(f"  Created branch: {story_branch}")
 
         # Determine if first attempt should resume (from a prior interrupted run)
         story_was_in_progress = False
@@ -431,11 +453,11 @@ def _run_jira_mode(args) -> int:
             # Bitbucket: commit, push, create PR
             pr_url = ""
             if bb_enabled and bb_repo_dir and story_branch:
-                from src.jira.bitbucket_bridge import commit_and_push_story, create_story_pr
+                from src.jira.bitbucket_bridge import commit_and_push, create_story_pr
                 _bb_token = bb_cfg.get("user_token", "") if bb_cfg.get("clone_protocol", "ssh") == "https" else None
-                pushed = commit_and_push_story(
-                    bb_repo_dir, story_branch, key,
-                    result.summary, result.files_changed,
+                pushed = commit_and_push(
+                    bb_repo_dir, story_branch,
+                    commit_msg=f"{key}: {result.summary}",
                     auth_token=_bb_token,
                 )
                 if pushed:
@@ -714,7 +736,7 @@ def main() -> int:
                     if clone_path.exists():
                         shutil.rmtree(clone_path, ignore_errors=True)
                     try:
-                        repo = clone_repo(
+                        clone_repo(
                             repo_url,
                             str(clone_path),
                             branch=try_branch,
@@ -732,7 +754,7 @@ def main() -> int:
             return 1
 
         with step("Creating feature branch", feature_branch):
-            checkout_branch(repo, feature_branch, create=True)
+            checkout_branch(str(clone_path), feature_branch, create=True)
 
     # Clone framework repo if specified in changes.txt
     framework_path = None
@@ -749,7 +771,7 @@ def main() -> int:
                     framework_repo_url,
                     str(framework_dir),
                     branch=framework_branch or "main",
-                    auth_token=auth_token if auth_token else None,
+                    auth_token=auth_token or None,
                 )
             framework_path = framework_dir
             framework_consciousness = build_or_load_consciousness(
@@ -1219,11 +1241,11 @@ def main() -> int:
         commit_msg += f"\n\nFixes #{issue_ref}"
 
     with step("Committing changes"):
-        stage_and_commit(repo, commit_msg)
+        stage_and_commit(str(clone_path), commit_msg)
 
     try:
         with step("Pushing branch", feature_branch):
-            push_branch(repo, feature_branch)
+            push_branch(str(clone_path), feature_branch)
     except Exception as e:
         log_error(f"Push failed: {e}")
         return 1
