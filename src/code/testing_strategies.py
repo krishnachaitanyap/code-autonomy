@@ -6,7 +6,7 @@ Provides AI prompts and dependency guidance for BDD, Contract, Integration, Unit
 from typing import Optional
 
 # Supported strategies
-STRATEGIES = ["bdd", "contract", "integration", "unit", "e2e", "soap", "auto"]
+STRATEGIES = ["bdd", "contract", "integration", "unit", "e2e", "soap", "jisi_bdd", "auto"]
 
 # Strategy metadata: prompt guidance + Maven/Gradle snippets
 STRATEGY_GUIDANCE = {
@@ -347,6 +347,51 @@ testImplementation 'org.xmlunit:xmlunit-assertj:2.9.1'
 testImplementation 'org.wiremock:wiremock:3.3.1'
 """,
     },
+    "jisi_bdd": {
+        "name": "JISI BDD (Enterprise Cucumber)",
+        "description": "Enterprise BDD testing with CommonSteps/GenericSteps and ServiceBase pattern",
+        "prompt": """
+## Testing Strategy: JISI BDD (Enterprise Cucumber)
+
+Generate enterprise Cucumber BDD tests following the JISI framework conventions.
+
+### Key conventions
+1. **Feature files** in `src/test/resources/features/` with enterprise tags:
+   - @Application-{tag}, @Service-{name}, @Team-{team}, @Test-{type}
+   - Test types: regression, compare, pvt, heartbeat
+
+2. **Steps** — use ONLY CommonSteps and GenericSteps from the framework:
+   - Do NOT create custom step definitions
+   - All step glue is provided by the enterprise test framework
+
+3. **Service class** in `src/test/java/.../services/`:
+   - Extends ServiceBase
+   - Provides createRequest_{operationName}() methods per operation
+   - Call ServiceBase methods DIRECTLY — do NOT assign return values to variables
+   - Only primitive field types (String, Integer, Boolean, BigDecimal, etc.)
+   - Method names MUST be unique across the entire test suite
+
+4. **Property entry** for endpoint resolution:
+   - Format: `{service}.endpoint=${${env}.profilecore.ws.url}{path}`
+
+5. **Reference pattern**: AccountLookupRESTSvc
+
+Use the `--bdd-spec` flag or config `bdd_spec_path` to provide a JSON service
+specification for fully structured prompt generation.
+""",
+        "maven_deps": """
+<!-- JISI BDD: Cucumber (from enterprise framework-utils) -->
+<dependency>
+    <groupId>io.cucumber</groupId>
+    <artifactId>cucumber-java</artifactId>
+    <scope>test</scope>
+</dependency>
+""",
+        "gradle_deps": """
+// JISI BDD: Cucumber (from enterprise framework-utils)
+testImplementation 'io.cucumber:cucumber-java'
+""",
+    },
     "auto": {
         "name": "Auto-detect",
         "description": "Infer strategy from requirements and project structure",
@@ -381,7 +426,9 @@ def get_testing_strategy_context(
     if s == "auto":
         # Infer from keywords in requirements
         req_lower = requirements.lower()
-        if any(k in req_lower for k in ["bdd", "cucumber", "gherkin", "given", "when", "then", "feature", "scenario"]):
+        if any(k in req_lower for k in ["jisi", "jisi_bdd", "commonsteps", "genericsteps", "servicebase"]):
+            s = "jisi_bdd"
+        elif any(k in req_lower for k in ["bdd", "cucumber", "gherkin", "given", "when", "then", "feature", "scenario"]):
             s = "bdd"
         elif any(k in req_lower for k in ["contract", "pact", "consumer", "provider", "api contract"]):
             s = "contract"

@@ -121,6 +121,7 @@ def load_config(config_path: str = "config.ini") -> dict:
             "max_regenerate_attempts": get_int("testing", "max_regenerate_attempts", 3),
             "test_timeout": get_int("testing", "test_timeout", 120),
             "testing_strategy": get("testing", "testing_strategy", "auto").lower().strip() or "auto",
+            "bdd_spec_path": get("testing", "bdd_spec_path", ""),
         },
         "consciousness": {
             "backend": get("consciousness", "backend", "file").lower(),
@@ -273,6 +274,18 @@ def parse_testing_strategy_from_changes(content: str) -> Optional[str]:
         m = re.search(r"#\s*Testing\s+strategy\s*:\s*(\w+)", line, re.I)
         if m:
             return m.group(1).lower()
+    return None
+
+
+def parse_bdd_spec_from_changes(content: str) -> Optional[str]:
+    """
+    Parse # BDD spec: path from changes content.
+    Returns spec file path or None if not specified.
+    """
+    for line in content.splitlines():
+        m = re.search(r"#\s*BDD\s+spec\s*:\s*(\S+)", line, re.I)
+        if m:
+            return m.group(1)
     return None
 
 

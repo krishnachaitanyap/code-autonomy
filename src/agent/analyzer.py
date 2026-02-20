@@ -347,15 +347,22 @@ def _build_agent_context(
     # auto-generated consciousness, so include it alongside the focused extract.
     repo_knowledge_section = f"\n{repo_knowledge}\n" if repo_knowledge else ""
 
-    # Testing strategy
+    # Testing strategy — use JISI BDD prompt when spec is available
     testing_section = ""
     try:
-        from src.code.testing_strategies import get_testing_strategy_context
-        from src.code.executor import detect_build_tool as _detect_bt
-        bt = build_tool or _detect_bt(str(repo_root))
-        ctx = get_testing_strategy_context(testing_strategy, bt, requirements)
-        if ctx:
-            testing_section = f"\n## Testing strategy (for tests)\n{ctx}\n"
+        _bdd_spec = config.get("bdd_spec") if config else None
+        if testing_strategy == "jisi_bdd" and _bdd_spec is not None:
+            from src.bdd.prompt_builder import build_jisi_bdd_prompt
+            ctx = build_jisi_bdd_prompt(_bdd_spec)
+            if ctx:
+                testing_section = f"\n{ctx}\n"
+        else:
+            from src.code.testing_strategies import get_testing_strategy_context
+            from src.code.executor import detect_build_tool as _detect_bt
+            bt = build_tool or _detect_bt(str(repo_root))
+            ctx = get_testing_strategy_context(testing_strategy, bt, requirements)
+            if ctx:
+                testing_section = f"\n## Testing strategy (for tests)\n{ctx}\n"
     except Exception:
         pass
 

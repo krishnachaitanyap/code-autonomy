@@ -16,6 +16,7 @@ Workflow:
 
 import argparse
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -23,7 +24,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.config_loader import load_config, load_changes_with_reference, parse_testing_strategy_from_changes
+from src.config_loader import load_config, load_changes_with_reference, parse_testing_strategy_from_changes, parse_bdd_spec_from_changes
 from src.platform.git_ops import (
     clone_repo,
     checkout_branch,
@@ -351,6 +352,23 @@ def _run_jira_mode(args) -> int:
 
         requirements = _build_requirements_from_story(story)
 
+        # Detect JISI BDD from story content
+        req_lower = requirements.lower()
+        if any(kw in req_lower for kw in ["jisi_bdd", "jisi bdd", "commonsteps", "servicebase"]):
+            if "bdd_spec" not in config:
+                # Try to extract embedded JSON spec from story description
+                import json as _json
+                try:
+                    desc = story.get("description", "")
+                    _json_match = re.search(r'\{[^{}]*"service_name"[^{}]*\}', desc, re.DOTALL) if desc else None
+                    if _json_match:
+                        from src.bdd.service_spec import ServiceSpec as _SS
+                        _spec = _SS.from_dict(_json.loads(_json_match.group(0)))
+                        config["bdd_spec"] = _spec
+                        log_info(f"  Detected JISI BDD spec from story: {_spec.service_name}")
+                except Exception:
+                    pass
+
         # Transition to "In Progress" if configured
         if jira_cfg.get("auto_transition_start"):
             try:
@@ -576,8 +594,9 @@ def main() -> int:
     parser.add_argument("--ask", "-q", nargs="?", const=True, default=None,
                         help="Ask mode: agent answers questions about the codebase. Accepts optional inline prompt: --ask \"How does auth work?\"")
     parser.add_argument("--auto-approve", action="store_true", help="Auto-approve plan without prompting (use with --plan)")
-    parser.add_argument("--testing-strategy", "-t", choices=["bdd", "contract", "integration", "unit", "e2e", "soap", "auto"],
+    parser.add_argument("--testing-strategy", "-t", choices=["bdd", "contract", "integration", "unit", "e2e", "soap", "jisi_bdd", "auto"],
                        help="Java testing strategy (default: auto or from config/changes)")
+    parser.add_argument("--bdd-spec", help="Path to JISI BDD service specification file (JSON)")
     parser.add_argument("--rebuild-consciousness", action="store_true", help="Force rebuild of project consciousness cache")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from last checkpoint (requires same requirement)")
@@ -868,6 +887,26 @@ def main() -> int:
     )
     build_tool = detect_build_tool(str(clone_path))  # maven or gradle for Java
 
+    # JISI BDD spec loading: --bdd-spec CLI > changes file > config
+    bdd_spec_path = (
+        getattr(args, "bdd_spec", None)
+        or parse_bdd_spec_from_changes(requirements)
+        or testing_cfg.get("bdd_spec_path", "")
+    )
+    if bdd_spec_path:
+        try:
+            from src.bdd.service_spec import ServiceSpec
+            bdd_spec = ServiceSpec.from_file(bdd_spec_path)
+            spec_errors = bdd_spec.validate()
+            if spec_errors:
+                log_warning(f"BDD spec validation warnings: {', '.join(spec_errors)}")
+            config["bdd_spec"] = bdd_spec
+            if testing_strategy == "auto":
+                testing_strategy = "jisi_bdd"
+            log_info(f"Loaded BDD spec: {bdd_spec.service_name} ({len(bdd_spec.operations)} operation(s))")
+        except Exception as e:
+            log_warning(f"Could not load BDD spec from {bdd_spec_path}: {e}")
+
     use_plan = args.plan
 
     if args.ask:
@@ -1080,6 +1119,16 @@ def main() -> int:
             log_info(f"Modified {len(modified)} file(s) in {result.turns_used} turns")
             if result.usage_stats and result.usage_stats.num_calls > 0:
                 log_llm_stats(result.usage_stats)
+
+            # JISI BDD post-agent validation
+            if config.get("bdd_spec") and modified:
+                try:
+                    from src.bdd.output_parser import validate_bdd_files
+                    bdd_warnings = validate_bdd_files(modified, config["bdd_spec"].service_name)
+                    for bw in bdd_warnings:
+                        log_warning(f"BDD: {bw}")
+                except Exception:
+                    pass
 
             # Post-edit verification gate
             if modified and not args.dry_run and not using_local_repo and code_index is not None:

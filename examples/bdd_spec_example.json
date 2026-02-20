@@ -1,0 +1,23 @@
+{
+  "service_name": "AccountLookupRESTSvc",
+  "endpoint": "/profilecore/services/AccountLookup",
+  "team": "GWS-ProfileCore",
+  "application_tag": "GWS",
+  "test_types": ["regression", "compare", "pvt", "heartbeat"],
+  "operations": [
+    {
+      "name": "getAccountDetails",
+      "path": "/profilecore/services/AccountLookup/getAccountDetails",
+      "method": "POST",
+      "request_fields": [
+        {"name": "accountNumber", "type": "String", "required": true, "description": "Account number to look up"},
+        {"name": "accountType", "type": "String", "description": "Type of account"}
+      ],
+      "response_fields": [
+        {"name": "accountId", "type": "String", "description": "Unique account identifier"},
+        {"name": "balance", "type": "BigDecimal", "description": "Current account balance"},
+        {"name": "status", "type": "String", "description": "Account status"}
+      ]
+    }
+  ]
+}
