@@ -365,8 +365,17 @@ def _find_similar(code_index: CodeIndex, query: str, top_k: int = 5) -> str:
 
 def _find_test_files(code_index: CodeIndex, file_path: str) -> list[str]:
     """Find test files related to a source file."""
-    module_name = file_path.split("/")[-1].replace(".py", "")
-    test_patterns = {f"test_{module_name}.py", f"{module_name}_test.py"}
+    filename = file_path.split("/")[-1]
+    if filename.endswith(".java"):
+        class_name = filename.replace(".java", "")
+        test_patterns = {
+            f"{class_name}Test.java",
+            f"{class_name}Tests.java",
+            f"Test{class_name}.java",
+        }
+    else:
+        module_name = filename.replace(".py", "")
+        test_patterns = {f"test_{module_name}.py", f"{module_name}_test.py"}
     return [
         f for f in code_index.symbol_table.all_files
         if f.split("/")[-1] in test_patterns

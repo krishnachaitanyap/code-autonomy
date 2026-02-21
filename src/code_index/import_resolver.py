@@ -4,9 +4,13 @@ Import resolution: maps local import names to in-repo FQNs.
 For each Python file, parses ``import`` and ``from ... import`` statements,
 converts module paths to file paths, and resolves imported names to their
 symbol table FQNs.  External (stdlib/third-party) imports are skipped.
+
+For Java files, resolves single-type, static, wildcard, and same-package
+imports against the in-repo symbol table.
 """
 
 import ast
+import re
 from pathlib import Path
 
 from src.code_index.symbol_table import SymbolTable
@@ -47,6 +51,7 @@ def resolve_imports(
     repo_path: str,
     symbol_table: SymbolTable,
     file_asts: "dict[str, ast.Module] | None" = None,
+    file_contents: "dict[str, str] | None" = None,
 ) -> dict[str, dict[str, str]]:
     """Build per-file import resolution map.
 
@@ -60,6 +65,8 @@ def resolve_imports(
         symbol_table: Built symbol table.
         file_asts: Optional pre-parsed AST trees ``{rel_path: ast.Module}``.
             If provided, skips ``read_text`` + ``ast.parse`` for cached files.
+        file_contents: Optional pre-read file contents ``{rel_path: source}``.
+            Used for Java import resolution.
     """
     repo = Path(repo_path)
     # Reuse file list from symbol table instead of re-walking the repo
@@ -67,7 +74,11 @@ def resolve_imports(
 
     result: dict[str, dict[str, str]] = {}
 
+    # --- Python import resolution ---
     for rel_path in existing_files:
+        if not rel_path.endswith(".py"):
+            continue
+
         # Use cached AST if available, otherwise read + parse from disk
         if file_asts is not None and rel_path in file_asts:
             tree = file_asts[rel_path]
@@ -120,6 +131,125 @@ def resolve_imports(
                     local_name = alias.asname or module
                     # Map to the module file itself (no specific symbol)
                     file_imports[local_name] = target_file
+
+        if file_imports:
+            result[rel_path] = file_imports
+
+    # --- Java import resolution ---
+    java_imports = resolve_java_imports(repo_path, symbol_table, file_contents)
+    for rel_path, imports in java_imports.items():
+        if rel_path in result:
+            result[rel_path].update(imports)
+        else:
+            result[rel_path] = imports
+
+    return result
+
+
+def resolve_java_imports(
+    repo_path: str,
+    symbol_table: SymbolTable,
+    file_contents: "dict[str, str] | None" = None,
+) -> dict[str, dict[str, str]]:
+    """Resolve Java import statements to in-repo FQNs.
+
+    Handles:
+    - Single-type imports: ``import com.example.UserService``
+    - Static imports: ``import static com.example.Constants.MAX_SIZE``
+    - Wildcard imports: ``import com.example.*``
+    - Same-package implicit: classes in the same directory are automatically visible
+
+    Returns ``{file_path: {local_name: target_fqn}}``.
+    """
+    existing_files = set(symbol_table.all_files)
+    java_files = [f for f in existing_files if f.endswith(".java")]
+    if not java_files:
+        return {}
+
+    # Build package-to-files map: "com/example" → ["com/example/UserService.java", ...]
+    pkg_to_files: dict[str, list[str]] = {}
+    for f in java_files:
+        pkg_dir = "/".join(f.split("/")[:-1]) if "/" in f else ""
+        pkg_to_files.setdefault(pkg_dir, []).append(f)
+
+    # Build a quick map of class simple name → FQN for all Java classes
+    java_class_fqns: dict[str, list[str]] = {}
+    for entry in symbol_table.get_by_type("class"):
+        if getattr(entry, "language", "python") == "java" and "::" in entry.fqn:
+            java_class_fqns.setdefault(entry.name, []).append(entry.fqn)
+
+    # Regex for Java import statements
+    import_re = re.compile(
+        r"^\s*import\s+(static\s+)?([a-zA-Z_][\w.]*(?:\.\*)?)\s*;",
+        re.MULTILINE,
+    )
+
+    result: dict[str, dict[str, str]] = {}
+
+    for rel_path in java_files:
+        content = None
+        if file_contents and rel_path in file_contents:
+            content = file_contents[rel_path]
+        else:
+            fpath = Path(repo_path) / rel_path
+            try:
+                content = fpath.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                content = ""
+
+        file_imports: dict[str, str] = {}
+
+        # Parse import statements via regex (faster than full AST for this)
+        for match in import_re.finditer(content or ""):
+            is_static = bool(match.group(1))
+            import_path = match.group(2)
+
+            if import_path.endswith(".*"):
+                # Wildcard import: import com.example.*
+                pkg_path = import_path[:-2].replace(".", "/")
+                # Find all in-repo classes in that package
+                for pkg_dir, files in pkg_to_files.items():
+                    if pkg_dir == pkg_path or pkg_dir.endswith("/" + pkg_path):
+                        for f in files:
+                            for entry in symbol_table.get_by_file(f):
+                                if entry.symbol_type == "class" and "::" in entry.fqn:
+                                    simple_name = entry.fqn.split("::")[-1].split(".")[0]
+                                    file_imports[simple_name] = entry.fqn
+            elif is_static:
+                # Static import: import static com.example.Constants.MAX_SIZE
+                parts = import_path.rsplit(".", 1)
+                if len(parts) == 2:
+                    class_path, member_name = parts
+                    simple_class = class_path.rsplit(".", 1)[-1]
+                    # Find the class, then look for the member
+                    for fqn in java_class_fqns.get(simple_class, []):
+                        member_fqn = f"{fqn}.{member_name}"
+                        if symbol_table.get_by_fqn(member_fqn):
+                            file_imports[member_name] = member_fqn
+                            break
+                    else:
+                        # Even if member not found, map the class
+                        for fqn in java_class_fqns.get(simple_class, []):
+                            file_imports[member_name] = fqn
+                            break
+            else:
+                # Single-type import: import com.example.UserService
+                simple_name = import_path.rsplit(".", 1)[-1]
+                # Look up in symbol table by simple name
+                for fqn in java_class_fqns.get(simple_name, []):
+                    file_imports[simple_name] = fqn
+                    break
+
+        # Same-package implicit: classes in the same directory are visible
+        file_dir = "/".join(rel_path.split("/")[:-1]) if "/" in rel_path else ""
+        for sibling in pkg_to_files.get(file_dir, []):
+            if sibling == rel_path:
+                continue
+            for entry in symbol_table.get_by_file(sibling):
+                if entry.symbol_type == "class" and "::" in entry.fqn:
+                    simple_name = entry.fqn.split("::")[-1].split(".")[0]
+                    if simple_name not in file_imports:
+                        file_imports[simple_name] = entry.fqn
 
         if file_imports:
             result[rel_path] = file_imports

@@ -46,7 +46,7 @@ class CodeIndex:
 
 
 def _read_and_parse(fpath: Path, rel_path: str) -> tuple[str, str, "ast.Module | None"]:
-    """Read a single file and parse its AST. Used by ThreadPoolExecutor."""
+    """Read a single Python file and parse its AST. Used by ThreadPoolExecutor."""
     try:
         content = fpath.read_text(encoding="utf-8", errors="replace")
     except Exception:
@@ -58,40 +58,61 @@ def _read_and_parse(fpath: Path, rel_path: str) -> tuple[str, str, "ast.Module |
     return (rel_path, content, tree)
 
 
+def _read_and_parse_java(fpath: Path, rel_path: str) -> tuple[str, str, object]:
+    """Read a single Java file and parse with javalang. Used by ThreadPoolExecutor."""
+    try:
+        content = fpath.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return (rel_path, "", None)
+    try:
+        import javalang
+        tree = javalang.parse.parse(content)
+    except Exception:
+        tree = None
+    return (rel_path, content, tree)
+
+
 def scan_repo_files(
     repo_path: str, max_workers: int = 8
-) -> dict[str, tuple[str, "ast.Module | None"]]:
-    """Walk the repo once and read + parse all .py files in parallel.
+) -> dict[str, tuple[str, object]]:
+    """Walk the repo once and read + parse all .py and .java files in parallel.
 
     Returns ``{rel_path: (content, ast_tree_or_None)}``.
+    For Python files, the tree is an ``ast.Module``.
+    For Java files, the tree is a javalang ``CompilationUnit`` (or None).
     Files with syntax errors have ``None`` for the AST but content is still cached.
     """
     repo = Path(repo_path)
     py_files: list[tuple[Path, str]] = []
+    java_files: list[tuple[Path, str]] = []
 
     for dirpath, dirnames, filenames in os.walk(repo):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fname in filenames:
-            if not fname.endswith(".py"):
-                continue
             fpath = Path(dirpath) / fname
             rel_path = str(fpath.relative_to(repo)).replace("\\", "/")
-            py_files.append((fpath, rel_path))
+            if fname.endswith(".py"):
+                py_files.append((fpath, rel_path))
+            elif fname.endswith(".java"):
+                java_files.append((fpath, rel_path))
 
     t0 = time.time()
-    cache: dict[str, tuple[str, ast.Module | None]] = {}
+    cache: dict[str, tuple[str, object]] = {}
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {
-            pool.submit(_read_and_parse, fpath, rel): (fpath, rel)
-            for fpath, rel in py_files
-        }
+        futures = {}
+        for fpath, rel in py_files:
+            futures[pool.submit(_read_and_parse, fpath, rel)] = (fpath, rel)
+        for fpath, rel in java_files:
+            futures[pool.submit(_read_and_parse_java, fpath, rel)] = (fpath, rel)
+
         for future in as_completed(futures):
             rel_path, content, tree = future.result()
             if content:  # skip files that couldn't be read
                 cache[rel_path] = (content, tree)
 
     elapsed = time.time() - t0
+    total = len(py_files) + len(java_files)
     logger.debug("scan_repo_files: %d files in %.2fs", len(cache), elapsed)
     print(f"[code-index]   Phase 0: Scanned {len(cache)} files in {elapsed:.2f}s ({max_workers} workers)")
     return cache
@@ -117,22 +138,33 @@ def build_code_index(
     print("[code-index]   Phase 0: Scanning repo files (parallel I/O)...")
     file_cache = scan_repo_files(repo_path)
 
-    # Extract separate dicts for contents and ASTs
+    # Extract separate dicts for contents and ASTs, split by language
     file_contents: dict[str, str] = {
         rel: content for rel, (content, _tree) in file_cache.items()
     }
     file_asts: dict[str, ast.Module] = {
-        rel: tree for rel, (_content, tree) in file_cache.items() if tree is not None
+        rel: tree for rel, (_content, tree) in file_cache.items()
+        if tree is not None and rel.endswith(".py")
+    }
+    file_java_trees: dict[str, object] = {
+        rel: tree for rel, (_content, tree) in file_cache.items()
+        if tree is not None and rel.endswith(".java")
     }
 
     # 1. Symbol table
     print("[code-index]   Step 1/6: Parsing symbol table (AST)...")
-    symbol_table = build_symbol_table(repo_path, file_contents=file_contents, file_asts=file_asts)
+    symbol_table = build_symbol_table(
+        repo_path, file_contents=file_contents,
+        file_asts=file_asts, file_java_trees=file_java_trees,
+    )
     print(f"[code-index]   Step 1/6: Done — {len(symbol_table)} symbols in {len(symbol_table.all_files)} files")
 
     # 2. Import resolution
     print("[code-index]   Step 2/6: Resolving imports...")
-    import_map = resolve_imports(repo_path, symbol_table, file_asts=file_asts)
+    import_map = resolve_imports(
+        repo_path, symbol_table,
+        file_asts=file_asts, file_contents=file_contents,
+    )
     print(f"[code-index]   Step 2/6: Done — {len(import_map)} files resolved")
 
     # 3. Dependency graph

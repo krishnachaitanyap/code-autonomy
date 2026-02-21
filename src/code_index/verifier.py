@@ -94,18 +94,20 @@ def post_edit_verification_gate(
     repo = Path(repo_path)
 
     py_files = [f for f in changed_files if f.endswith(".py")]
+    java_files = [f for f in changed_files if f.endswith(".java")]
 
-    if not py_files:
+    if not py_files and not java_files:
         return result
 
     # Step 1: Syntax check
     _check_syntax(repo, py_files, result)
+    _check_java_syntax(repo, java_files, result)
 
     # Step 2: Import check
     _check_imports(repo, py_files, result)
 
     # Step 3: Scoped tests
-    _run_scoped_tests(repo, py_files, config, result)
+    _run_scoped_tests(repo, py_files + java_files, config, result)
 
     # Step 4: Caller check (warning-level)
     _check_callers(repo, py_files, code_index, result)
@@ -127,6 +129,26 @@ def _check_syntax(repo: Path, files: list[str], result: VerificationResult) -> N
             py_compile.compile(str(fpath), doraise=True)
         except py_compile.PyCompileError as exc:
             result.add_error(f"Syntax error in {rel_path}: {exc}")
+
+
+def _check_java_syntax(repo: Path, files: list[str], result: VerificationResult) -> None:
+    """Verify each changed .java file parses without errors using javalang."""
+    try:
+        import javalang
+    except ImportError:
+        return  # javalang not installed, skip check
+
+    for rel_path in files:
+        fpath = repo / rel_path
+        if not fpath.exists():
+            continue
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="replace")
+            javalang.parse.parse(content)
+        except javalang.parser.JavaSyntaxError as exc:
+            result.add_error(f"Java syntax error in {rel_path}: {exc}")
+        except Exception as exc:
+            result.add_error(f"Java parse error in {rel_path}: {exc}")
 
 
 def _check_imports(repo: Path, files: list[str], result: VerificationResult) -> None:

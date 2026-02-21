@@ -114,6 +114,15 @@ def build_dependency_graph(
                 resolved_callees.add(callee_node)
             elif f"{caller_file}::{callee_name}" in known_fqns:
                 resolved_callees.add(f"{caller_file}::{callee_name}")
+            elif caller_file.endswith(".java"):
+                # For Java files, try matching method name against file-local symbols
+                file_symbols = symbol_table.get_by_file(caller_file)
+                for sym in file_symbols:
+                    if sym.name == callee_name or (
+                        "." in callee_name and sym.fqn.endswith(callee_name)
+                    ):
+                        resolved_callees.add(sym.fqn)
+                        break
 
         if resolved_callees:
             forward[caller_node] = resolved_callees

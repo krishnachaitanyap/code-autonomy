@@ -37,6 +37,7 @@ class SymbolEntry:
     params: list[str] = field(default_factory=list)
     return_type: str = ""
     bases: list[str] = field(default_factory=list)  # For classes: base class names
+    language: str = "python"  # "python" | "java"
 
 
 class SymbolTable:
@@ -88,7 +89,7 @@ class SymbolTable:
         """Serialize for JSON storage."""
         result = []
         for entry in self._by_fqn.values():
-            result.append({
+            d = {
                 "fqn": entry.fqn,
                 "file_path": entry.file_path,
                 "name": entry.name,
@@ -102,7 +103,10 @@ class SymbolTable:
                 "params": entry.params,
                 "return_type": entry.return_type,
                 "bases": entry.bases,
-            })
+            }
+            if entry.language != "python":
+                d["language"] = entry.language
+            result.append(d)
         return result
 
     @classmethod
@@ -124,6 +128,7 @@ class SymbolTable:
                 params=d.get("params", []),
                 return_type=d.get("return_type", ""),
                 bases=d.get("bases", []),
+                language=d.get("language", "python"),
             )
             table.add(entry)
         return table
@@ -261,12 +266,356 @@ def extract_symbols_from_source(
     return entries
 
 
+def _estimate_java_end_line(content: str, start_line: int) -> int:
+    """Estimate the closing brace line for a Java declaration using brace-matching.
+
+    String/comment-aware: skips braces inside string literals and comments.
+    """
+    lines = content.splitlines()
+    depth = 0
+    in_string = False
+    string_char = None
+    in_line_comment = False
+    in_block_comment = False
+
+    for i in range(start_line - 1, len(lines)):
+        line = lines[i]
+        j = 0
+        in_line_comment = False
+        while j < len(line):
+            ch = line[j]
+            next_ch = line[j + 1] if j + 1 < len(line) else ""
+
+            if in_block_comment:
+                if ch == "*" and next_ch == "/":
+                    in_block_comment = False
+                    j += 2
+                    continue
+                j += 1
+                continue
+
+            if in_line_comment:
+                j += 1
+                continue
+
+            if in_string:
+                if ch == "\\" and j + 1 < len(line):
+                    j += 2  # skip escaped char
+                    continue
+                if ch == string_char:
+                    in_string = False
+                j += 1
+                continue
+
+            if ch == "/" and next_ch == "/":
+                in_line_comment = True
+                j += 2
+                continue
+            if ch == "/" and next_ch == "*":
+                in_block_comment = True
+                j += 2
+                continue
+            if ch in ('"', "'"):
+                in_string = True
+                string_char = ch
+                j += 1
+                continue
+
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return i + 1  # 1-based line number
+
+            j += 1
+
+    return min(start_line + 50, len(lines))
+
+
+def _extract_javadoc_summary(content: str, start_line: int) -> str:
+    """Scan backward from start_line to find a Javadoc comment and extract its first sentence."""
+    lines = content.splitlines()
+    idx = start_line - 2  # 0-based, line before declaration
+    while idx >= 0 and lines[idx].strip() == "":
+        idx -= 1
+    if idx < 0:
+        return ""
+
+    # Check if we're at the end of a block comment
+    end_line = idx
+    if not lines[end_line].strip().endswith("*/"):
+        return ""
+
+    # Walk back to find the start of the comment
+    while idx >= 0:
+        stripped = lines[idx].strip()
+        if stripped.startswith("/**") or stripped.startswith("/*"):
+            break
+        idx -= 1
+    else:
+        return ""
+
+    if not lines[idx].strip().startswith("/**"):
+        return ""
+
+    # Extract text between /** and */
+    doc_lines = []
+    for i in range(idx, end_line + 1):
+        line = lines[i].strip()
+        line = line.lstrip("/").lstrip("*").strip()
+        if line and not line.startswith("@"):
+            doc_lines.append(line)
+
+    text = " ".join(doc_lines)
+    # First sentence
+    for sep in (".", "\n"):
+        pos = text.find(sep)
+        if pos > 0:
+            return text[: pos + 1].strip()
+    return text.strip()[:120]
+
+
+def _build_java_signature(
+    name: str, modifiers: list, annotations: list,
+    kind: str, extends: list | None = None,
+    implements: list | None = None,
+    params: list | None = None, return_type: str = "",
+    type_params: list | None = None, throws: list | None = None,
+) -> str:
+    """Build a human-readable Java signature string."""
+    parts = []
+    for ann in (annotations or []):
+        ann_name = ann.name if hasattr(ann, "name") else str(ann)
+        parts.append(f"@{ann_name}")
+
+    mod_str = " ".join(modifiers or [])
+
+    if kind == "class":
+        tp = ""
+        if type_params:
+            tp = "<" + ", ".join(str(tp) for tp in type_params) + ">"
+        ext_str = ""
+        if extends:
+            ext_names = [e.name if hasattr(e, "name") else str(e) for e in extends]
+            ext_str = " extends " + ", ".join(ext_names)
+        impl_str = ""
+        if implements:
+            impl_names = [i.name if hasattr(i, "name") else str(i) for i in implements]
+            impl_str = " implements " + ", ".join(impl_names)
+        parts.append(f"{mod_str} class {name}{tp}{ext_str}{impl_str}".strip())
+    elif kind == "interface":
+        tp = ""
+        if type_params:
+            tp = "<" + ", ".join(str(tp) for tp in type_params) + ">"
+        ext_str = ""
+        if extends:
+            ext_names = [e.name if hasattr(e, "name") else str(e) for e in extends]
+            ext_str = " extends " + ", ".join(ext_names)
+        parts.append(f"{mod_str} interface {name}{tp}{ext_str}".strip())
+    elif kind == "enum":
+        parts.append(f"{mod_str} enum {name}".strip())
+    elif kind == "method":
+        param_strs = []
+        for p in (params or []):
+            p_type = p.type.name if hasattr(p, "type") and hasattr(p.type, "name") else str(getattr(p, "type", ""))
+            p_name = p.name if hasattr(p, "name") else str(p)
+            param_strs.append(f"{p_type} {p_name}")
+        ret = return_type or "void"
+        throws_str = ""
+        if throws:
+            throws_str = " throws " + ", ".join(throws)
+        parts.append(f"{mod_str} {ret} {name}({', '.join(param_strs)}){throws_str}".strip())
+    elif kind == "constructor":
+        param_strs = []
+        for p in (params or []):
+            p_type = p.type.name if hasattr(p, "type") and hasattr(p.type, "name") else str(getattr(p, "type", ""))
+            p_name = p.name if hasattr(p, "name") else str(p)
+            param_strs.append(f"{p_type} {p_name}")
+        parts.append(f"{mod_str} {name}({', '.join(param_strs)})".strip())
+
+    return "\n".join(parts)
+
+
+def extract_java_symbols_from_source(
+    rel_path: str, content: str, tree: object = None
+) -> list[SymbolEntry]:
+    """Extract all symbols from a Java source file using javalang AST.
+
+    Args:
+        rel_path: Relative file path within the repo.
+        content: Source code text.
+        tree: Optional pre-parsed javalang CompilationUnit.
+    """
+    try:
+        import javalang
+    except ImportError:
+        return []
+
+    if tree is None:
+        try:
+            tree = javalang.parse.parse(content)
+        except Exception:
+            return []
+
+    entries: list[SymbolEntry] = []
+
+    def _process_type_decl(decl, parent_fqn: str | None = None):
+        """Process a class, interface, or enum declaration recursively."""
+        if not hasattr(decl, "name") or not decl.name:
+            return
+
+        name = decl.name
+        if parent_fqn:
+            fqn = f"{parent_fqn}.{name}"
+        else:
+            fqn = f"{rel_path}::{name}"
+
+        # Determine kind
+        kind = "class"
+        if isinstance(decl, javalang.tree.InterfaceDeclaration):
+            kind = "interface"
+        elif isinstance(decl, javalang.tree.EnumDeclaration):
+            kind = "enum"
+
+        # Modifiers and annotations
+        modifiers = list(decl.modifiers or [])
+        annotations = list(decl.annotations or [])
+        decorator_names = [a.name if hasattr(a, "name") else str(a) for a in annotations]
+
+        # Extends / Implements
+        extends_list = []
+        implements_list = []
+        bases = []
+        if hasattr(decl, "extends") and decl.extends:
+            if isinstance(decl.extends, list):
+                extends_list = decl.extends
+            else:
+                extends_list = [decl.extends]
+            bases.extend(e.name if hasattr(e, "name") else str(e) for e in extends_list)
+        if hasattr(decl, "implements") and decl.implements:
+            implements_list = list(decl.implements)
+            bases.extend(i.name if hasattr(i, "name") else str(i) for i in implements_list)
+
+        # Type parameters
+        type_params = list(decl.type_parameters or []) if hasattr(decl, "type_parameters") else []
+
+        # Line info
+        line_start = decl.position[0] if hasattr(decl, "position") and decl.position else 1
+        line_end = _estimate_java_end_line(content, line_start)
+
+        sig = _build_java_signature(
+            name, modifiers, annotations, kind if kind != "class" else "class",
+            extends=extends_list or None, implements=implements_list or None,
+            type_params=type_params or None,
+        )
+
+        docstring = _extract_javadoc_summary(content, line_start)
+
+        entry = SymbolEntry(
+            fqn=fqn,
+            file_path=rel_path,
+            name=name,
+            symbol_type="class",  # all type decls stored as "class" for hierarchy builder
+            line_start=line_start,
+            line_end=line_end,
+            signature=sig,
+            docstring_summary=docstring,
+            decorators=decorator_names,
+            bases=bases,
+            language="java",
+        )
+        entries.append(entry)
+
+        # Process members in body
+        body = getattr(decl, "body", None) or []
+        for member in body:
+            actual = member
+            # javalang wraps body members; for type declarations body is a list
+            # of declaration objects directly
+            if isinstance(member, (
+                javalang.tree.MethodDeclaration,
+                javalang.tree.ConstructorDeclaration,
+            )):
+                _process_method(member, fqn)
+            elif isinstance(member, (
+                javalang.tree.ClassDeclaration,
+                javalang.tree.InterfaceDeclaration,
+                javalang.tree.EnumDeclaration,
+            )):
+                _process_type_decl(member, fqn)
+
+    def _process_method(decl, parent_fqn: str):
+        """Process a method or constructor declaration."""
+        is_constructor = not hasattr(decl, "return_type")
+        name = decl.name if not is_constructor else "<init>"
+        method_fqn = f"{parent_fqn}.{name}"
+
+        modifiers = list(decl.modifiers or [])
+        annotations = list(decl.annotations or [])
+        decorator_names = [a.name if hasattr(a, "name") else str(a) for a in annotations]
+
+        params_list = list(decl.parameters or [])
+        param_strs = []
+        for p in params_list:
+            p_type = p.type.name if hasattr(p, "type") and hasattr(p.type, "name") else str(getattr(p, "type", ""))
+            p_name = p.name if hasattr(p, "name") else str(p)
+            param_strs.append(f"{p_type} {p_name}")
+
+        return_type = ""
+        if hasattr(decl, "return_type") and decl.return_type:
+            return_type = decl.return_type.name if hasattr(decl.return_type, "name") else str(decl.return_type)
+
+        throws = list(decl.throws or []) if hasattr(decl, "throws") and decl.throws else []
+
+        line_start = decl.position[0] if hasattr(decl, "position") and decl.position else 1
+        line_end = _estimate_java_end_line(content, line_start)
+
+        kind = "constructor" if is_constructor else "method"
+        sig = _build_java_signature(
+            decl.name, modifiers, annotations, kind,
+            params=params_list, return_type=return_type,
+            throws=throws,
+        )
+
+        docstring = _extract_javadoc_summary(content, line_start)
+
+        entry = SymbolEntry(
+            fqn=method_fqn,
+            file_path=rel_path,
+            name=name,
+            symbol_type="method",
+            line_start=line_start,
+            line_end=line_end,
+            signature=sig,
+            docstring_summary=docstring,
+            parent_class=parent_fqn,
+            decorators=decorator_names,
+            params=param_strs,
+            return_type=return_type,
+            language="java",
+        )
+        entries.append(entry)
+
+    # Walk top-level type declarations
+    for type_decl in (tree.types or []):
+        if isinstance(type_decl, (
+            javalang.tree.ClassDeclaration,
+            javalang.tree.InterfaceDeclaration,
+            javalang.tree.EnumDeclaration,
+        )):
+            _process_type_decl(type_decl)
+
+    return entries
+
+
 def build_symbol_table(
     repo_path: str,
     file_contents: "dict[str, str] | None" = None,
     file_asts: "dict[str, ast.Module] | None" = None,
+    file_java_trees: "dict[str, object] | None" = None,
 ) -> SymbolTable:
-    """Walk the repository and build a SymbolTable of all Python symbols.
+    """Walk the repository and build a SymbolTable of all Python and Java symbols.
 
     Args:
         repo_path: Repository root path.
@@ -274,29 +623,43 @@ def build_symbol_table(
             If provided, skips ``os.walk`` + ``read_text``.
         file_asts: Optional pre-parsed AST trees ``{rel_path: ast.Module}``.
             Passed through to ``extract_symbols_from_source``.
+        file_java_trees: Optional pre-parsed Java trees ``{rel_path: CompilationUnit}``.
+            Passed through to ``extract_java_symbols_from_source``.
     """
     table = SymbolTable()
 
     if file_contents is not None:
         for rel_path, content in file_contents.items():
-            tree = file_asts.get(rel_path) if file_asts else None
-            for entry in extract_symbols_from_source(rel_path, content, tree=tree):
-                table.add(entry)
+            if rel_path.endswith(".py"):
+                tree = file_asts.get(rel_path) if file_asts else None
+                for entry in extract_symbols_from_source(rel_path, content, tree=tree):
+                    table.add(entry)
+            elif rel_path.endswith(".java"):
+                jtree = file_java_trees.get(rel_path) if file_java_trees else None
+                for entry in extract_java_symbols_from_source(rel_path, content, tree=jtree):
+                    table.add(entry)
     else:
         repo = Path(repo_path)
         for dirpath, dirnames, filenames in os.walk(repo):
             dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
             for fname in filenames:
-                if not fname.endswith(".py"):
-                    continue
                 fpath = Path(dirpath) / fname
                 rel_path = str(fpath.relative_to(repo)).replace("\\", "/")
-                try:
-                    content = fpath.read_text(encoding="utf-8", errors="replace")
-                except Exception:
-                    continue
-                tree = file_asts.get(rel_path) if file_asts else None
-                for entry in extract_symbols_from_source(rel_path, content, tree=tree):
-                    table.add(entry)
+                if fname.endswith(".py"):
+                    try:
+                        content = fpath.read_text(encoding="utf-8", errors="replace")
+                    except Exception:
+                        continue
+                    tree = file_asts.get(rel_path) if file_asts else None
+                    for entry in extract_symbols_from_source(rel_path, content, tree=tree):
+                        table.add(entry)
+                elif fname.endswith(".java"):
+                    try:
+                        content = fpath.read_text(encoding="utf-8", errors="replace")
+                    except Exception:
+                        continue
+                    jtree = file_java_trees.get(rel_path) if file_java_trees else None
+                    for entry in extract_java_symbols_from_source(rel_path, content, tree=jtree):
+                        table.add(entry)
 
     return table
