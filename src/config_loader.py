@@ -4,10 +4,11 @@ Reads config.ini and provides typed access to settings.
 """
 
 import configparser
+import json
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 
 def load_config(config_path: str = "config.ini") -> dict:
@@ -277,15 +278,99 @@ def parse_testing_strategy_from_changes(content: str) -> Optional[str]:
     return None
 
 
-def parse_bdd_spec_from_changes(content: str) -> Optional[str]:
+def _extract_json_object(text: str, start: int) -> Optional[str]:
     """
-    Parse # BDD spec: path from changes content.
-    Returns spec file path or None if not specified.
+    Extract a balanced JSON object from *text* beginning at *start*.
+
+    Walks forward from ``text[start]`` (which must be ``{``), tracking brace
+    depth while skipping braces that appear inside JSON string literals
+    (including escaped quotes ``\"``).
+
+    Returns the substring ``text[start:end+1]`` when the opening brace is
+    balanced, or ``None`` if the braces are never balanced.
     """
-    for line in content.splitlines():
-        m = re.search(r"#\s*BDD\s+spec\s*:\s*(\S+)", line, re.I)
+    if start >= len(text) or text[start] != "{":
+        return None
+
+    depth = 0
+    in_string = False
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            if ch == "\\" and i + 1 < len(text):
+                i += 2  # skip escaped character
+                continue
+            if ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        i += 1
+    return None
+
+
+def parse_bdd_spec_from_changes(content: str) -> Optional[Union[str, dict]]:
+    """
+    Parse BDD spec reference from changes content.
+
+    Returns:
+      - ``dict`` — inline JSON spec (parsed)
+      - ``str``  — file path to a spec JSON file
+      - ``None`` — not found
+
+    Supports three styles:
+
+    1. ``# BDD spec: path/to/spec.json``  (file path — existing behavior)
+    2. ``# BDD spec: { "service_name": ... }``  (inline JSON after directive)
+    3. Freestanding JSON block containing ``"service_name"`` anywhere in content
+    """
+    # --- Style 1 & 2: explicit directive ---
+    for line_no, line in enumerate(content.splitlines()):
+        m = re.search(r"#\s*BDD\s+spec\s*:\s*(\S.*)", line, re.I)
         if m:
-            return m.group(1)
+            value = m.group(1).strip()
+            if value.startswith("{"):
+                # Inline JSON may span multiple lines — find opening brace in
+                # the original content and extract the balanced object.
+                brace_pos = content.index(value, content.index(line))
+                json_str = _extract_json_object(content, brace_pos)
+                if json_str:
+                    # Strip leading '#' comment markers from each line (common
+                    # when the JSON is inside a commented block).
+                    cleaned = "\n".join(
+                        re.sub(r"^\s*#\s?", "", l) for l in json_str.splitlines()
+                    )
+                    try:
+                        return json.loads(cleaned)
+                    except json.JSONDecodeError:
+                        # Fall back to raw (no comment stripping)
+                        try:
+                            return json.loads(json_str)
+                        except json.JSONDecodeError:
+                            pass
+                return None  # malformed inline JSON after directive
+            # Plain file path
+            return value
+
+    # --- Style 3: freestanding JSON containing "service_name" ---
+    sn_idx = content.find('"service_name"')
+    if sn_idx != -1:
+        brace_start = content.rfind("{", 0, sn_idx)
+        if brace_start != -1:
+            json_str = _extract_json_object(content, brace_start)
+            if json_str:
+                try:
+                    return json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
+
     return None
 
 

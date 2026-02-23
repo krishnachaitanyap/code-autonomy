@@ -372,3 +372,79 @@ class TestConfigLoaderIntegration:
         from src.config_loader import parse_testing_strategy_from_changes
         content = "# Testing strategy: jisi_bdd\nGenerate tests"
         assert parse_testing_strategy_from_changes(content) == "jisi_bdd"
+
+    def test_parse_bdd_spec_file_path_still_works(self):
+        """Existing file-path behavior is preserved."""
+        from src.config_loader import parse_bdd_spec_from_changes
+        content = "# BDD spec: specs/my_service.json\nSome requirements"
+        result = parse_bdd_spec_from_changes(content)
+        assert result == "specs/my_service.json"
+        assert isinstance(result, str)
+
+    def test_parse_bdd_spec_inline_json(self):
+        """Inline JSON after '# BDD spec:' directive returns a dict."""
+        from src.config_loader import parse_bdd_spec_from_changes
+        content = (
+            '# BDD spec: {"service_name": "TestSvc", "endpoint": "/test", "operations": []}\n'
+            "Generate tests"
+        )
+        result = parse_bdd_spec_from_changes(content)
+        assert isinstance(result, dict)
+        assert result["service_name"] == "TestSvc"
+        assert result["endpoint"] == "/test"
+
+    def test_parse_bdd_spec_inline_json_nested(self):
+        """Spec with nested operations: [{...}] parses correctly."""
+        from src.config_loader import parse_bdd_spec_from_changes
+        spec = json.dumps(_sample_spec_dict())
+        content = f"# BDD spec: {spec}\nGenerate tests"
+        result = parse_bdd_spec_from_changes(content)
+        assert isinstance(result, dict)
+        assert result["service_name"] == "AccountLookupRESTSvc"
+        assert len(result["operations"]) == 1
+        assert result["operations"][0]["name"] == "getAccountDetails"
+
+    def test_parse_bdd_spec_freestanding_json(self):
+        """JSON block without directive but containing 'service_name' is found."""
+        from src.config_loader import parse_bdd_spec_from_changes
+        content = (
+            "Generate BDD tests for the following service:\n\n"
+            '{"service_name": "MySvc", "endpoint": "/api/my", "operations": []}\n\n'
+            "Make sure to follow conventions."
+        )
+        result = parse_bdd_spec_from_changes(content)
+        assert isinstance(result, dict)
+        assert result["service_name"] == "MySvc"
+
+    def test_extract_json_object_balanced(self):
+        """Basic brace matching returns the correct substring."""
+        from src.config_loader import _extract_json_object
+        text = 'prefix {"key": "value"} suffix'
+        result = _extract_json_object(text, 7)
+        assert result == '{"key": "value"}'
+
+    def test_extract_json_object_with_strings(self):
+        """Braces inside string literals are skipped."""
+        from src.config_loader import _extract_json_object
+        text = '{"a": "}{", "b": 1}'
+        result = _extract_json_object(text, 0)
+        assert result == '{"a": "}{", "b": 1}'
+
+    def test_extract_json_object_nested(self):
+        """Nested braces are handled correctly."""
+        from src.config_loader import _extract_json_object
+        text = '{"outer": {"inner": 1}, "x": 2}'
+        result = _extract_json_object(text, 0)
+        assert result == text
+
+    def test_extract_json_object_unbalanced(self):
+        """Unbalanced braces return None."""
+        from src.config_loader import _extract_json_object
+        text = '{"key": "value"'
+        result = _extract_json_object(text, 0)
+        assert result is None
+
+    def test_extract_json_object_not_brace(self):
+        """Non-brace start returns None."""
+        from src.config_loader import _extract_json_object
+        assert _extract_json_object("hello", 0) is None

@@ -36,3 +36,37 @@
 
 Generate JISI BDD tests for the AccountLookup REST service using the
 enterprise ServiceBase pattern with Invoker/Handler field discovery.
+
+# -----------------------------------------------------------------------
+# Alternative: Inline BDD spec (no separate JSON file needed)
+# -----------------------------------------------------------------------
+#
+# Instead of referencing an external file, you can embed the spec JSON
+# directly after the "# BDD spec:" directive:
+#
+# # BDD spec: {
+# #   "service_name": "AccountLookupRESTSvc",
+# #   "endpoint": "/profilecore/services/AccountLookup",
+# #   "team": "GWS-ProfileCore",
+# #   "application_tag": "GWS",
+# #   "test_types": ["regression", "compare"],
+# #   "operations": [
+# #     {
+# #       "name": "getAccountDetails",
+# #       "path": "/profilecore/services/AccountLookup/getAccountDetails",
+# #       "method": "POST",
+# #       "request_fields": [
+# #         {"name": "accountNumber", "type": "String", "required": true}
+# #       ],
+# #       "response_fields": [
+# #         {"name": "accountId", "type": "String"},
+# #         {"name": "balance", "type": "BigDecimal"}
+# #       ]
+# #     }
+# #   ]
+# # }
+#
+# Or include the JSON block anywhere in the file without a directive —
+# any JSON object containing "service_name" will be auto-detected:
+#
+# {"service_name": "MySvc", "endpoint": "/api/my", "operations": []}

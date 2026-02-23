@@ -24,7 +24,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.config_loader import load_config, load_changes_with_reference, parse_testing_strategy_from_changes, parse_bdd_spec_from_changes
+from src.config_loader import load_config, load_changes_with_reference, parse_testing_strategy_from_changes, parse_bdd_spec_from_changes, _extract_json_object
 from src.platform.git_ops import (
     clone_repo,
     checkout_branch,
@@ -360,12 +360,17 @@ def _run_jira_mode(args) -> int:
                 import json as _json
                 try:
                     desc = story.get("description", "")
-                    _json_match = re.search(r'\{[^{}]*"service_name"[^{}]*\}', desc, re.DOTALL) if desc else None
-                    if _json_match:
-                        from src.bdd.service_spec import ServiceSpec as _SS
-                        _spec = _SS.from_dict(_json.loads(_json_match.group(0)))
-                        config["bdd_spec"] = _spec
-                        log_info(f"  Detected JISI BDD spec from story: {_spec.service_name}")
+                    if desc:
+                        idx = desc.find('"service_name"')
+                        if idx != -1:
+                            brace_start = desc.rfind("{", 0, idx)
+                            if brace_start != -1:
+                                json_str = _extract_json_object(desc, brace_start)
+                                if json_str:
+                                    from src.bdd.service_spec import ServiceSpec as _SS
+                                    _spec = _SS.from_dict(_json.loads(json_str))
+                                    config["bdd_spec"] = _spec
+                                    log_info(f"  Detected JISI BDD spec from story: {_spec.service_name}")
                 except Exception:
                     pass
 
@@ -888,15 +893,18 @@ def main() -> int:
     build_tool = detect_build_tool(str(clone_path))  # maven or gradle for Java
 
     # JISI BDD spec loading: --bdd-spec CLI > changes file > config
-    bdd_spec_path = (
+    bdd_spec_ref = (
         getattr(args, "bdd_spec", None)
         or parse_bdd_spec_from_changes(requirements)
         or testing_cfg.get("bdd_spec_path", "")
     )
-    if bdd_spec_path:
+    if bdd_spec_ref:
         try:
             from src.bdd.service_spec import ServiceSpec
-            bdd_spec = ServiceSpec.from_file(bdd_spec_path)
+            if isinstance(bdd_spec_ref, dict):
+                bdd_spec = ServiceSpec.from_dict(bdd_spec_ref)
+            else:
+                bdd_spec = ServiceSpec.from_file(bdd_spec_ref)
             spec_errors = bdd_spec.validate()
             if spec_errors:
                 log_warning(f"BDD spec validation warnings: {', '.join(spec_errors)}")
@@ -905,7 +913,7 @@ def main() -> int:
                 testing_strategy = "jisi_bdd"
             log_info(f"Loaded BDD spec: {bdd_spec.service_name} ({len(bdd_spec.operations)} operation(s))")
         except Exception as e:
-            log_warning(f"Could not load BDD spec from {bdd_spec_path}: {e}")
+            log_warning(f"Could not load BDD spec from {bdd_spec_ref}: {e}")
 
     use_plan = args.plan
 
