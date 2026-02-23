@@ -3,6 +3,8 @@
   "endpoint": "/profilecore/services/AccountLookup",
   "team": "GWS-ProfileCore",
   "application_tag": "GWS",
+  "invoker_class": "com.enterprise.services.profilecore.AccountLookupInvoker",
+  "handler_class": "com.enterprise.services.profilecore.AccountLookupHandler",
   "test_types": ["regression", "compare", "pvt", "heartbeat"],
   "operations": [
     {

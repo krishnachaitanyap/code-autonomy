@@ -1,15 +1,38 @@
 # Testing strategy: bdd
-# Add BDD-style tests for user validation
+# BDD spec: examples/bdd_spec_example.json
+#
+# Generate JISI BDD tests for the AccountLookup service.
+#
+# The spec JSON includes invoker_class and handler_class references.
+# The AI will read those Invoker/Handler Java source files first to
+# discover the actual request/response field names, types, and payload
+# structure — then generate BDD artifacts that match the real service contract.
+#
+# Three artifacts are produced:
+#   1. Cucumber .feature file with enterprise tags
+#   2. Java service class extending ServiceBase
+#   3. Property configuration entry
+#
+# --- Invoker/Handler field discovery ---
+#
+# Service-level (applies to all operations):
+#   "invoker_class": "com.enterprise.services.profilecore.AccountLookupInvoker"
+#   "handler_class": "com.enterprise.services.profilecore.AccountLookupHandler"
+#
+# Per-operation override (when each operation has its own Invoker/Handler):
+#   "operations": [
+#     {
+#       "name": "getAccountDetails",
+#       "invoker_class": "com.enterprise.services.profilecore.GetDetailsInvoker",
+#       "handler_class": "com.enterprise.services.profilecore.GetDetailsHandler"
+#     }
+#   ]
+#
+# When invoker_class/handler_class are set, the prompt instructs the AI to:
+#   - Read the Invoker source to extract request fields → payload.put(...) calls
+#   - Read the Handler source to extract response fields → Set<String> + validation steps
+#
+# When omitted, the prompt skips source-file reading (backward compatible).
 
-Add Cucumber BDD tests for the user/email validation feature:
-
-1. Create src/test/resources/features/user_validation.feature with:
-   - Feature: User email validation
-   - Scenarios: valid email accepted, invalid email rejected
-   - Use Given/When/Then format
-
-2. Create step definitions in src/test/java/.../steps/UserValidationSteps.java:
-   - Implement the Gherkin steps
-   - Use Cucumber annotations (@Given, @When, @Then)
-
-3. Add Cucumber dependencies to pom.xml if not present (cucumber-java, cucumber-junit-platform-engine)
+Generate JISI BDD tests for the AccountLookup REST service using the
+enterprise ServiceBase pattern with Invoker/Handler field discovery.
