@@ -1,0 +1,36 @@
+version: "3.9"
+
+services:
+  agent:
+    build: .
+    container_name: code-autonomy-agent
+    volumes:
+      # Mount config at runtime (never bake secrets into image)
+      - ./config.ini:/app/config.ini:ro
+      - ./changes.txt:/app/changes.txt:ro
+      # Persistent storage across runs
+      - agent-workspace:/app/workspace
+      - agent-data:/data
+    environment:
+      # HOME must point to persistent volume so Path.home() fallbacks work
+      - HOME=/data
+      # Secrets — pass via env vars (or AWS Secrets Manager in production)
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - JIRA_USERNAME=${JIRA_USERNAME}
+      - JIRA_PASSWORD=${JIRA_PASSWORD}
+      - BITBUCKET_SERVER_TOKEN=${BITBUCKET_SERVER_TOKEN}
+      # AWS credentials (for Bedrock / OpenSearch)
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+    # Override CMD for different modes:
+    #   Agent mode:  ["--agent", "--config", "/app/config.ini"]
+    #   JIRA mode:   ["--jira", "--config", "/app/config.ini", "--repo-path", "/app/workspace/repo"]
+    #   Plan mode:   ["--plan", "Add auth", "--config", "/app/config.ini", "--repo-path", "/app/workspace/repo"]
+    command: ["--agent", "--config", "/app/config.ini"]
+
+volumes:
+  agent-workspace:
+  agent-data:

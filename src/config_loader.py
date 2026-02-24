@@ -12,15 +12,22 @@ from typing import Optional, Union
 
 
 def load_config(config_path: str = "config.ini") -> dict:
-    """Load and parse config.ini, resolving environment variables."""
-    config_path = Path(config_path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+    """Load and parse config.ini, resolving environment variables.
 
+    If the config file does not exist, an empty parser is used so the
+    application can boot entirely from ``CA_{SECTION}_{KEY}`` env vars.
+    """
+    config_path = Path(config_path)
     parser = configparser.ConfigParser()
-    parser.read(config_path)
+    if config_path.exists():
+        parser.read(config_path)
+    # else: empty parser — all values come from env vars / defaults
 
     def get(section: str, key: str, fallback: str = "") -> str:
+        env_key = f"CA_{section.upper()}_{key.upper()}"
+        env_val = os.environ.get(env_key)
+        if env_val is not None:
+            return env_val
         try:
             return parser.get(section, key, fallback=fallback).strip()
         except (configparser.NoSectionError, configparser.NoOptionError):

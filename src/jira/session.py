@@ -10,6 +10,7 @@ Storage: ``~/.code-autonomy/jira_sessions/{repo_id}.json``
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -131,6 +132,9 @@ class JiraSession:
 # ======================================================================
 
 def _session_dir() -> Path:
+    override = os.environ.get("CA_JIRA_SESSION_DIR", "")
+    if override:
+        return Path(override)
     return Path.home() / ".code-autonomy" / "jira_sessions"
 
 
