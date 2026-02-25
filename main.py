@@ -915,6 +915,32 @@ def main() -> int:
         except Exception as e:
             log_warning(f"Could not load BDD spec from {bdd_spec_ref}: {e}")
 
+    # Auto-detect jisi_bdd strategy when servlet XML files are present
+    if testing_strategy == "auto" and not bdd_spec_ref:
+        try:
+            from src.bdd.servlet_discovery import _find_servlet_xml_files
+            rest_xmls, cxf_xmls = _find_servlet_xml_files(str(clone_path))
+            if rest_xmls or cxf_xmls:
+                testing_strategy = "jisi_bdd"
+                log_info("Auto-detected jisi_bdd strategy from servlet XML files")
+        except Exception:
+            pass
+
+    # Auto-discover BDD specs from servlet XML when jisi_bdd but no explicit spec
+    if testing_strategy == "jisi_bdd" and not config.get("bdd_spec"):
+        try:
+            from src.bdd.servlet_discovery import discover_service_specs
+            discovered = discover_service_specs(str(clone_path))
+            if discovered:
+                config["bdd_spec"] = discovered[0]
+                config["bdd_specs_all"] = discovered
+                log_info(
+                    f"Auto-discovered {len(discovered)} BDD spec(s) from servlet XML: "
+                    f"{discovered[0].service_name} ({len(discovered[0].operations)} op(s))"
+                )
+        except Exception as e:
+            log_warning(f"Servlet XML auto-discovery failed: {e}")
+
     use_plan = args.plan
 
     if args.ask:
