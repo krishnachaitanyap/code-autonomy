@@ -109,13 +109,13 @@ def run_java_tests(repo_path: str, timeout: int = 180) -> tuple[int, str, str]:
     repo = Path(repo_path)
     if (repo / "pom.xml").exists():
         return _run(
-            ["mvn", "test", "-q"],
+            ["mvn", "test", "-B"],
             cwd=repo_path,
             timeout=timeout,
         )
     if (repo / "build.gradle").exists() or (repo / "build.gradle.kts").exists():
         return _run(
-            ["./gradlew", "test", "--no-daemon", "-q"],
+            ["./gradlew", "test", "--no-daemon"],
             cwd=repo_path,
             timeout=timeout,
         )
