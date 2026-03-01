@@ -112,6 +112,56 @@ def push_branch(repo_dir: str, branch_name: str, remote: str = "origin") -> None
         raise RuntimeError(f"Push failed: {r.stderr.strip()}")
 
 
+def list_branches(repo_dir: str) -> list[str]:
+    """List all local and remote branches, returning unique short names sorted."""
+    branches: set[str] = set()
+
+    # Local branches
+    r = _git(repo_dir, "branch", "--format=%(refname:short)")
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            name = line.strip()
+            if name:
+                branches.add(name)
+
+    # Remote branches (strip "origin/" prefix, skip HEAD)
+    r = _git(repo_dir, "branch", "-r", "--format=%(refname:short)")
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            name = line.strip()
+            if name and "HEAD" not in name:
+                # "origin/main" -> "main"
+                short = name.split("/", 1)[1] if "/" in name else name
+                branches.add(short)
+
+    return sorted(branches)
+
+
+def list_remote_branches(repo_url: str, auth_token: Optional[str] = None) -> list[str]:
+    """List branches from a remote repository URL without cloning."""
+    cmd = ["git"]
+    if auth_token:
+        cmd += ["-c", f"http.extraHeader=Authorization: Bearer {auth_token}"]
+    cmd += ["ls-remote", "--heads", repo_url]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            logger.warning("git ls-remote failed for %s: %s", repo_url, result.stderr.strip())
+            return []
+        branches: list[str] = []
+        for line in result.stdout.splitlines():
+            # Format: <sha>\trefs/heads/<branch>
+            parts = line.strip().split("\t")
+            if len(parts) == 2 and parts[1].startswith("refs/heads/"):
+                branch = parts[1].replace("refs/heads/", "")
+                branches.append(branch)
+        return sorted(branches)
+    except Exception as exc:
+        logger.warning("Failed to list remote branches for %s: %s", repo_url, exc)
+        return []
+
+
 def get_default_branch(repo_dir: str) -> str:
     """Get default branch (main or master) from remote."""
     r = _git(repo_dir, "ls-remote", "--symref", "origin", "HEAD")

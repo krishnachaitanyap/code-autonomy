@@ -13,7 +13,8 @@ from typing import Optional
 
 from src.agent.tools import build_agent_tools, build_plan_tools, build_ask_tools, execute_tool, execute_plan_tool, execute_ask_tool, AGENT_TOOLS
 from src.agent.knowledge import (
-    WorkingMemory, load_knowledge, save_knowledge, compute_repo_id,
+    WorkingMemory, load_knowledge, save_knowledge, save_knowledge_with_outcome,
+    get_fix_suggestions, compute_repo_id,
     save_checkpoint, load_checkpoint, clear_checkpoint, compute_requirement_hash,
 )
 from src.agent.gcc import GCCController
@@ -432,6 +433,7 @@ def generate_changes_with_agent(
     code_index: "CodeIndex | None" = None,
     resume: bool = False,
     initial_working_memory: Optional[dict[str, str]] = None,
+    conversation_context: Optional[list[dict]] = None,
 ) -> AgentResult:
     """Run the agentic loop: explore → edit → test → fix → complete.
 
@@ -466,6 +468,8 @@ def generate_changes_with_agent(
     tool_errors: dict[str, int] = {}          # errors per tool
     consecutive_api_errors = 0                 # consecutive LLM API failures
     turns_without_write = 0                    # ANY turn without edit/write
+    _code_intel_provided: set[str] = set()     # files that received pre-edit code intelligence
+    _last_test_error_sig: str = ""             # last classified test error signature for feedback loop
 
     # Working memory (survives context compression)
     working_memory = WorkingMemory()
@@ -529,6 +533,14 @@ def generate_changes_with_agent(
         )
     if gcc_controller:
         system_prompt += _GCC_PROMPT_SECTION
+
+    if conversation_context:
+        context_lines = []
+        for msg in conversation_context[-6:]:
+            prefix = "User" if msg.get("role") == "user" else "Assistant"
+            content = msg.get("content", "")[:500]
+            context_lines.append(f"{prefix}: {content}")
+        system_prompt += "\n\n## Prior Conversation\n" + "\n".join(context_lines)
 
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
@@ -776,19 +788,23 @@ def generate_changes_with_agent(
                     inputs=_sanitize_tool_args(name, args),
                 )
 
-            # --- task_complete: signal termination + save knowledge ---
+            # --- task_complete: signal termination + save knowledge with outcome ---
             if name == "task_complete":
                 task_complete_data = args
                 result = f"Task marked complete. Summary: {args.get('summary', '')}"
-                # Save knowledge (non-fatal)
+                # Save knowledge with outcome (non-fatal)
                 try:
-                    if not working_memory.is_empty():
-                        save_knowledge(
-                            config, repo_path, repo_url,
-                            working_memory,
-                            summary=args.get("summary", ""),
-                            files_changed=args.get("files_changed"),
-                        )
+                    save_knowledge_with_outcome(
+                        config, repo_path, repo_url,
+                        working_memory,
+                        success=True,
+                        summary=args.get("summary", ""),
+                        files_changed=args.get("files_changed"),
+                        tools_used=dict(tool_call_counts),
+                        # Record fix pattern if agent recovered from a test error
+                        error_signature=_last_test_error_sig,
+                        fix_description=args.get("summary", "") if _last_test_error_sig else "",
+                    )
                 except Exception:
                     pass
                 # Save GCC state (non-fatal)
@@ -812,6 +828,29 @@ def generate_changes_with_agent(
                 if agent_cfg.get("show_activity", True):
                     log_agent_tool_start(turn, name, args)
 
+                # --- P0-1: Pre-edit code intelligence injection ---
+                _pre_edit_context = ""
+                if (
+                    name in ("edit_file", "write_file")
+                    and code_index is not None
+                    and args.get("path", "") not in _code_intel_provided
+                ):
+                    _edit_path = args.get("path", "")
+                    try:
+                        from src.code_index.tools import _context_for_edit, _predict_breakage
+                        intel_context = _context_for_edit(code_index, _edit_path)
+                        intel_risk = _predict_breakage(code_index, _edit_path)
+                        if intel_context and "No symbols found" not in intel_context:
+                            # Compact the intelligence to avoid flooding context
+                            _pre_edit_context = (
+                                f"\n[Code Intelligence for {_edit_path}]\n"
+                                f"{intel_context[:2000]}\n"
+                                f"{intel_risk[:1500]}\n"
+                            )
+                            _code_intel_provided.add(_edit_path)
+                    except Exception:
+                        pass  # code intelligence is best-effort
+
                 result = execute_tool(
                     repo_root, name, args,
                     changes_tracker=changes_tracker,
@@ -820,6 +859,30 @@ def generate_changes_with_agent(
                     gcc_controller=gcc_controller,
                     code_index=code_index,
                 )
+
+                # --- P0-1: Prepend code intelligence to the tool result ---
+                if _pre_edit_context and not result.startswith("Error"):
+                    result = _pre_edit_context + "\n" + result
+
+                # --- P0-1: Post-edit verification gate ---
+                if (
+                    name in ("edit_file", "write_file")
+                    and not result.startswith("Error")
+                    and code_index is not None
+                ):
+                    _edited_path = args.get("path", "")
+                    try:
+                        from src.code_index.verifier import post_edit_verification_gate
+                        _vresult = post_edit_verification_gate(
+                            str(repo_root), [_edited_path], code_index, config or {},
+                        )
+                        if not _vresult.passed:
+                            result += f"\n\n[Verification Warning]\n{_vresult.summary()}"
+                        elif _vresult.warnings:
+                            result += f"\n\n[Verification Note]\n{_vresult.summary()}"
+                    except Exception:
+                        pass  # verification is best-effort
+
                 # --- Track reads and failed edits for end-of-run summary ---
                 if name == "read_file" and not result.startswith("Error"):
                     _rpath = args.get("path", "")
@@ -963,6 +1026,48 @@ def generate_changes_with_agent(
                 wm_block = working_memory.to_message_block() if not working_memory.is_empty() else ""
                 gcc_block = gcc_controller.to_message_block() if gcc_controller else ""
                 messages[0] = {"role": "system", "content": system_prompt + "\n" + wm_block + gcc_block}
+
+            # --- P0-2: Error classification + P0-3: Fix suggestions on test failures ---
+            if name == "run_command" and "[exit code:" in result and "exit code: 0]" not in result:
+                _error_hints: list[str] = []
+                # Classify errors
+                try:
+                    from src.services.testing_service import TestingService
+                    _ts = TestingService()
+                    _classifications = _ts._classify_test_errors(
+                        result, "", 1  # result contains combined output
+                    )
+                    if _classifications:
+                        _class_lines = ["[Error Classification]"]
+                        for ec in _classifications[:3]:
+                            _class_lines.append(
+                                f"  - {ec['type']}/{ec['subtype']}: {ec['suggestion']}"
+                            )
+                            _last_test_error_sig = ec["message"][:200]
+                        _error_hints.append("\n".join(_class_lines))
+                except Exception:
+                    pass
+
+                # Check for known fix patterns from previous runs
+                try:
+                    _fix_suggs = get_fix_suggestions(config, repo_path, repo_url, result[:2000])
+                    if _fix_suggs:
+                        _fix_lines = ["[Known Fix Patterns from previous runs]"]
+                        for fs in _fix_suggs[:3]:
+                            _fix_lines.append(
+                                f"  - Error: `{fs['error_signature'][:80]}` → "
+                                f"Fix: {fs['fix_description'][:200]} "
+                                f"(worked {fs.get('success_count', 0)}x)"
+                            )
+                        _error_hints.append("\n".join(_fix_lines))
+                except Exception:
+                    pass
+
+                if _error_hints:
+                    messages.append({
+                        "role": "user",
+                        "content": "\n\n".join(_error_hints),
+                    })
 
             # --- Stuck detection (same error 3 times) ---
             if name == "run_command" and "[exit code:" in result and "exit code: 0]" not in result:
@@ -1172,11 +1277,17 @@ def generate_changes_with_agent(
             summarization_calls_used=usage_stats.calls_by_category("summarization") if usage_stats else 0,
             testing_turns_used=testing_turns_used,
         )
-        # Also save working memory into knowledge (even on failure)
+        # Save working memory + outcome into knowledge (even on failure)
         try:
-            if not working_memory.is_empty():
-                save_knowledge(config, repo_path, repo_url, working_memory,
-                               summary="Incomplete run checkpoint")
+            save_knowledge_with_outcome(
+                config, repo_path, repo_url, working_memory,
+                success=False,
+                summary=detailed_summary[:500],
+                files_changed=sorted(changes_tracker),
+                tools_used=dict(tool_call_counts),
+                error_type="incomplete_run",
+                error_signature=_last_test_error_sig,
+            )
         except Exception:
             pass
         result_obj = AgentResult(
@@ -1228,6 +1339,7 @@ def generate_plan_with_agent(
     repo_url: str = "",
     repo_knowledge: str = "",
     code_index: "CodeIndex | None" = None,
+    conversation_context: Optional[list[dict]] = None,
 ) -> "PlanResult":
     """Run the agent in plan mode: explore → propose changes → complete.
 
@@ -1295,6 +1407,14 @@ def generate_plan_with_agent(
     system_prompt = _PLAN_SYSTEM_PROMPT
     if gcc_controller:
         system_prompt += _GCC_PROMPT_SECTION
+
+    if conversation_context:
+        context_lines = []
+        for msg in conversation_context[-6:]:
+            prefix = "User" if msg.get("role") == "user" else "Assistant"
+            content = msg.get("content", "")[:500]
+            context_lines.append(f"{prefix}: {content}")
+        system_prompt += "\n\n## Prior Conversation\n" + "\n".join(context_lines)
 
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
@@ -1647,6 +1767,7 @@ def generate_answer_with_agent(
     repo_url: str = "",
     repo_knowledge: str = "",
     code_index: "CodeIndex | None" = None,
+    conversation_context: Optional[list[dict]] = None,
 ) -> "AskResult":
     """Run the agent in ask mode: explore → answer question → complete.
 
@@ -1748,6 +1869,14 @@ def generate_answer_with_agent(
     system_prompt = _ASK_SYSTEM_PROMPT
     if gcc_controller:
         system_prompt += _GCC_ASK_PROMPT_SECTION
+
+    if conversation_context:
+        context_lines = []
+        for msg in conversation_context[-6:]:
+            prefix = "User" if msg.get("role") == "user" else "Assistant"
+            content = msg.get("content", "")[:500]
+            context_lines.append(f"{prefix}: {content}")
+        system_prompt += "\n\n## Prior Conversation\n" + "\n".join(context_lines)
 
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},

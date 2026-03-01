@@ -2,25 +2,39 @@
 
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { testing, type TestProject, type CoverageReport } from '@/lib/api';
+import { testing, repos, type TestProject, type CoverageReport, type Repo } from '@/lib/api';
 
 export default function CoveragePage() {
   const searchParams = useSearchParams();
   const projectFilter = searchParams.get('project') || '';
 
   const [projects, setProjects] = useState<TestProject[]>([]);
+  const [repoList, setRepoList] = useState<Repo[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState(projectFilter);
   const [reports, setReports] = useState<CoverageReport[]>([]);
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
 
+  // Branch selector state
+  const [branch, setBranch] = useState('main');
+  const [branchList, setBranchList] = useState<string[]>([]);
+  const [loadingBranches, setLoadingBranches] = useState(false);
+
   useEffect(() => {
     async function load() {
       try {
-        const p = await testing.listProjects({ limit: 100 });
+        const [p, r] = await Promise.all([
+          testing.listProjects({ limit: 100 }),
+          repos.list(),
+        ]);
         setProjects(p.projects);
-        if (!selectedProjectId && p.projects.length > 0) {
-          setSelectedProjectId(p.projects[0].id);
+        setRepoList(Array.isArray(r) ? r : []);
+        if (!selectedProjectId) {
+          if (p.projects.length > 0) {
+            setSelectedProjectId(p.projects[0].id);
+          } else if (Array.isArray(r) && r.length > 0) {
+            setSelectedProjectId(r[0].id);
+          }
         }
       } catch (err) {
         console.error('Failed to load projects:', err);
@@ -30,6 +44,40 @@ export default function CoveragePage() {
     }
     load();
   }, []);
+
+  // Load branches when project selection changes
+  useEffect(() => {
+    if (!selectedProjectId) {
+      setBranchList([]);
+      setBranch('main');
+      return;
+    }
+    let repoId = repoList.find((r) => r.id === selectedProjectId)?.id;
+    if (!repoId) {
+      const proj = projects.find((p) => p.id === selectedProjectId);
+      if (proj) {
+        const matchedRepo = repoList.find((r) => r.url === proj.repo_url);
+        repoId = matchedRepo?.id;
+      }
+    }
+    if (!repoId) repoId = selectedProjectId;
+    setBranchList([]);
+    setBranch('main');
+    setLoadingBranches(true);
+    repos.branches(repoId)
+      .then((r) => {
+        const list = r.branches || [];
+        setBranchList(list);
+        if (list.length > 0) {
+          setBranch(list.includes('main') ? 'main' : list[0]);
+        }
+      })
+      .catch(() => {
+        setBranchList([]);
+        setBranch('main');
+      })
+      .finally(() => setLoadingBranches(false));
+  }, [selectedProjectId, repoList, projects]);
 
   useEffect(() => {
     if (selectedProjectId) {
@@ -49,7 +97,7 @@ export default function CoveragePage() {
   async function handleAnalyze() {
     setAnalyzing(true);
     try {
-      await testing.analyzeCoverage(selectedProjectId);
+      await testing.analyzeCoverage(selectedProjectId, branch || undefined);
       await loadReports();
     } catch (err) {
       console.error('Coverage analysis failed:', err);
@@ -78,6 +126,32 @@ export default function CoveragePage() {
             {projects.map((p) => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
+            {repoList.length > 0 && projects.length > 0 && (
+              <option disabled>── Repositories ──</option>
+            )}
+            {repoList
+              .filter((r) => !projects.some((p) => p.repo_url === r.url))
+              .map((r) => (
+                <option key={`repo-${r.id}`} value={r.id}>
+                  {r.url || r.local_path || r.id}
+                </option>
+              ))}
+          </select>
+          <select
+            value={branch}
+            onChange={(e) => setBranch(e.target.value)}
+            className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+            disabled={loadingBranches || branchList.length === 0}
+          >
+            {loadingBranches ? (
+              <option>Loading...</option>
+            ) : branchList.length === 0 ? (
+              <option value="main">main</option>
+            ) : (
+              branchList.map((b) => (
+                <option key={b} value={b}>{b}</option>
+              ))
+            )}
           </select>
           <button
             onClick={handleAnalyze}

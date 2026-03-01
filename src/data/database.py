@@ -57,6 +57,20 @@ def init_db(url: str = "") -> None:
     engine = get_engine(url)
     Base.metadata.create_all(engine)
 
+    # Migrate existing DBs
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+    if 'sessions' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('sessions')]
+        if 'log' not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE sessions ADD COLUMN log JSON DEFAULT '[]'"))
+    if 'test_runs' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('test_runs')]
+        if 'branch' not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE test_runs ADD COLUMN branch VARCHAR(256) DEFAULT 'main'"))
+
 
 @contextmanager
 def get_session(url: str = "") -> Generator[Session, None, None]:

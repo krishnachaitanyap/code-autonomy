@@ -21,6 +21,33 @@ ProgressCallback = Optional[Callable[[dict], None]]
 class AgentService:
     """Service for running agent, plan, and ask sessions."""
 
+    def _append_session_log(self, session_id, entry):
+        """Append an entry to the session's log column."""
+        if not session_id:
+            return
+        try:
+            from src.data.database import get_session
+            from src.data.models import Session as SessionModel
+
+            entry.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+            with get_session() as db:
+                s = db.get(SessionModel, session_id)
+                if s:
+                    s.log = (s.log or []) + [entry]
+                    db.flush()
+        except Exception:
+            pass
+
+    def _checkout_branch(self, repo_path: str, branch: str):
+        """Checkout a specific branch before running the agent."""
+        if branch:
+            try:
+                from src.platform.git_ops import checkout_branch
+                checkout_branch(repo_path, branch, create=False)
+                logger.info("Checked out branch: %s", branch)
+            except Exception as exc:
+                logger.warning("Could not checkout branch %s: %s", branch, exc)
+
     def _build_agent_config(self, config: dict) -> dict:
         """Extract agent config section from full config."""
         agent_cfg = config.get("agent", {})
@@ -86,26 +113,17 @@ class AgentService:
         config: dict,
         repo_url: str = "",
         resume: bool = False,
+        branch: str = "",
         progress_callback: ProgressCallback = None,
+        conversation_context: Optional[list[dict]] = None,
     ) -> "AgentResult":
-        """Run agent mode — full agentic loop with exploration, editing, and testing.
-
-        Args:
-            repo_path: Path to the repository.
-            requirements: Requirements/prompt text.
-            config: Full config dict.
-            repo_url: Remote URL (optional).
-            resume: Resume from last checkpoint.
-            progress_callback: Optional callback for progress events.
-
-        Returns:
-            AgentResult from the agent loop.
-        """
+        """Run agent mode — full agentic loop with exploration, editing, and testing."""
         from src.agent.analyzer import generate_changes_with_agent
         from src.agent.knowledge import load_repo_knowledge
         from src.code.executor import detect_build_tool
         from src.consciousness.core import build_or_load_consciousness
 
+        self._checkout_branch(repo_path, branch)
         repo_id = compute_repo_id(repo_path, repo_url)
         ai_cfg = config["ai"]
         agent_config = self._build_agent_config(config)
@@ -128,20 +146,38 @@ class AgentService:
         repo_knowledge = load_repo_knowledge(repo_path)
         build_tool = detect_build_tool(repo_path)
 
-        result = generate_changes_with_agent(
-            requirements,
-            repo_path,
-            llm_config=ai_cfg,
-            verbose=ai_cfg.get("verbose", False),
-            consciousness=consciousness,
-            agent_config=agent_config,
-            config=config,
-            repo_url=repo_url,
-            repo_knowledge=repo_knowledge,
-            code_index=code_index,
-            resume=resume,
-            build_tool=build_tool,
-        )
+        from src.agent.activity import set_progress_callback, clear_progress_callback
+
+        def _combined_callback(event):
+            self._append_session_log(session_id, event.get("data", {}))
+            if progress_callback:
+                progress_callback(event)
+
+        set_progress_callback(_combined_callback)
+        try:
+            result = generate_changes_with_agent(
+                requirements,
+                repo_path,
+                llm_config=ai_cfg,
+                verbose=ai_cfg.get("verbose", False),
+                consciousness=consciousness,
+                agent_config=agent_config,
+                config=config,
+                repo_url=repo_url,
+                repo_knowledge=repo_knowledge,
+                code_index=code_index,
+                resume=resume,
+                build_tool=build_tool,
+                conversation_context=conversation_context,
+            )
+        except Exception as exc:
+            clear_progress_callback()
+            if progress_callback:
+                progress_callback({"type": "error", "data": {"message": str(exc)}})
+            self._update_session(session_id, "failed", str(exc))
+            raise
+        finally:
+            clear_progress_callback()
 
         # Update session
         status = "completed" if result.success else "failed"
@@ -152,6 +188,9 @@ class AgentService:
             trace_id=result.trace_id,
         )
 
+        if progress_callback:
+            progress_callback({"type": "complete", "data": {"summary": result.summary, "success": result.success}})
+
         return result
 
     def run_plan(
@@ -160,18 +199,17 @@ class AgentService:
         requirements: str,
         config: dict,
         repo_url: str = "",
+        branch: str = "",
         progress_callback: ProgressCallback = None,
+        conversation_context: Optional[list[dict]] = None,
     ) -> "PlanResult":
-        """Run plan mode — read-only exploration + proposed changes.
-
-        Returns:
-            PlanResult from the plan agent loop.
-        """
+        """Run plan mode — read-only exploration + proposed changes."""
         from src.agent.analyzer import generate_plan_with_agent
         from src.agent.knowledge import load_repo_knowledge
         from src.code.executor import detect_build_tool
         from src.consciousness.core import build_or_load_consciousness
 
+        self._checkout_branch(repo_path, branch)
         repo_id = compute_repo_id(repo_path, repo_url)
         ai_cfg = config["ai"]
         agent_cfg = config.get("agent", {})
@@ -198,19 +236,37 @@ class AgentService:
         repo_knowledge = load_repo_knowledge(repo_path)
         build_tool = detect_build_tool(repo_path)
 
-        result = generate_plan_with_agent(
-            requirements,
-            repo_path,
-            llm_config=ai_cfg,
-            verbose=ai_cfg.get("verbose", False),
-            consciousness=consciousness,
-            agent_config=agent_config,
-            config=config,
-            repo_url=repo_url,
-            repo_knowledge=repo_knowledge,
-            code_index=code_index,
-            build_tool=build_tool,
-        )
+        from src.agent.activity import set_progress_callback, clear_progress_callback
+
+        def _combined_callback(event):
+            self._append_session_log(session_id, event.get("data", {}))
+            if progress_callback:
+                progress_callback(event)
+
+        set_progress_callback(_combined_callback)
+        try:
+            result = generate_plan_with_agent(
+                requirements,
+                repo_path,
+                llm_config=ai_cfg,
+                verbose=ai_cfg.get("verbose", False),
+                consciousness=consciousness,
+                agent_config=agent_config,
+                config=config,
+                repo_url=repo_url,
+                repo_knowledge=repo_knowledge,
+                code_index=code_index,
+                build_tool=build_tool,
+                conversation_context=conversation_context,
+            )
+        except Exception as exc:
+            clear_progress_callback()
+            if progress_callback:
+                progress_callback({"type": "error", "data": {"message": str(exc)}})
+            self._update_session(session_id, "failed", str(exc))
+            raise
+        finally:
+            clear_progress_callback()
 
         status = "completed" if result.success else "failed"
         self._update_session(
@@ -220,6 +276,9 @@ class AgentService:
             trace_id=result.trace_id,
         )
 
+        if progress_callback:
+            progress_callback({"type": "complete", "data": {"summary": result.summary, "success": result.success}})
+
         return result
 
     def run_ask(
@@ -228,17 +287,16 @@ class AgentService:
         question: str,
         config: dict,
         repo_url: str = "",
+        branch: str = "",
         progress_callback: ProgressCallback = None,
+        conversation_context: Optional[list[dict]] = None,
     ) -> "AskResult":
-        """Run ask mode — answer a question about the codebase.
-
-        Returns:
-            AskResult from the ask agent loop.
-        """
+        """Run ask mode — answer a question about the codebase."""
         from src.agent.analyzer import generate_answer_with_agent
         from src.agent.knowledge import load_repo_knowledge
         from src.consciousness.core import build_or_load_consciousness
 
+        self._checkout_branch(repo_path, branch)
         repo_id = compute_repo_id(repo_path, repo_url)
         ai_cfg = config["ai"]
         agent_cfg = config.get("agent", {})
@@ -264,18 +322,36 @@ class AgentService:
 
         repo_knowledge = load_repo_knowledge(repo_path)
 
-        result = generate_answer_with_agent(
-            question,
-            repo_path,
-            llm_config=ai_cfg,
-            verbose=ai_cfg.get("verbose", False),
-            consciousness=consciousness,
-            agent_config=agent_config,
-            config=config,
-            repo_url=repo_url,
-            repo_knowledge=repo_knowledge,
-            code_index=code_index,
-        )
+        from src.agent.activity import set_progress_callback, clear_progress_callback
+
+        def _combined_callback(event):
+            self._append_session_log(session_id, event.get("data", {}))
+            if progress_callback:
+                progress_callback(event)
+
+        set_progress_callback(_combined_callback)
+        try:
+            result = generate_answer_with_agent(
+                question,
+                repo_path,
+                llm_config=ai_cfg,
+                verbose=ai_cfg.get("verbose", False),
+                consciousness=consciousness,
+                agent_config=agent_config,
+                config=config,
+                repo_url=repo_url,
+                repo_knowledge=repo_knowledge,
+                code_index=code_index,
+                conversation_context=conversation_context,
+            )
+        except Exception as exc:
+            clear_progress_callback()
+            if progress_callback:
+                progress_callback({"type": "error", "data": {"message": str(exc)}})
+            self._update_session(session_id, "failed", str(exc))
+            raise
+        finally:
+            clear_progress_callback()
 
         status = "completed" if result.success else "failed"
         self._update_session(
@@ -284,5 +360,8 @@ class AgentService:
             turns_used=result.turns_used,
             trace_id=result.trace_id,
         )
+
+        if progress_callback:
+            progress_callback({"type": "complete", "data": {"summary": result.answer if result.success else result.summary, "success": result.success}})
 
         return result

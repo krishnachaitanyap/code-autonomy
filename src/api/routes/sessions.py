@@ -88,20 +88,23 @@ async def create_session(body: SessionCreate):
             if body.mode == "agent":
                 agent_service.run_agent(
                     repo_path=repo_path, requirements=body.requirements,
-                    config=config, repo_url=repo_url,
-                    progress_callback=session_manager.get_callback(session_id) if session_manager.has_clients(session_id) else None,
+                    config=config, repo_url=repo_url, branch=body.branch,
+                    progress_callback=session_manager.get_callback(session_id),
+                    conversation_context=body.context or None,
                 )
             elif body.mode == "plan":
                 agent_service.run_plan(
                     repo_path=repo_path, requirements=body.requirements,
-                    config=config, repo_url=repo_url,
-                    progress_callback=session_manager.get_callback(session_id) if session_manager.has_clients(session_id) else None,
+                    config=config, repo_url=repo_url, branch=body.branch,
+                    progress_callback=session_manager.get_callback(session_id),
+                    conversation_context=body.context or None,
                 )
             elif body.mode == "ask":
                 agent_service.run_ask(
                     repo_path=repo_path, question=body.requirements,
-                    config=config, repo_url=repo_url,
-                    progress_callback=session_manager.get_callback(session_id) if session_manager.has_clients(session_id) else None,
+                    config=config, repo_url=repo_url, branch=body.branch,
+                    progress_callback=session_manager.get_callback(session_id),
+                    conversation_context=body.context or None,
                 )
         except Exception as exc:
             agent_service._update_session(session_id, "failed", str(exc))

@@ -46,6 +46,8 @@ export const repos = {
     request<Repo>('/repos', { method: 'POST', body: JSON.stringify(data) }),
   symbols: (id: string, filePath?: string) =>
     request<any[]>(`/repos/${id}/symbols${filePath ? `?file_path=${filePath}` : ''}`),
+  branches: (id: string) =>
+    request<{ branches: string[] }>(`/repos/${id}/branches`),
 };
 
 // ---------------------------------------------------------------------------
@@ -61,6 +63,7 @@ export interface Session {
   result_summary: string;
   turns_used: number;
   trace_id: string | null;
+  log: Record<string, any>[];
   created_at: string;
   completed_at: string;
 }
@@ -75,7 +78,7 @@ export const sessions = {
     return request<{ sessions: Session[]; total: number }>(`/sessions${query}`);
   },
   get: (id: string) => request<Session>(`/sessions/${id}`),
-  create: (data: { repo_id: string; mode: string; requirements: string }) =>
+  create: (data: { repo_id: string; mode: string; requirements: string; branch?: string; context?: Array<{role: string; content: string}> }) =>
     request<Session>('/sessions', { method: 'POST', body: JSON.stringify(data) }),
   cancel: (id: string) =>
     request<{ status: string }>(`/sessions/${id}/cancel`, { method: 'POST' }),
@@ -153,13 +156,53 @@ export const ask = {
 // JIRA
 // ---------------------------------------------------------------------------
 
+export interface JiraRun {
+  id: string;
+  repo_id: string;
+  status: string;
+  agent_id: string | null;
+  jira_project: string;
+  total_stories: number;
+  completed_stories: number;
+  succeeded_stories: number;
+  failed_stories: number;
+  progress_pct: number;
+  result_summary: string;
+  artifacts: Record<string, any>;
+  log: Record<string, any>[];
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
 export const jira = {
+  // Sessions (legacy)
   start: (repoId: string) =>
     request<any>('/jira/sessions', {
       method: 'POST',
       body: JSON.stringify({ repo_id: repoId }),
     }),
   status: (repoId: string) => request<any>(`/jira/sessions/${repoId}`),
+
+  // Runs (tracked JIRA-to-PR runs)
+  listRuns: (params?: { repo_id?: string; status?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.repo_id) qs.set('repo_id', params.repo_id);
+    if (params?.status) qs.set('status', params.status);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const query = qs.toString() ? `?${qs}` : '';
+    return request<{ runs: JiraRun[]; total: number }>(`/jira/runs${query}`);
+  },
+  getRun: (id: string) => request<JiraRun>(`/jira/runs/${id}`),
+  createRun: (data: { repo_id: string; jira_project?: string; branch?: string }) =>
+    request<JiraRun>('/jira/runs', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  cancelRun: (id: string) =>
+    request<{ status: string }>(`/jira/runs/${id}/cancel`, { method: 'POST' }),
+  retryRun: (id: string) =>
+    request<JiraRun>(`/jira/runs/${id}/retry`, { method: 'POST' }),
 };
 
 // ---------------------------------------------------------------------------
@@ -277,6 +320,78 @@ export interface TestingStats {
   avg_coverage: number;
 }
 
+export interface ReferenceLearnResult {
+  steps_learned: number;
+  features_learned: number;
+  maven_deps_found: number;
+  patterns: {
+    step_definitions: Array<{ step_type: string; pattern: string; implementation: string }>;
+    feature_summaries: Array<{ file: string; content: string; scenario_count: number }>;
+    maven_dependencies: Array<{ groupId: string; artifactId: string; version: string; scope: string }>;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Workflows (Goal-Driven Orchestration)
+// ---------------------------------------------------------------------------
+
+export interface WorkflowSubtask {
+  index: number;
+  title: string;
+  description: string;
+  type: string;
+  status: string;
+  checkpoint: boolean;
+  requirements: string;
+  result_summary: string;
+  files_changed: string[];
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  attempts: number;
+  model_used: string;
+  tokens_used: number;
+}
+
+export interface Workflow {
+  id: string;
+  repo_id: string | null;
+  project_id: string | null;
+  goal: string;
+  mode: string;
+  status: string;
+  subtasks: WorkflowSubtask[];
+  current_step: number;
+  progress_pct: number;
+  result_summary: string;
+  artifacts: Record<string, any>;
+  log: Record<string, any>[];
+  token_budget: number;
+  total_tokens_used: number;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export const workflows = {
+  list: (params?: { status?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set('status', params.status);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const query = qs.toString() ? `?${qs}` : '';
+    return request<{ workflows: Workflow[]; total: number }>(`/workflows${query}`);
+  },
+  get: (id: string) => request<Workflow>(`/workflows/${id}`),
+  create: (data: { repo_id?: string; project_id?: string; goal: string; mode?: string; branch?: string; token_budget?: number }) =>
+    request<Workflow>('/workflows', { method: 'POST', body: JSON.stringify(data) }),
+  resume: (id: string) => request<Workflow>(`/workflows/${id}/resume`, { method: 'POST' }),
+  cancel: (id: string) => request<{ status: string }>(`/workflows/${id}/cancel`, { method: 'POST' }),
+};
+
+// ---------------------------------------------------------------------------
+// Testing Platform
+// ---------------------------------------------------------------------------
+
 export const testing = {
   // Projects
   listProjects: (params?: { status?: string; limit?: number }) => {
@@ -295,6 +410,8 @@ export const testing = {
     framework?: string;
     testing_framework?: string;
     branch?: string;
+    reference_repo_url?: string;
+    reference_maven_deps?: string[];
   }) =>
     request<TestProject>('/testing/projects', {
       method: 'POST',
@@ -304,6 +421,15 @@ export const testing = {
     request<TestProject>(`/testing/projects/${id}/discover`, { method: 'POST' }),
   deleteProject: (id: string) =>
     request<void>(`/testing/projects/${id}`, { method: 'DELETE' }),
+  learnReference: (projectId: string, data: {
+    reference_repo_url: string;
+    reference_branch?: string;
+    maven_deps?: string[];
+  }) =>
+    request<ReferenceLearnResult>(`/testing/projects/${projectId}/learn-reference`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 
   // Runs
   listRuns: (params?: { project_id?: string; status?: string; limit?: number }) => {
@@ -320,6 +446,7 @@ export const testing = {
     run_type?: string;
     target_scope?: string;
     strategy?: string;
+    branch?: string;
   }) =>
     request<TestRun>('/testing/runs', {
       method: 'POST',
@@ -335,8 +462,8 @@ export const testing = {
   // Coverage
   listCoverage: (projectId: string) =>
     request<CoverageReport[]>(`/testing/coverage/${projectId}`),
-  analyzeCoverage: (projectId: string) =>
-    request<CoverageReport>(`/testing/coverage/${projectId}/analyze`, { method: 'POST' }),
+  analyzeCoverage: (projectId: string, branch?: string) =>
+    request<CoverageReport>(`/testing/coverage/${projectId}/analyze${branch ? `?branch=${encodeURIComponent(branch)}` : ''}`, { method: 'POST' }),
 
   // Data Injection
   listDataInjection: (projectId: string) =>

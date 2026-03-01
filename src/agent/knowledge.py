@@ -23,6 +23,8 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 _MAX_CHANGE_HISTORY = 20
+_MAX_RUN_OUTCOMES = 50
+_MAX_ERROR_FIX_PATTERNS = 100
 
 # Repo knowledge file conventions
 _REPO_KNOWLEDGE_DIR = ".code-autonomy"
@@ -88,6 +90,9 @@ class KnowledgeEntry:
     file_notes: str = ""
     change_history: list[dict[str, Any]] = field(default_factory=list)
     notes: dict[str, str] = field(default_factory=dict)
+    # --- Feedback loop fields ---
+    run_outcomes: list[dict[str, Any]] = field(default_factory=list)
+    error_fix_patterns: list[dict[str, Any]] = field(default_factory=list)
 
     def to_context_string(self) -> str:
         """Render as context block for the agent's initial prompt."""
@@ -108,10 +113,108 @@ class KnowledgeEntry:
             for ch in self.change_history[-5:]:
                 parts.append(f"- {ch.get('date', '?')}: {ch.get('summary', '?')}")
 
+        # Include learned error→fix patterns (top 5 by success_count)
+        if self.error_fix_patterns:
+            top_patterns = sorted(
+                self.error_fix_patterns, key=lambda p: p.get("success_count", 0), reverse=True
+            )[:5]
+            parts.append("### Learned Error→Fix Patterns")
+            for pat in top_patterns:
+                sig = pat.get("error_signature", "?")
+                fix = pat.get("fix_description", "?")
+                count = pat.get("success_count", 0)
+                parts.append(f"- Error: `{sig}` → Fix: {fix} (worked {count}x)")
+
+        # Include recent run success rate
+        if self.run_outcomes:
+            recent = self.run_outcomes[-10:]
+            successes = sum(1 for r in recent if r.get("success"))
+            parts.append(f"### Run History: {successes}/{len(recent)} recent runs succeeded")
+
         # Only return if there's actual content beyond the header
         if len(parts) <= 1:
             return ""
         return "\n\n".join(parts)
+
+    def record_outcome(
+        self,
+        *,
+        success: bool,
+        summary: str = "",
+        files_changed: Optional[list[str]] = None,
+        tools_used: Optional[dict[str, int]] = None,
+        error_type: str = "",
+        error_signature: str = "",
+        fix_description: str = "",
+    ) -> None:
+        """Record the outcome of an agent run for learning."""
+        outcome = {
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "success": success,
+            "summary": summary[:500],
+            "files_changed": (files_changed or [])[:20],
+            "tools_used": tools_used or {},
+            "error_type": error_type,
+        }
+        self.run_outcomes.append(outcome)
+        if len(self.run_outcomes) > _MAX_RUN_OUTCOMES:
+            self.run_outcomes = self.run_outcomes[-_MAX_RUN_OUTCOMES:]
+
+        # Learn error→fix pattern from successful recovery
+        if success and error_signature and fix_description:
+            self._record_error_fix(error_signature, fix_description)
+
+        self.updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def record_error_fix(
+        self,
+        error_signature: str,
+        fix_description: str,
+    ) -> None:
+        """Record a successful error→fix pattern for future reference."""
+        self._record_error_fix(error_signature, fix_description)
+        self.updated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def _record_error_fix(self, error_signature: str, fix_description: str) -> None:
+        """Internal: upsert an error→fix pattern."""
+        # Normalize signature (first 200 chars, stripped)
+        sig = error_signature.strip()[:200]
+        if not sig:
+            return
+
+        # Check if a similar pattern already exists (exact match on signature)
+        for pat in self.error_fix_patterns:
+            if pat.get("error_signature") == sig:
+                pat["success_count"] = pat.get("success_count", 0) + 1
+                pat["fix_description"] = fix_description  # update with latest fix
+                pat["last_used"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                return
+
+        # New pattern
+        self.error_fix_patterns.append({
+            "error_signature": sig,
+            "fix_description": fix_description[:500],
+            "success_count": 1,
+            "last_used": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        })
+        if len(self.error_fix_patterns) > _MAX_ERROR_FIX_PATTERNS:
+            # Evict lowest success_count patterns
+            self.error_fix_patterns.sort(key=lambda p: p.get("success_count", 0), reverse=True)
+            self.error_fix_patterns = self.error_fix_patterns[:_MAX_ERROR_FIX_PATTERNS]
+
+    def get_fix_suggestions(self, error_text: str) -> list[dict[str, Any]]:
+        """Return error→fix patterns whose signature appears in the error text."""
+        if not self.error_fix_patterns or not error_text:
+            return []
+        suggestions = []
+        error_lower = error_text.lower()
+        for pat in self.error_fix_patterns:
+            sig = pat.get("error_signature", "")
+            if sig and sig.lower() in error_lower:
+                suggestions.append(pat)
+        # Sort by success_count descending
+        suggestions.sort(key=lambda p: p.get("success_count", 0), reverse=True)
+        return suggestions[:5]
 
     def merge_working_memory(
         self,
@@ -156,6 +259,8 @@ class KnowledgeEntry:
             "file_notes": self.file_notes,
             "change_history": self.change_history,
             "notes": self.notes,
+            "run_outcomes": self.run_outcomes,
+            "error_fix_patterns": self.error_fix_patterns,
         }
 
     @classmethod
@@ -169,6 +274,8 @@ class KnowledgeEntry:
             file_notes=data.get("file_notes", ""),
             change_history=data.get("change_history", []),
             notes=data.get("notes", {}),
+            run_outcomes=data.get("run_outcomes", []),
+            error_fix_patterns=data.get("error_fix_patterns", []),
         )
 
 
@@ -347,6 +454,59 @@ def save_knowledge(
         store.save(entry)
     except Exception as exc:
         logger.warning("Could not save knowledge (non-fatal): %s", exc)
+
+
+def save_knowledge_with_outcome(
+    config: Optional[dict],
+    repo_path: str,
+    repo_url: str,
+    working_memory: WorkingMemory,
+    *,
+    success: bool,
+    summary: str = "",
+    files_changed: Optional[list[str]] = None,
+    tools_used: Optional[dict[str, int]] = None,
+    error_type: str = "",
+    error_signature: str = "",
+    fix_description: str = "",
+) -> None:
+    """Save knowledge with outcome data: merges working memory + records run outcome."""
+    try:
+        repo_id = compute_repo_id(repo_path, repo_url)
+        store = get_knowledge_store(config)
+
+        entry = store.load(repo_id) or KnowledgeEntry(repo_id=repo_id, repo_url=repo_url)
+        entry.merge_working_memory(working_memory, summary, files_changed)
+        entry.record_outcome(
+            success=success,
+            summary=summary,
+            files_changed=files_changed,
+            tools_used=tools_used,
+            error_type=error_type,
+            error_signature=error_signature,
+            fix_description=fix_description,
+        )
+        store.save(entry)
+    except Exception as exc:
+        logger.warning("Could not save knowledge with outcome (non-fatal): %s", exc)
+
+
+def get_fix_suggestions(
+    config: Optional[dict],
+    repo_path: str,
+    repo_url: str,
+    error_text: str,
+) -> list[dict[str, Any]]:
+    """Look up known error→fix patterns for the given error text."""
+    try:
+        repo_id = compute_repo_id(repo_path, repo_url)
+        store = get_knowledge_store(config)
+        entry = store.load(repo_id)
+        if entry:
+            return entry.get_fix_suggestions(error_text)
+    except Exception as exc:
+        logger.warning("Could not look up fix suggestions: %s", exc)
+    return []
 
 
 # ===================================================================

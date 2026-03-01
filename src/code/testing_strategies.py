@@ -6,7 +6,7 @@ Provides AI prompts and dependency guidance for BDD, Contract, Integration, Unit
 from typing import Optional
 
 # Supported strategies
-STRATEGIES = ["bdd", "contract", "integration", "unit", "e2e", "soap", "jisi_bdd", "auto"]
+STRATEGIES = ["bdd", "contract", "integration", "unit", "e2e", "soap", "jisi_bdd", "security_bdd", "auto"]
 
 # Strategy metadata: prompt guidance + Maven/Gradle snippets
 STRATEGY_GUIDANCE = {
@@ -392,6 +392,81 @@ specification for fully structured prompt generation.
 testImplementation 'io.cucumber:cucumber-java'
 """,
     },
+    "security_bdd": {
+        "name": "Security BDD Testing",
+        "description": "Security-focused BDD tests targeting OWASP Top 10 vulnerabilities",
+        "prompt": """
+## Testing Strategy: Security BDD Testing
+
+Generate security-focused BDD tests using Cucumber/Gherkin targeting OWASP Top 10 vulnerabilities.
+
+### Focus Areas (OWASP Top 10)
+- **SQL Injection**: parameterized queries, input validation, stored procedures
+- **XSS (Cross-Site Scripting)**: output encoding, CSP headers, DOM-based XSS
+- **Authentication**: session management, password policies, MFA bypass, brute force
+- **Authorization**: role-based access control, privilege escalation, IDOR
+- **CSRF**: token validation, SameSite cookies, referer checking
+- **Security Headers**: HSTS, X-Frame-Options, Content-Security-Policy, X-Content-Type-Options
+- **Input Validation**: boundary testing, special characters, encoding attacks, path traversal
+- **API Security**: rate limiting, authentication, data exposure, mass assignment
+- **Sensitive Data Exposure**: encryption at rest/transit, PII handling, error message leakage
+- **Security Misconfiguration**: default credentials, debug endpoints, directory listing
+
+### Structure
+1. **Feature files** in `src/test/resources/features/security/`:
+   - One feature file per security domain (e.g., `sql_injection.feature`, `authentication.feature`)
+   - Use tags: @Security, @OWASP-{category}, @Priority-{high|medium|low}
+
+2. **Step definitions** in `src/test/java/.../steps/security/`:
+   - Given: set up the security context (authenticated user, specific role, malicious payload)
+   - When: execute the attack vector or security check
+   - Then: verify the security control responds correctly (blocked, sanitized, logged)
+
+3. **Include both**:
+   - **Positive tests**: Security controls work correctly (e.g., valid auth succeeds)
+   - **Negative tests**: Attacks are blocked (e.g., SQL injection returns 400, not data)
+
+4. **REST Assured** for HTTP-level security testing:
+   - given().header("Authorization", token).when().get(endpoint).then().statusCode(200)
+   - Verify response headers, body sanitization, error codes
+""",
+        "maven_deps": """
+<!-- Security BDD: Cucumber -->
+<dependency>
+    <groupId>io.cucumber</groupId>
+    <artifactId>cucumber-java</artifactId>
+    <version>7.18.0</version>
+    <scope>test</scope>
+</dependency>
+<dependency>
+    <groupId>io.cucumber</groupId>
+    <artifactId>cucumber-junit-platform-engine</artifactId>
+    <version>7.18.0</version>
+    <scope>test</scope>
+</dependency>
+<dependency>
+    <groupId>org.junit.platform</groupId>
+    <artifactId>junit-platform-suite</artifactId>
+    <version>1.10.0</version>
+    <scope>test</scope>
+</dependency>
+<!-- Security BDD: REST Assured for API security testing -->
+<dependency>
+    <groupId>io.rest-assured</groupId>
+    <artifactId>rest-assured</artifactId>
+    <version>5.4.0</version>
+    <scope>test</scope>
+</dependency>
+""",
+        "gradle_deps": """
+// Security BDD: Cucumber
+testImplementation 'io.cucumber:cucumber-java:7.18.0'
+testImplementation 'io.cucumber:cucumber-junit-platform-engine:7.18.0'
+testImplementation 'org.junit.platform:junit-platform-suite:1.10.0'
+// Security BDD: REST Assured
+testImplementation 'io.rest-assured:rest-assured:5.4.0'
+""",
+    },
     "auto": {
         "name": "Auto-detect",
         "description": "Infer strategy from requirements and project structure",
@@ -428,6 +503,8 @@ def get_testing_strategy_context(
         req_lower = requirements.lower()
         if any(k in req_lower for k in ["jisi", "jisi_bdd", "commonsteps", "genericsteps", "servicebase"]):
             s = "jisi_bdd"
+        elif any(k in req_lower for k in ["security", "owasp", "penetration", "pentest", "vulnerability", "injection", "xss", "security bdd"]):
+            s = "security_bdd"
         elif any(k in req_lower for k in ["bdd", "cucumber", "gherkin", "given", "when", "then", "feature", "scenario"]):
             s = "bdd"
         elif any(k in req_lower for k in ["contract", "pact", "consumer", "provider", "api contract"]):

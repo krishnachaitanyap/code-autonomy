@@ -34,6 +34,7 @@ class SessionService:
                 "result_summary": session.result_summary,
                 "turns_used": session.turns_used,
                 "trace_id": session.trace_id,
+                "log": session.log or [],
                 "created_at": session.created_at.isoformat() if session.created_at else "",
                 "completed_at": session.completed_at.isoformat() if session.completed_at else "",
             }

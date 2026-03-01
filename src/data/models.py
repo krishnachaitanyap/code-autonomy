@@ -57,6 +57,7 @@ class Repo(Base):
     consciousness = relationship("Consciousness", back_populates="repo", uselist=False, cascade="all, delete-orphan")
     gcc_state = relationship("GCCState", back_populates="repo", uselist=False, cascade="all, delete-orphan")
     jira_sessions = relationship("JiraSession", back_populates="repo", cascade="all, delete-orphan")
+    jira_runs = relationship("JiraRun", back_populates="repo", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Repo id={self.id!r} url={self.url!r}>"
@@ -77,6 +78,7 @@ class Session(Base):
     result_summary = Column(Text, nullable=False, default="")
     turns_used = Column(Integer, nullable=False, default=0)
     trace_id = Column(String(64), nullable=True)
+    log = Column(JSON, nullable=False, default=list)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -232,6 +234,44 @@ class JiraSession(Base):
 
 
 # ---------------------------------------------------------------------------
+# JiraRun — tracked JIRA-to-PR generation run (mirrors TestRun pattern)
+# ---------------------------------------------------------------------------
+
+class JiraRun(Base):
+    __tablename__ = "jira_runs"
+
+    id = Column(String(64), primary_key=True, default=_uuid)
+    repo_id = Column(String(64), ForeignKey("repos.id"), nullable=False, index=True)
+    status = Column(String(32), nullable=False, default="queued")
+    # queued | running | completed | failed | error | cancelled
+    agent_id = Column(String(64), nullable=True)
+
+    # JIRA-specific
+    jira_project = Column(String(64), nullable=False, default="")
+    total_stories = Column(Integer, nullable=False, default=0)
+    completed_stories = Column(Integer, nullable=False, default=0)
+    succeeded_stories = Column(Integer, nullable=False, default=0)
+    failed_stories = Column(Integer, nullable=False, default=0)
+
+    # Shared tracking (same pattern as TestRun)
+    progress_pct = Column(Float, nullable=False, default=0.0)
+    log = Column(JSON, nullable=False, default=list)
+    result_summary = Column(Text, nullable=False, default="")
+    artifacts = Column(JSON, nullable=False, default=dict)
+    config = Column(JSON, nullable=False, default=dict)
+
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    repo = relationship("Repo", back_populates="jira_runs")
+
+    def __repr__(self) -> str:
+        return f"<JiraRun id={self.id!r} status={self.status!r}>"
+
+
+# ---------------------------------------------------------------------------
 # ConfigProfile — named configuration profiles
 # ---------------------------------------------------------------------------
 
@@ -295,6 +335,7 @@ class TestRun(Base):
     agent_id = Column(String(64), nullable=True)  # tracking which agent is working
     target_scope = Column(Text, nullable=False, default="")  # which services/endpoints to test
     strategy = Column(String(64), nullable=False, default="auto")  # auto | bdd | unit | integration | e2e | penetration
+    branch = Column(String(256), nullable=False, default="main")
     total_tests = Column(Integer, nullable=False, default=0)
     passed_tests = Column(Integer, nullable=False, default=0)
     failed_tests = Column(Integer, nullable=False, default=0)
@@ -421,6 +462,37 @@ class CustomStep(Base):
 # ---------------------------------------------------------------------------
 # ChatMessage — conversation history for natural language interaction
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Workflow — goal-driven orchestration (Workflow Mode)
+# ---------------------------------------------------------------------------
+
+class Workflow(Base):
+    __tablename__ = "workflows"
+
+    id = Column(String(64), primary_key=True, default=_uuid)
+    repo_id = Column(String(64), ForeignKey("repos.id"), nullable=True, index=True)
+    project_id = Column(String(64), ForeignKey("test_projects.id"), nullable=True)
+    goal = Column(Text, nullable=False, default="")
+    mode = Column(String(32), nullable=False, default="testing")  # testing | engineering
+    status = Column(String(32), nullable=False, default="planning")
+        # planning | running | paused | completed | failed | cancelled
+    subtasks = Column(JSON, nullable=False, default=list)
+    current_step = Column(Integer, nullable=False, default=0)
+    progress_pct = Column(Float, nullable=False, default=0.0)
+    result_summary = Column(Text, nullable=False, default="")
+    artifacts = Column(JSON, nullable=False, default=dict)
+    log = Column(JSON, nullable=False, default=list)
+    config = Column(JSON, nullable=False, default=dict)
+    token_budget = Column(Integer, nullable=False, default=0)        # 0 = unlimited
+    total_tokens_used = Column(Integer, nullable=False, default=0)   # running total
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<Workflow id={self.id!r} goal={self.goal[:40]!r} status={self.status!r}>"
+
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"

@@ -4,6 +4,7 @@ Shows progress similar to AI agents - spinners, step status, live updates.
 """
 
 import os
+import threading
 from contextlib import contextmanager
 from typing import Generator
 
@@ -24,6 +25,24 @@ except ImportError:
     _USE_RICH = False
 
 console = Console() if _RICH_AVAILABLE else None
+
+# Thread-local progress callback for concurrent session support
+_thread_local = threading.local()
+
+
+def set_progress_callback(callback):
+    """Set progress callback for the current thread."""
+    _thread_local.progress_callback = callback
+
+
+def get_progress_callback():
+    """Get progress callback for the current thread."""
+    return getattr(_thread_local, 'progress_callback', None)
+
+
+def clear_progress_callback():
+    """Clear progress callback for the current thread."""
+    _thread_local.progress_callback = None
 
 
 def _plain_step(step: str, status: str = "running", detail: str = ""):
@@ -237,6 +256,13 @@ def log_agent_tool_start(turn: int, tool_name: str, args: dict) -> None:
     Only emits a message for run_command so the user can see what the agent
     is doing during long builds/tests.
     """
+    # Fire callback for all tool starts
+    cb = get_progress_callback()
+    if cb:
+        arg_hint = _format_tool_arg_hint(tool_name, args)
+        short_detail = arg_hint.strip() if arg_hint else ""
+        cb({"type": "turn", "data": {"turn": turn + 1, "tool": tool_name, "detail": short_detail, "status": "running"}})
+
     if tool_name != "run_command":
         return
     command = args.get("command", "")
@@ -268,6 +294,11 @@ def log_agent_activity(
         console.print(f"  [dim cyan]▸[/] [dim]{msg}[/]")
     else:
         print(f"  ▸ {msg}")
+
+    # Fire progress callback
+    cb = get_progress_callback()
+    if cb:
+        cb({"type": "turn", "data": {"turn": turn + 1, "tool": tool_name, "detail": arg_hint.strip(), "result": result_summary}})
 
 
 def summarize_tool_result(result: str, tool_name: str) -> str:

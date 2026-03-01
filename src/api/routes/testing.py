@@ -18,6 +18,8 @@ from src.api.schemas import (
     CustomStepResponse,
     DataInjectionConfigCreate,
     DataInjectionConfigResponse,
+    ReferenceLearnResponse,
+    ReferenceRepoLearn,
     TestEvidenceResponse,
     TestProjectCreate,
     TestProjectListResponse,
@@ -87,6 +89,28 @@ async def discover_project(project_id: str):
     return _project_to_response(project)
 
 
+@router.post("/projects/{project_id}/learn-reference", response_model=ReferenceLearnResponse)
+async def learn_from_reference(project_id: str, data: ReferenceRepoLearn):
+    """Clone a reference repo and extract BDD patterns, step defs, feature files, and Maven deps."""
+    try:
+        result = _service.learn_from_reference_repo(
+            project_id=project_id,
+            reference_repo_url=data.reference_repo_url,
+            reference_branch=data.reference_branch,
+            maven_deps=data.maven_deps,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Reference repo learning failed: {exc}")
+    if result is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return ReferenceLearnResponse(
+        steps_learned=result["steps_learned"],
+        features_learned=result["features_learned"],
+        maven_deps_found=result["maven_deps_found"],
+        patterns=result["patterns"],
+    )
+
+
 @router.delete("/projects/{project_id}", status_code=204)
 async def delete_project(project_id: str):
     """Remove a testing project."""
@@ -126,6 +150,7 @@ async def create_run(data: TestRunCreate):
         target_scope=data.target_scope,
         strategy=data.strategy,
         config=data.config,
+        branch=data.branch,
     )
 
     # Launch background execution
@@ -263,9 +288,9 @@ async def list_coverage_reports(project_id: str, limit: int = Query(10, ge=1, le
 
 
 @router.post("/coverage/{project_id}/analyze", response_model=CoverageReportResponse)
-async def analyze_coverage(project_id: str):
+async def analyze_coverage(project_id: str, branch: str = ""):
     """Trigger a coverage analysis for a project."""
-    report = _service.analyze_coverage(project_id)
+    report = _service.analyze_coverage(project_id, branch=branch)
     if not report:
         raise HTTPException(status_code=404, detail="Project not found")
     return CoverageReportResponse(

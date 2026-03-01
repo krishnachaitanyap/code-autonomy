@@ -46,7 +46,9 @@ class SessionCreate(BaseModel):
     repo_id: str
     mode: str = "agent"  # agent | plan | ask
     requirements: str = ""
+    branch: str = ""  # empty = use current/default branch
     config_overrides: dict = Field(default_factory=dict)
+    context: list[dict] = Field(default_factory=list)
 
 
 class SessionResponse(BaseModel):
@@ -58,6 +60,7 @@ class SessionResponse(BaseModel):
     result_summary: str = ""
     turns_used: int = 0
     trace_id: Optional[str] = None
+    log: list[dict] = Field(default_factory=list)
     created_at: Optional[str] = None
     completed_at: Optional[str] = None
 
@@ -153,6 +156,37 @@ class JiraSessionResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# JIRA Runs — tracked JIRA-to-PR generation runs
+# ---------------------------------------------------------------------------
+
+class JiraRunCreate(BaseModel):
+    repo_id: str
+    jira_project: str = ""
+
+class JiraRunResponse(BaseModel):
+    id: str
+    repo_id: str
+    status: str = "queued"
+    agent_id: Optional[str] = None
+    jira_project: str = ""
+    total_stories: int = 0
+    completed_stories: int = 0
+    succeeded_stories: int = 0
+    failed_stories: int = 0
+    progress_pct: float = 0.0
+    result_summary: str = ""
+    artifacts: dict = Field(default_factory=dict)
+    log: list[dict] = Field(default_factory=list)
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+class JiraRunListResponse(BaseModel):
+    runs: list[JiraRunResponse]
+    total: int
+
+
+# ---------------------------------------------------------------------------
 # WebSocket messages
 # ---------------------------------------------------------------------------
 
@@ -174,6 +208,8 @@ class TestProjectCreate(BaseModel):
     testing_framework: str = "auto"
     branch: str = "main"
     config: dict = Field(default_factory=dict)
+    reference_repo_url: str = ""
+    reference_maven_deps: list[str] = Field(default_factory=list)
 
 
 class TestProjectResponse(BaseModel):
@@ -199,6 +235,23 @@ class TestProjectListResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Testing Platform — Reference Repo Learning
+# ---------------------------------------------------------------------------
+
+class ReferenceRepoLearn(BaseModel):
+    reference_repo_url: str
+    reference_branch: str = "main"
+    maven_deps: list[str] = Field(default_factory=list)
+
+
+class ReferenceLearnResponse(BaseModel):
+    steps_learned: int = 0
+    features_learned: int = 0
+    maven_deps_found: int = 0
+    patterns: dict = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
 # Testing Platform — TestRun
 # ---------------------------------------------------------------------------
 
@@ -208,6 +261,7 @@ class TestRunCreate(BaseModel):
     target_scope: str = ""
     strategy: str = "auto"
     config: dict = Field(default_factory=dict)
+    branch: str = ""
 
 
 class TestRunResponse(BaseModel):
@@ -347,3 +401,59 @@ class ChatMessageResponse(BaseModel):
 class ChatResponse(BaseModel):
     reply: ChatMessageResponse
     context: dict = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Workflows (Goal-Driven Orchestration)
+# ---------------------------------------------------------------------------
+
+class WorkflowCreate(BaseModel):
+    repo_id: str = ""
+    project_id: str = ""
+    goal: str
+    mode: str = "testing"  # testing | engineering
+    branch: str = ""
+    token_budget: int = 0  # 0 = unlimited
+
+
+class SubtaskSchema(BaseModel):
+    index: int
+    title: str
+    description: str
+    type: str = "agent"
+    status: str = "pending"
+    checkpoint: bool = False
+    requirements: str = ""
+    result_summary: str = ""
+    files_changed: list[str] = Field(default_factory=list)
+    error: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    attempts: int = 1
+    model_used: str = ""
+    tokens_used: int = 0
+
+
+class WorkflowResponse(BaseModel):
+    id: str
+    repo_id: Optional[str] = None
+    project_id: Optional[str] = None
+    goal: str
+    mode: str
+    status: str
+    subtasks: list[SubtaskSchema] = Field(default_factory=list)
+    current_step: int = 0
+    progress_pct: float = 0.0
+    result_summary: str = ""
+    artifacts: dict = Field(default_factory=dict)
+    log: list[dict] = Field(default_factory=list)
+    token_budget: int = 0
+    total_tokens_used: int = 0
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+class WorkflowListResponse(BaseModel):
+    workflows: list[WorkflowResponse]
+    total: int

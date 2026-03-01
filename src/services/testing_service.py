@@ -7,9 +7,11 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
@@ -279,6 +281,7 @@ class TestingService:
         target_scope: str = "",
         strategy: str = "auto",
         config: dict | None = None,
+        branch: str = "",
     ) -> TestRun:
         run = TestRun(
             id=_uuid(),
@@ -288,6 +291,7 @@ class TestingService:
             strategy=strategy,
             status="queued",
             config=config or {},
+            branch=branch or "main",
         )
         with get_session() as db:
             db.add(run)
@@ -421,6 +425,7 @@ class TestingService:
                 target_scope = run.target_scope
                 strategy = run.strategy
                 discovery = project.discovery_result or {}
+                project_config = project.config or {}
 
             # --- B. Resolve repo path ---
             _progress(10, "resolving_repo", "Resolving repository path")
@@ -463,6 +468,7 @@ class TestingService:
                 framework=framework,
                 discovery=discovery,
                 repo_path=repo_path,
+                project_config=project_config,
             )
             _log_event("building_requirements", f"Strategy: {strategy} ({run_type})")
             if target_scope:
@@ -519,6 +525,19 @@ class TestingService:
             )
             _log_event("result", f"{passed} passed, {failed} failed, {skipped} skipped")
 
+            # --- G2. Classify errors ---
+            error_classifications = self._classify_test_errors(stdout, stderr, exit_code)
+            if error_classifications:
+                for ec in error_classifications:
+                    _log_event(
+                        "error_classification",
+                        f"[{ec['type']}/{ec['subtype']}] {ec['message'][:100]}",
+                    )
+                _log_event(
+                    "error_suggestion",
+                    " | ".join(ec["suggestion"] for ec in error_classifications[:3]),
+                )
+
             # --- H. Record evidence ---
             _progress(90, "recording_evidence", "Saving evidence and artifacts")
             _log_event("recording_evidence", f"Saving {len(files_changed)} generated files")
@@ -528,6 +547,7 @@ class TestingService:
                 stderr=stderr,
                 files_changed=files_changed,
                 agent_summary=agent_summary,
+                error_classifications=error_classifications,
             )
 
             # --- I. Finalize ---
@@ -554,6 +574,7 @@ class TestingService:
                     run.artifacts = {
                         "files_generated": files_changed,
                         "exit_code": exit_code,
+                        "error_classifications": error_classifications or [],
                     }
                     db.flush()
                     db.expunge(run)
@@ -638,6 +659,7 @@ class TestingService:
         framework: str,
         discovery: dict,
         repo_path: str,
+        project_config: dict | None = None,
     ) -> str:
         """Build the requirements prompt for the agent to generate tests."""
         from src.code.executor import detect_build_tool
@@ -690,6 +712,37 @@ class TestingService:
                 "\nGenerate minimal smoke tests: verify each endpoint responds "
                 "with a valid status code and basic response structure."
             )
+
+        # Inject reference repository patterns if available
+        ref = (project_config or {}).get("reference_patterns", {})
+        if ref:
+            parts.append(f"\n## Reference Repository Patterns")
+            parts.append(f"Learned from: {ref.get('reference_repo_url', 'N/A')}")
+
+            step_defs = ref.get("step_definitions", [])
+            if step_defs:
+                parts.append("\n### Available Step Definitions (reuse these patterns):")
+                for s in step_defs[:30]:
+                    parts.append(f"- @{s['step_type']}(\"{s['pattern']}\")")
+                    if s.get("implementation"):
+                        parts.append(f"  Implementation: {s['implementation'][:200]}")
+
+            features = ref.get("feature_summaries", [])
+            if features:
+                parts.append("\n### Example Feature Files (follow this structure):")
+                for f in features[:5]:
+                    parts.append(f"\n#### {f['file']}")
+                    parts.append(f"```gherkin\n{f['content'][:1500]}\n```")
+
+            maven_deps = ref.get("maven_dependencies", [])
+            extra = ref.get("extra_maven_deps", [])
+            if maven_deps or extra:
+                parts.append("\n### Required Maven Dependencies (add to pom.xml):")
+                for d in maven_deps:
+                    if d.get("scope") in ("test", "") or "test" in d.get("artifactId", "").lower():
+                        parts.append(d.get("xml", ""))
+                for coord in extra:
+                    parts.append(f"<!-- Additional: {coord} -->")
 
         return "\n".join(parts)
 
@@ -862,6 +915,115 @@ class TestingService:
         # Fallback: couldn't parse
         return 0, 0, 0, 0
 
+    def _classify_test_errors(
+        self, stdout: str, stderr: str, exit_code: int
+    ) -> list[dict]:
+        """Classify test errors into actionable categories.
+
+        Returns a list of dicts, each with:
+          - type: compilation_error | assertion_failure | missing_dependency |
+                  timeout | runtime_exception | build_failure | unknown
+          - subtype: more specific classification
+          - message: the matched error text (first 300 chars)
+          - suggestion: actionable fix suggestion
+        """
+        combined = (stdout + "\n" + stderr).strip()
+        if exit_code == 0 or not combined:
+            return []
+
+        classifications: list[dict] = []
+        seen_types: set[str] = set()
+
+        def _add(error_type: str, subtype: str, match_text: str, suggestion: str) -> None:
+            key = f"{error_type}:{subtype}"
+            if key not in seen_types:
+                seen_types.add(key)
+                classifications.append({
+                    "type": error_type,
+                    "subtype": subtype,
+                    "message": match_text.strip()[:300],
+                    "suggestion": suggestion,
+                })
+
+        # --- Compilation / Syntax errors ---
+        for m in re.finditer(r'(SyntaxError|IndentationError|TabError):\s*(.+)', combined):
+            _add("compilation_error", "python_syntax", m.group(0),
+                 "Fix the Python syntax error — check indentation and brackets.")
+
+        for m in re.finditer(r'error:\s*(cannot find symbol|illegal start|expected\b)', combined, re.I):
+            _add("compilation_error", "java_compile", m.group(0),
+                 "Fix the Java compilation error — check missing imports and type mismatches.")
+
+        if re.search(r'COMPILATION ERROR|BUILD FAILURE.*Compilation failure', combined, re.I):
+            line = next((l for l in combined.splitlines() if 'COMPILATION ERROR' in l or 'Compilation failure' in l), "")
+            _add("compilation_error", "build_compile", line,
+                 "Fix compilation errors before running tests. Check error output for missing imports or type errors.")
+
+        # --- Missing dependencies / imports ---
+        for m in re.finditer(r'(ModuleNotFoundError|ImportError):\s*(.+)', combined):
+            _add("missing_dependency", "python_import", m.group(0),
+                 f"Install the missing Python module or fix the import path.")
+
+        for m in re.finditer(r'(NoClassDefFoundError|ClassNotFoundException):\s*(.+)', combined):
+            _add("missing_dependency", "java_class", m.group(0),
+                 "Add the missing dependency to pom.xml/build.gradle or fix the class reference.")
+
+        if re.search(r'Could not resolve dependencies', combined, re.I):
+            _add("missing_dependency", "build_dependency", "Could not resolve dependencies",
+                 "Check pom.xml or build.gradle for correct dependency coordinates and versions.")
+
+        # --- Assertion failures ---
+        for m in re.finditer(r'(AssertionError|assert\s+.+==.+)', combined):
+            _add("assertion_failure", "python_assert", m.group(0),
+                 "Test assertion failed — check expected vs actual values and fix the logic.")
+
+        for m in re.finditer(r'(org\.junit\..*AssertionError|expected:?\s*<.+>\s*but was:?\s*<.+>)', combined, re.I):
+            _add("assertion_failure", "junit_assert", m.group(0),
+                 "JUnit assertion failed — verify the expected value matches the actual output.")
+
+        for m in re.finditer(r'(AssertionFailedError|org\.opentest4j\.AssertionFailedError)', combined):
+            _add("assertion_failure", "junit5_assert", m.group(0),
+                 "JUnit 5 assertion failed — check the test expectation against actual behavior.")
+
+        # --- Timeout errors ---
+        for m in re.finditer(r'(TimeoutError|timed?\s*out|timeout)', combined, re.I):
+            _add("timeout", "execution_timeout", m.group(0),
+                 "Test execution timed out — check for infinite loops, deadlocks, or increase timeout.")
+
+        # --- Runtime exceptions ---
+        for m in re.finditer(r'(NullPointerException)', combined):
+            _add("runtime_exception", "null_pointer", m.group(0),
+                 "NullPointerException — add null checks or ensure objects are properly initialized.")
+
+        for m in re.finditer(r'(StackOverflowError)', combined):
+            _add("runtime_exception", "stack_overflow", m.group(0),
+                 "StackOverflowError — check for infinite recursion in the code.")
+
+        for m in re.finditer(r'(OutOfMemoryError)', combined):
+            _add("runtime_exception", "out_of_memory", m.group(0),
+                 "OutOfMemoryError — reduce data size or increase memory allocation.")
+
+        for m in re.finditer(r'(RuntimeError|RuntimeException):\s*(.+)', combined):
+            _add("runtime_exception", "generic_runtime", m.group(0),
+                 "Runtime exception — read the stack trace to identify the root cause.")
+
+        # --- Build failures (non-compilation) ---
+        if re.search(r'BUILD FAIL', combined, re.I) and "compilation_error" not in seen_types:
+            line = next((l for l in combined.splitlines() if 'BUILD FAIL' in l), "")
+            _add("build_failure", "maven_gradle", line,
+                 "Build failed — check the full error output for dependency or plugin issues.")
+
+        # --- Fallback: unknown error ---
+        if not classifications and exit_code != 0:
+            # Extract the most informative error line
+            error_lines = [l for l in combined.splitlines()
+                           if any(kw in l.lower() for kw in ("error", "fail", "exception"))]
+            msg = error_lines[0] if error_lines else f"Exit code {exit_code}"
+            _add("unknown", "unclassified", msg,
+                 "Test run failed — review the full output to identify the root cause.")
+
+        return classifications
+
     def _record_evidence(
         self,
         *,
@@ -870,8 +1032,9 @@ class TestingService:
         stderr: str,
         files_changed: list[str],
         agent_summary: str,
+        error_classifications: list[dict] | None = None,
     ) -> None:
-        """Record test evidence: logs, generated files, and summary report."""
+        """Record test evidence: logs, generated files, error analysis, and summary report."""
         with get_session() as db:
             # Test execution log
             if stdout or stderr:
@@ -886,6 +1049,25 @@ class TestingService:
                     evidence_type="log",
                     title="Test Execution Output",
                     content=log_content[:50000],  # Truncate very large output
+                )
+                db.add(evidence)
+
+            # Error classification report
+            if error_classifications:
+                classification_lines = ["## Error Classification Report\n"]
+                for ec in error_classifications:
+                    classification_lines.append(
+                        f"### [{ec['type']}/{ec['subtype']}]\n"
+                        f"**Error:** {ec['message']}\n"
+                        f"**Suggestion:** {ec['suggestion']}\n"
+                    )
+                evidence = TestEvidence(
+                    id=_uuid(),
+                    test_run_id=run_id,
+                    evidence_type="report",
+                    title="Error Classification",
+                    content="\n".join(classification_lines),
+                    extra_data={"classifications": error_classifications},
                 )
                 db.add(evidence)
 
@@ -940,7 +1122,7 @@ class TestingService:
                 .all()
             )
 
-    def analyze_coverage(self, project_id: str) -> Optional[CoverageReport]:
+    def analyze_coverage(self, project_id: str, branch: str = "") -> Optional[CoverageReport]:
         """Run coverage analysis on a project."""
         with get_session() as db:
             project = db.get(TestProject, project_id)
@@ -1205,71 +1387,292 @@ class TestingService:
             if not repo_path or not repo_path.exists():
                 return []
 
+            step_dicts = self._discover_steps_from_path(repo_path)
             discovered_steps = []
-            skip_dirs = {".git", "node_modules", "__pycache__", "target", "build"}
+            for sd in step_dicts:
+                step = CustomStep(
+                    id=_uuid(),
+                    project_id=project_id,
+                    name=f"{sd['step_type']}: {sd['pattern'][:50]}",
+                    step_type=sd["step_type"],
+                    pattern=sd["pattern"],
+                    implementation=sd.get("implementation", ""),
+                    language=sd.get("language", "java"),
+                    tags=["discovered"],
+                    source="discovered",
+                )
+                db.add(step)
+                discovered_steps.append(step)
 
-            # Scan for Cucumber step definition files
-            for java_file in repo_path.rglob("*Steps*.java"):
+            db.flush()
+            for s in discovered_steps:
+                db.expunge(s)
+        return discovered_steps
+
+    # ------------------------------------------------------------------
+    # Reference Repo Learning
+    # ------------------------------------------------------------------
+
+    def _discover_steps_from_path(self, repo_path: Path) -> list[dict]:
+        """Scan a directory for step definition files and extract patterns + implementations."""
+        steps: list[dict] = []
+        skip_dirs = {".git", "node_modules", "__pycache__", "target", "build", ".gradle"}
+
+        # Java: scan *Steps*.java and *StepDefs*.java
+        java_patterns = ["*Steps*.java", "*StepDef*.java", "*steps*.java"]
+        seen_java: set[str] = set()
+        for pat in java_patterns:
+            for java_file in repo_path.rglob(pat):
                 if any(skip in java_file.parts for skip in skip_dirs):
                     continue
+                if str(java_file) in seen_java:
+                    continue
+                seen_java.add(str(java_file))
                 try:
                     content = java_file.read_text(errors="ignore")
-                    import re
                     for match in re.finditer(
                         r'@(Given|When|Then|And)\s*\(\s*["\'](.+?)["\']\s*\)',
                         content,
                     ):
                         step_type = match.group(1).lower()
                         pattern_text = match.group(2)
-                        step = CustomStep(
-                            id=_uuid(),
-                            project_id=project_id,
-                            name=f"{step_type}: {pattern_text[:50]}",
-                            step_type=step_type,
-                            pattern=pattern_text,
-                            implementation="",
-                            language="java",
-                            tags=["discovered"],
-                            source="discovered",
+
+                        # Try to extract method body after the annotation
+                        impl = ""
+                        after = content[match.end():]
+                        method_match = re.search(
+                            r'public\s+\w+\s+\w+\s*\([^)]*\)\s*\{', after[:500]
                         )
-                        db.add(step)
-                        discovered_steps.append(step)
+                        if method_match:
+                            brace_start = after.index("{", method_match.start())
+                            depth = 1
+                            pos = brace_start + 1
+                            while pos < len(after) and depth > 0:
+                                if after[pos] == "{":
+                                    depth += 1
+                                elif after[pos] == "}":
+                                    depth -= 1
+                                pos += 1
+                            if depth == 0:
+                                impl = after[method_match.start():pos].strip()[:500]
+
+                        steps.append({
+                            "step_type": step_type,
+                            "pattern": pattern_text,
+                            "implementation": impl,
+                            "language": "java",
+                            "file": str(java_file.relative_to(repo_path)),
+                        })
                 except Exception:
                     continue
 
-            # Scan for Python step definitions (behave/pytest-bdd)
-            for py_file in repo_path.rglob("*step*.py"):
-                if any(skip in py_file.parts for skip in skip_dirs):
-                    continue
-                try:
-                    content = py_file.read_text(errors="ignore")
-                    import re
-                    for match in re.finditer(
-                        r'@(given|when|then)\s*\(\s*["\'](.+?)["\']\s*\)',
-                        content,
-                    ):
-                        step_type = match.group(1)
-                        pattern_text = match.group(2)
-                        step = CustomStep(
-                            id=_uuid(),
-                            project_id=project_id,
-                            name=f"{step_type}: {pattern_text[:50]}",
-                            step_type=step_type,
-                            pattern=pattern_text,
-                            implementation="",
-                            language="python",
-                            tags=["discovered"],
-                            source="discovered",
-                        )
-                        db.add(step)
-                        discovered_steps.append(step)
-                except Exception:
-                    continue
+        # Python: scan *step*.py
+        for py_file in repo_path.rglob("*step*.py"):
+            if any(skip in py_file.parts for skip in skip_dirs):
+                continue
+            try:
+                content = py_file.read_text(errors="ignore")
+                for match in re.finditer(
+                    r'@(given|when|then)\s*\(\s*["\'](.+?)["\']\s*\)',
+                    content,
+                ):
+                    step_type = match.group(1)
+                    pattern_text = match.group(2)
 
-            db.flush()
-            for s in discovered_steps:
-                db.expunge(s)
-        return discovered_steps
+                    # Try to extract the function body
+                    impl = ""
+                    after = content[match.end():]
+                    func_match = re.search(r'def\s+\w+\s*\([^)]*\)\s*:', after[:300])
+                    if func_match:
+                        # Grab lines until dedent
+                        func_start = func_match.start()
+                        lines = after[func_start:func_start + 500].split("\n")
+                        impl_lines = [lines[0]]
+                        for line in lines[1:]:
+                            if line.strip() == "" or line[0:1] in (" ", "\t"):
+                                impl_lines.append(line)
+                            else:
+                                break
+                        impl = "\n".join(impl_lines)[:500]
+
+                    steps.append({
+                        "step_type": step_type,
+                        "pattern": pattern_text,
+                        "implementation": impl,
+                        "language": "python",
+                        "file": str(py_file.relative_to(repo_path)),
+                    })
+            except Exception:
+                continue
+
+        return steps
+
+    def _scan_feature_files(self, repo_path: Path) -> list[dict]:
+        """Scan for Gherkin .feature files and extract scenarios."""
+        features: list[dict] = []
+        skip_dirs = {".git", "node_modules", "target", "build"}
+
+        for f in repo_path.rglob("*.feature"):
+            if any(skip in f.parts for skip in skip_dirs):
+                continue
+            try:
+                content = f.read_text(errors="ignore")
+                features.append({
+                    "file": str(f.relative_to(repo_path)),
+                    "content": content[:4000],
+                    "scenario_count": content.count("Scenario"),
+                })
+            except Exception:
+                continue
+
+        return features[:20]
+
+    def _scan_maven_dependencies(self, repo_path: Path) -> list[dict]:
+        """Parse pom.xml files for dependencies."""
+        deps: list[dict] = []
+        skip_dirs = {".git", "node_modules", "target", "build"}
+
+        for pom in repo_path.rglob("pom.xml"):
+            if any(skip in pom.parts for skip in skip_dirs):
+                continue
+            try:
+                tree = ET.parse(str(pom))
+                root = tree.getroot()
+                # Handle Maven namespace
+                ns_match = re.match(r'\{(.+?)\}', root.tag)
+                ns = {"m": ns_match.group(1)} if ns_match else {}
+                prefix = "m:" if ns else ""
+
+                for dep in root.findall(f".//{prefix}dependency", ns):
+                    group = dep.findtext(f"{prefix}groupId", "", ns)
+                    artifact = dep.findtext(f"{prefix}artifactId", "", ns)
+                    version = dep.findtext(f"{prefix}version", "", ns)
+                    scope = dep.findtext(f"{prefix}scope", "", ns)
+                    xml_str = ET.tostring(dep, encoding="unicode")
+                    # Clean up namespace prefixes in output
+                    xml_str = re.sub(r'\s*xmlns:\w+="[^"]*"', "", xml_str)
+                    deps.append({
+                        "groupId": group,
+                        "artifactId": artifact,
+                        "version": version,
+                        "scope": scope or "compile",
+                        "xml": xml_str.strip(),
+                    })
+            except Exception:
+                continue
+
+        return deps
+
+    def learn_from_reference_repo(
+        self,
+        project_id: str,
+        reference_repo_url: str,
+        reference_branch: str = "main",
+        maven_deps: list[str] | None = None,
+    ) -> dict | None:
+        """Clone a reference repo, extract BDD patterns, step defs, feature files, and Maven deps.
+
+        Stores learned patterns as CustomStep records (source='reference') and
+        in the project's config['reference_patterns'] for prompt injection.
+        """
+        with get_session() as db:
+            project = db.get(TestProject, project_id)
+            if not project:
+                return None
+            project_name = project.name
+
+        # Clone reference repo into temp dir
+        tmp_dir = tempfile.mkdtemp(prefix="ca-ref-")
+        try:
+            from src.platform.git_ops import clone_repo
+            logger.info("Cloning reference repo %s (branch=%s)", reference_repo_url, reference_branch)
+            clone_repo(reference_repo_url, tmp_dir, branch=reference_branch)
+            ref_path = Path(tmp_dir)
+
+            # Run scanners
+            step_defs = self._discover_steps_from_path(ref_path)
+            features = self._scan_feature_files(ref_path)
+            maven_found = self._scan_maven_dependencies(ref_path)
+
+            # Extract repo name for tagging
+            repo_name = reference_repo_url.rstrip("/").split("/")[-1].replace(".git", "")
+
+            # Store learned steps as CustomStep records
+            with get_session() as db:
+                for sd in step_defs:
+                    step = CustomStep(
+                        id=_uuid(),
+                        project_id=project_id,
+                        name=f"{sd['step_type']}: {sd['pattern'][:50]}",
+                        step_type=sd["step_type"],
+                        pattern=sd["pattern"],
+                        implementation=sd.get("implementation", ""),
+                        language=sd.get("language", "java"),
+                        tags=["reference", repo_name],
+                        source="reference",
+                    )
+                    db.add(step)
+
+                # Store patterns in project config
+                project = db.get(TestProject, project_id)
+                if project:
+                    config = dict(project.config or {})
+                    config["reference_patterns"] = {
+                        "reference_repo_url": reference_repo_url,
+                        "reference_branch": reference_branch,
+                        "step_definitions": [
+                            {
+                                "step_type": s["step_type"],
+                                "pattern": s["pattern"],
+                                "implementation": s.get("implementation", ""),
+                            }
+                            for s in step_defs
+                        ],
+                        "feature_summaries": features,
+                        "maven_dependencies": maven_found,
+                        "extra_maven_deps": maven_deps or [],
+                        "learned_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    project.config = config
+
+                db.flush()
+
+            result = {
+                "steps_learned": len(step_defs),
+                "features_learned": len(features),
+                "maven_deps_found": len(maven_found),
+                "patterns": {
+                    "step_definitions": [
+                        {
+                            "step_type": s["step_type"],
+                            "pattern": s["pattern"],
+                            "implementation": s.get("implementation", "")[:200],
+                        }
+                        for s in step_defs
+                    ],
+                    "feature_summaries": [
+                        {
+                            "file": f["file"],
+                            "content": f["content"][:500],
+                            "scenario_count": f["scenario_count"],
+                        }
+                        for f in features
+                    ],
+                    "maven_dependencies": maven_found,
+                },
+            }
+
+            logger.info(
+                "Reference repo learning complete for project %s: %d steps, %d features, %d deps",
+                project_id, len(step_defs), len(features), len(maven_found),
+            )
+            return result
+
+        except Exception as exc:
+            logger.error("Failed to learn from reference repo %s: %s", reference_repo_url, exc, exc_info=True)
+            raise
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # ------------------------------------------------------------------
     # Chat
