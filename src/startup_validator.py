@@ -106,21 +106,21 @@ def validate_startup(
                 "No model specified. Set model in config.ini [ai] section."
             )
 
-    # 3. repo_url valid (unless --repo-path)
+    # 3. repo_url valid (unless --repo-path) — warning only, repos can be added via UI
     if not using_local_repo:
         repo_url = repo_cfg.get("repo_url", "")
         placeholder = "https://github.com/owner/repo.git"
         if not repo_url or repo_url == placeholder:
-            result.errors.append(
-                "Set repo_url in config.ini to your actual repository URL."
+            result.warnings.append(
+                "No repo_url in config.ini. Set it for CLI mode, or add repos via the web UI."
             )
 
-    # 4. auth_token present (unless dry-run or local)
+    # 4. auth_token present (unless dry-run or local) — warning only
     if not dry_run and not using_local_repo:
         auth_token = creds.get("auth_token", "")
         if not auth_token:
-            result.errors.append(
-                "Set auth_token in config.ini or GITHUB_TOKEN/BITBUCKET_HTTP_ACCESS_TOKEN env var."
+            result.warnings.append(
+                "No auth_token found. Set GITHUB_TOKEN/BITBUCKET_HTTP_ACCESS_TOKEN env var for CLI mode."
             )
 
     # 5. work_dir parent exists and writable
