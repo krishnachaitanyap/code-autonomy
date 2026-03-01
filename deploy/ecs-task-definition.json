@@ -1,0 +1,113 @@
+{
+  "family": "code-autonomy-web",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "2048",
+  "memory": "4096",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/code-autonomy-ecs-execution",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/code-autonomy-ecs-task",
+  "containerDefinitions": [
+    {
+      "name": "code-autonomy-web",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/code-autonomy:latest",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8000,
+          "protocol": "tcp"
+        }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8000/api/health || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 15
+      },
+      "environment": [
+        {
+          "name": "DATABASE_URL",
+          "value": "sqlite:////data/autonomy.db"
+        },
+        {
+          "name": "PYTHONUNBUFFERED",
+          "value": "1"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:code-autonomy/openai-key"
+        },
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:code-autonomy/anthropic-key"
+        },
+        {
+          "name": "GITHUB_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:code-autonomy/github-token"
+        },
+        {
+          "name": "JIRA_USERNAME",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:code-autonomy/jira-username"
+        },
+        {
+          "name": "JIRA_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:code-autonomy/jira-password"
+        },
+        {
+          "name": "BITBUCKET_APP_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:code-autonomy/bitbucket-app-password"
+        },
+        {
+          "name": "CODE_AUTONOMY_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:code-autonomy/api-key"
+        }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "efs-data",
+          "containerPath": "/data",
+          "readOnly": false
+        },
+        {
+          "sourceVolume": "efs-workspace",
+          "containerPath": "/app/workspace",
+          "readOnly": false
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/code-autonomy",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "web"
+        }
+      }
+    }
+  ],
+  "volumes": [
+    {
+      "name": "efs-data",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "EFS_FILESYSTEM_ID",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "EFS_DATA_ACCESS_POINT_ID",
+          "iam": "ENABLED"
+        }
+      }
+    },
+    {
+      "name": "efs-workspace",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "EFS_FILESYSTEM_ID",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "EFS_WORKSPACE_ACCESS_POINT_ID",
+          "iam": "ENABLED"
+        }
+      }
+    }
+  ]
+}

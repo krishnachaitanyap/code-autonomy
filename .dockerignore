@@ -1,0 +1,45 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+*.egg-info
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Workspace (cloned repos — generated at runtime)
+workspace/
+
+# Caches (rebuilt at runtime)
+.consciousness/
+.code-index/
+
+# WebUI (separate build stage)
+webui/node_modules
+webui/.next/cache
+
+# CI / docs
+*.md
+!requirements.txt
+LICENSE
+
+# Local config (secrets — injected at runtime via env/secrets)
+config.ini
+.env
+
+# Claude Code
+.claude/
+
+# Deploy scripts and tests (not needed in image)
+deploy/
+tests/
+*.sh
+benchmark_*.py
