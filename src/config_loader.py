@@ -60,7 +60,10 @@ def load_config(config_path: str = "config.ini") -> dict:
         if platform == "github":
             auth_token = os.environ.get("GITHUB_TOKEN", "")
         elif platform == "bitbucket":
-            auth_token = os.environ.get("BITBUCKET_APP_PASSWORD", "")
+            auth_token = (
+                os.environ.get("BITBUCKET_HTTP_ACCESS_TOKEN", "")
+                or os.environ.get("BITBUCKET_APP_PASSWORD", "")
+            )
 
     api_key = get("ai", "api_key")
     if api_key and api_key.startswith("<") and api_key.endswith(">"):

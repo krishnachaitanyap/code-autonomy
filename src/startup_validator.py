@@ -120,7 +120,7 @@ def validate_startup(
         auth_token = creds.get("auth_token", "")
         if not auth_token:
             result.errors.append(
-                "Set auth_token in config.ini or GITHUB_TOKEN/BITBUCKET_APP_PASSWORD env var."
+                "Set auth_token in config.ini or GITHUB_TOKEN/BITBUCKET_HTTP_ACCESS_TOKEN env var."
             )
 
     # 5. work_dir parent exists and writable

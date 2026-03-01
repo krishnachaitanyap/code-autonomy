@@ -265,7 +265,7 @@ echo "Task role:      $TASK_ROLE_NAME"
 # ---------------------------------------------------------------------------
 echo "--- [6/9] Creating Secrets Manager placeholders ---"
 
-for SECRET_NAME in openai-key anthropic-key github-token jira-username jira-password bitbucket-app-password api-key; do
+for SECRET_NAME in openai-key anthropic-key github-token jira-username jira-password bitbucket-http-access-token api-key; do
     aws secretsmanager describe-secret --secret-id "${APP_NAME}/${SECRET_NAME}" 2>/dev/null || \
         aws secretsmanager create-secret \
             --name "${APP_NAME}/${SECRET_NAME}" \

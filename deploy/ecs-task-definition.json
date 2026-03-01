@@ -56,8 +56,8 @@
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:code-autonomy/jira-password"
         },
         {
-          "name": "BITBUCKET_APP_PASSWORD",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:code-autonomy/bitbucket-app-password"
+          "name": "BITBUCKET_HTTP_ACCESS_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:code-autonomy/bitbucket-http-access-token"
         },
         {
           "name": "CODE_AUTONOMY_API_KEY",

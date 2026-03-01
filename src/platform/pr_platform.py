@@ -62,11 +62,19 @@ class GitHubPR(PRPlatform):
 
 
 class BitbucketPR(PRPlatform):
-    """Bitbucket PR creation via REST API."""
+    """Bitbucket PR creation via REST API.
 
-    def __init__(self, app_password: str, username: Optional[str] = None):
-        self._app_password = app_password
+    Supports two auth modes:
+    - HTTP access token (Bearer auth) — preferred, set via BITBUCKET_HTTP_ACCESS_TOKEN
+    - App password (Basic auth) — legacy, set via BITBUCKET_APP_PASSWORD with username
+    """
+
+    def __init__(self, token: str, username: Optional[str] = None):
+        self._token = token
         self._username = username or "x-token-auth"
+        # HTTP access tokens are typically longer than app passwords
+        # and don't require a username for API calls (use Bearer auth)
+        self._use_bearer = not username or username == "x-token-auth"
 
     def _parse_repo(self, repo_url: str) -> tuple[str, str]:
         # https://bitbucket.org/workspace/repo.git -> workspace, repo
@@ -97,12 +105,22 @@ class BitbucketPR(PRPlatform):
             "destination": {"branch": {"name": target_branch}},
         }
 
-        resp = requests.post(
-            url,
-            json=payload,
-            auth=(self._username, self._app_password),
-            headers={"Content-Type": "application/json"},
-        )
+        if self._use_bearer:
+            resp = requests.post(
+                url,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {self._token}",
+                    "Content-Type": "application/json",
+                },
+            )
+        else:
+            resp = requests.post(
+                url,
+                json=payload,
+                auth=(self._username, self._token),
+                headers={"Content-Type": "application/json"},
+            )
 
         if resp.status_code in (200, 201):
             data = resp.json()

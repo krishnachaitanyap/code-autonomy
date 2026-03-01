@@ -138,7 +138,7 @@ done
 # 7. Secrets Manager
 # ---------------------------------------------------------------------------
 echo "--- [7/10] Deleting secrets ---"
-for SECRET_NAME in openai-key anthropic-key github-token jira-username jira-password bitbucket-app-password api-key; do
+for SECRET_NAME in openai-key anthropic-key github-token jira-username jira-password bitbucket-http-access-token api-key; do
     aws secretsmanager delete-secret \
         --secret-id "${APP_NAME}/${SECRET_NAME}" \
         --force-delete-without-recovery 2>/dev/null || true
