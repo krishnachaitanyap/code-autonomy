@@ -4,7 +4,7 @@ WORKDIR /build
 COPY webui/package.json webui/package-lock.json ./
 RUN npm ci --production=false
 COPY webui/ ./
-ENV NEXT_PUBLIC_API_URL=/api
+ENV NEXT_PUBLIC_API_URL=/api NEXT_BUILD_MODE=export
 RUN npm run build
 
 # Stage 2: Python runtime
