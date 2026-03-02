@@ -2,14 +2,13 @@
 
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { testing, repos, type TestProject, type CoverageReport, type Repo } from '@/lib/api';
+import { testing, repos, type TestProject, type CoverageReport } from '@/lib/api';
 
 export default function CoveragePage() {
   const searchParams = useSearchParams();
   const projectFilter = searchParams.get('project') || '';
 
   const [projects, setProjects] = useState<TestProject[]>([]);
-  const [repoList, setRepoList] = useState<Repo[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState(projectFilter);
   const [reports, setReports] = useState<CoverageReport[]>([]);
   const [loading, setLoading] = useState(true);
@@ -23,18 +22,10 @@ export default function CoveragePage() {
   useEffect(() => {
     async function load() {
       try {
-        const [p, r] = await Promise.all([
-          testing.listProjects({ limit: 100 }),
-          repos.list(),
-        ]);
+        const p = await testing.listProjects({ limit: 100 });
         setProjects(p.projects);
-        setRepoList(Array.isArray(r) ? r : []);
-        if (!selectedProjectId) {
-          if (p.projects.length > 0) {
-            setSelectedProjectId(p.projects[0].id);
-          } else if (Array.isArray(r) && r.length > 0) {
-            setSelectedProjectId(r[0].id);
-          }
+        if (!selectedProjectId && p.projects.length > 0) {
+          setSelectedProjectId(p.projects[0].id);
         }
       } catch (err) {
         console.error('Failed to load projects:', err);
@@ -52,15 +43,8 @@ export default function CoveragePage() {
       setBranch('main');
       return;
     }
-    let repoId = repoList.find((r) => r.id === selectedProjectId)?.id;
-    if (!repoId) {
-      const proj = projects.find((p) => p.id === selectedProjectId);
-      if (proj) {
-        const matchedRepo = repoList.find((r) => r.url === proj.repo_url);
-        repoId = matchedRepo?.id;
-      }
-    }
-    if (!repoId) repoId = selectedProjectId;
+    const proj = projects.find((p) => p.id === selectedProjectId);
+    const repoId = proj?.repo_id || selectedProjectId;
     setBranchList([]);
     setBranch('main');
     setLoadingBranches(true);
@@ -77,7 +61,7 @@ export default function CoveragePage() {
         setBranch('main');
       })
       .finally(() => setLoadingBranches(false));
-  }, [selectedProjectId, repoList, projects]);
+  }, [selectedProjectId, projects]);
 
   useEffect(() => {
     if (selectedProjectId) {
@@ -126,16 +110,6 @@ export default function CoveragePage() {
             {projects.map((p) => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
-            {repoList.length > 0 && projects.length > 0 && (
-              <option disabled>── Repositories ──</option>
-            )}
-            {repoList
-              .filter((r) => !projects.some((p) => p.repo_url === r.url))
-              .map((r) => (
-                <option key={`repo-${r.id}`} value={r.id}>
-                  {r.url || r.local_path || r.id}
-                </option>
-              ))}
           </select>
           <select
             value={branch}
