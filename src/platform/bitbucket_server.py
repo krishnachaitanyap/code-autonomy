@@ -125,6 +125,35 @@ class BitbucketServerClient:
         return resp.status_code in (200, 201)
 
 
+def parse_bitbucket_server_url(repo_url: str) -> tuple[str, str]:
+    """Extract (project_key, repo_slug) from SSH or HTTPS clone URL.
+
+    Supports:
+      SSH:   ssh://git@host:7999/PROJECT/repo.git
+      SSH:   git@host:7999/PROJECT/repo.git
+      HTTPS: https://host/scm/PROJECT/repo.git
+      HTTPS: https://host/projects/PROJECT/repos/repo/browse
+    """
+    # SSH: ssh://git@host:port/PROJECT/repo.git or git@host:PORT/PROJECT/repo.git
+    ssh_match = re.search(r"[:/](\w+)/([\w\-]+?)(?:\.git)?$", repo_url)
+    if ssh_match and ("git@" in repo_url or repo_url.startswith("ssh://")):
+        return ssh_match.group(1), ssh_match.group(2)
+
+    # HTTPS /scm/ pattern: https://host/scm/PROJECT/repo.git
+    scm_match = re.search(r"/scm/(\w+)/([\w\-]+?)(?:\.git)?$", repo_url)
+    if scm_match:
+        return scm_match.group(1), scm_match.group(2)
+
+    # HTTPS /projects/ pattern: https://host/projects/PROJECT/repos/REPO
+    proj_match = re.search(
+        r"/projects/(\w+)/repos/([\w\-]+)", repo_url
+    )
+    if proj_match:
+        return proj_match.group(1), proj_match.group(2)
+
+    raise ValueError(f"Cannot parse Bitbucket Server repo URL: {repo_url}")
+
+
 class BitbucketServerPR(PRPlatform):
     """PRPlatform adapter for Bitbucket Server (wraps BitbucketServerClient)."""
 
@@ -133,32 +162,7 @@ class BitbucketServerPR(PRPlatform):
         self._base_url = base_url
 
     def _parse_repo(self, repo_url: str) -> tuple[str, str]:
-        """Extract (project_key, repo_slug) from SSH or HTTPS clone URL.
-
-        Supports:
-          SSH:   ssh://git@host:7999/PROJECT/repo.git
-          SSH:   git@host:7999/PROJECT/repo.git
-          HTTPS: https://host/scm/PROJECT/repo.git
-          HTTPS: https://host/projects/PROJECT/repos/repo/browse
-        """
-        # SSH: ssh://git@host:port/PROJECT/repo.git or git@host:PORT/PROJECT/repo.git
-        ssh_match = re.search(r"[:/](\w+)/([\w\-]+?)(?:\.git)?$", repo_url)
-        if ssh_match and ("git@" in repo_url or repo_url.startswith("ssh://")):
-            return ssh_match.group(1), ssh_match.group(2)
-
-        # HTTPS /scm/ pattern: https://host/scm/PROJECT/repo.git
-        scm_match = re.search(r"/scm/(\w+)/([\w\-]+?)(?:\.git)?$", repo_url)
-        if scm_match:
-            return scm_match.group(1), scm_match.group(2)
-
-        # HTTPS /projects/ pattern: https://host/projects/PROJECT/repos/REPO
-        proj_match = re.search(
-            r"/projects/(\w+)/repos/([\w\-]+)", repo_url
-        )
-        if proj_match:
-            return proj_match.group(1), proj_match.group(2)
-
-        raise ValueError(f"Cannot parse Bitbucket Server repo URL: {repo_url}")
+        return parse_bitbucket_server_url(repo_url)
 
     def create_pull_request(
         self,
