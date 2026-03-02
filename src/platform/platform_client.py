@@ -170,18 +170,23 @@ class LocalGitClient(PlatformClient):
         return get_default_branch(repo_url)
 
 
+def _is_bitbucket_cloud(repo_url: str) -> bool:
+    """Return True if the URL points to Bitbucket Cloud (bitbucket.org)."""
+    if not repo_url:
+        return False
+    parsed = urlparse(repo_url)
+    hostname = (parsed.hostname or "").lower()
+    return hostname == "bitbucket.org"
+
+
 def _resolve_token(platform: str) -> str:
     """Resolve auth token from environment variables based on platform."""
     if platform == "github":
         return os.environ.get("GITHUB_TOKEN", "")
-    if platform == "bitbucket":
+    if platform in ("bitbucket", "bitbucket_server"):
         return (
             os.environ.get("BITBUCKET_HTTP_ACCESS_TOKEN", "")
             or os.environ.get("BITBUCKET_APP_PASSWORD", "")
-        )
-    if platform == "bitbucket_server":
-        return (
-            os.environ.get("BITBUCKET_HTTP_ACCESS_TOKEN", "")
             or os.environ.get("BITBUCKET_SERVER_TOKEN", "")
         )
     return ""
@@ -200,7 +205,13 @@ def get_platform_client(platform: str, repo_url: str = "") -> PlatformClient:
     """Factory that returns the appropriate PlatformClient for a platform.
 
     Auth tokens are resolved from environment variables automatically.
+    When platform is "bitbucket" but the URL is not bitbucket.org,
+    auto-detects it as a Bitbucket Server instance.
     """
+    # Auto-detect: platform="bitbucket" with non-bitbucket.org URL → server
+    if platform == "bitbucket" and repo_url and not _is_bitbucket_cloud(repo_url):
+        platform = "bitbucket_server"
+
     token = _resolve_token(platform)
 
     if platform == "github":
