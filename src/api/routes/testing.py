@@ -45,10 +45,11 @@ _executor = ThreadPoolExecutor(max_workers=2)
 @router.get("/projects", response_model=TestProjectListResponse)
 async def list_projects(
     status: Optional[str] = Query(None),
+    repo_id: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
 ):
     """List all onboarded testing projects."""
-    projects = _service.list_projects(status=status, limit=limit)
+    projects = _service.list_projects(status=status, repo_id=repo_id, limit=limit)
     return TestProjectListResponse(
         projects=[_project_to_response(p) for p in projects],
         total=len(projects),
@@ -58,16 +59,20 @@ async def list_projects(
 @router.post("/projects", response_model=TestProjectResponse, status_code=201)
 async def create_project(data: TestProjectCreate):
     """Onboard a new repository for testing."""
-    project = _service.create_project(
-        name=data.name,
-        repo_url=data.repo_url,
-        local_path=data.local_path,
-        language=data.language,
-        framework=data.framework,
-        testing_framework=data.testing_framework,
-        branch=data.branch,
-        config=data.config,
-    )
+    try:
+        project = _service.create_project(
+            name=data.name,
+            repo_id=data.repo_id,
+            repo_url=data.repo_url,
+            local_path=data.local_path,
+            language=data.language,
+            framework=data.framework,
+            testing_framework=data.testing_framework,
+            branch=data.branch,
+            config=data.config,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     return _project_to_response(project)
 
 

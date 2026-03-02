@@ -22,6 +22,7 @@ from src.data.models import (
     CoverageReport,
     CustomStep,
     DataInjectionConfig,
+    Repo,
     TestEvidence,
     TestProject,
     TestRun,
@@ -49,6 +50,7 @@ def _fresh_db():
         db.query(DataInjectionConfig).delete()
         db.query(CustomStep).delete()
         db.query(TestProject).delete()
+        db.query(Repo).delete()
 
 
 @pytest.fixture
@@ -558,10 +560,21 @@ class TestStats:
 # ---------------------------------------------------------------------------
 
 class TestDataModels:
+    def _ensure_repo(self, db, repo_id="test-repo-1"):
+        """Create a Repo record if it doesn't exist."""
+        repo = db.get(Repo, repo_id)
+        if not repo:
+            repo = Repo(id=repo_id, url="https://example.com/repo.git", local_path="", platform="github")
+            db.add(repo)
+            db.flush()
+        return repo
+
     def test_test_project_model(self):
         with get_session() as db:
+            self._ensure_repo(db, "test-repo-m1")
             project = TestProject(
                 id="test-model-1",
+                repo_id="test-repo-m1",
                 name="Model Test",
                 repo_url="https://example.com/repo.git",
                 status="pending",
@@ -576,7 +589,8 @@ class TestDataModels:
 
     def test_test_run_model(self):
         with get_session() as db:
-            project = TestProject(id="test-model-2", name="Run Model Test")
+            self._ensure_repo(db, "test-repo-m2")
+            project = TestProject(id="test-model-2", repo_id="test-repo-m2", name="Run Model Test")
             db.add(project)
             db.flush()
 
@@ -595,7 +609,8 @@ class TestDataModels:
 
     def test_test_evidence_model(self):
         with get_session() as db:
-            project = TestProject(id="test-model-3", name="Evidence Model Test")
+            self._ensure_repo(db, "test-repo-m3")
+            project = TestProject(id="test-model-3", repo_id="test-repo-m3", name="Evidence Model Test")
             db.add(project)
             run = TestRun(id="run-model-2", project_id="test-model-3")
             db.add(run)
@@ -617,7 +632,8 @@ class TestDataModels:
 
     def test_cascade_delete(self):
         with get_session() as db:
-            project = TestProject(id="cascade-1", name="Cascade Test")
+            self._ensure_repo(db, "test-repo-cascade")
+            project = TestProject(id="cascade-1", repo_id="test-repo-cascade", name="Cascade Test")
             db.add(project)
             db.flush()
 

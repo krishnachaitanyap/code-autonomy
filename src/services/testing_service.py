@@ -22,6 +22,7 @@ from src.data.models import (
     CoverageReport,
     CustomStep,
     DataInjectionConfig,
+    Repo,
     TestEvidence,
     TestProject,
     TestRun,
@@ -42,12 +43,14 @@ class TestingService:
     # ------------------------------------------------------------------
 
     def list_projects(
-        self, *, status: Optional[str] = None, limit: int = 50
+        self, *, status: Optional[str] = None, repo_id: Optional[str] = None, limit: int = 50
     ) -> list[TestProject]:
         with get_session() as db:
             q = db.query(TestProject)
             if status:
                 q = q.filter(TestProject.status == status)
+            if repo_id:
+                q = q.filter(TestProject.repo_id == repo_id)
             return q.order_by(TestProject.created_at.desc()).limit(limit).all()
 
     def get_project(self, project_id: str) -> Optional[TestProject]:
@@ -58,6 +61,7 @@ class TestingService:
         self,
         *,
         name: str,
+        repo_id: str = "",
         repo_url: str = "",
         local_path: str = "",
         language: str = "auto",
@@ -66,28 +70,51 @@ class TestingService:
         branch: str = "main",
         config: dict | None = None,
     ) -> TestProject:
-        project = TestProject(
-            id=_uuid(),
-            name=name,
-            repo_url=repo_url,
-            local_path=local_path,
-            language=language,
-            framework=framework,
-            testing_framework=testing_framework,
-            branch=branch,
-            status="pending",
-            config=config or {},
-        )
-        # Generate a repo_id from the URL or path
-        source = repo_url or local_path or name
-        project.repo_id = hashlib.sha256(source.encode()).hexdigest()[:16]
+        from src.agent.knowledge import compute_repo_id
+
+        if not repo_id:
+            repo_id = compute_repo_id(local_path, repo_url)
 
         with get_session() as db:
+            repo = db.get(Repo, repo_id)
+            if repo is None:
+                repo = Repo(
+                    id=repo_id,
+                    url=repo_url,
+                    local_path=local_path,
+                    platform=self._detect_platform(repo_url),
+                )
+                db.add(repo)
+                db.flush()
+
+            project = TestProject(
+                id=_uuid(),
+                repo_id=repo.id,
+                name=name,
+                repo_url=repo_url,
+                local_path=local_path,
+                language=language,
+                framework=framework,
+                testing_framework=testing_framework,
+                branch=branch,
+                status="pending",
+                config=config or {},
+            )
             db.add(project)
             db.flush()
-            # Detach before session closes
             db.expunge(project)
         return project
+
+    @staticmethod
+    def _detect_platform(repo_url: str) -> str:
+        """Detect platform from repository URL."""
+        if not repo_url:
+            return "local"
+        if "github.com" in repo_url:
+            return "github"
+        if "bitbucket" in repo_url:
+            return "bitbucket"
+        return "local"
 
     def delete_project(self, project_id: str) -> bool:
         with get_session() as db:
@@ -416,9 +443,11 @@ class TestingService:
                 db.flush()
 
                 # Snapshot values we need outside the session
+                # Resolve repo_url/local_path from parent Repo, falling back to project fields
+                parent_repo = db.get(Repo, project.repo_id) if project.repo_id else None
                 project_id = project.id
-                repo_url = project.repo_url
-                local_path = project.local_path
+                repo_url = (parent_repo.url if parent_repo and parent_repo.url else project.repo_url)
+                local_path = (parent_repo.local_path if parent_repo and parent_repo.local_path else project.local_path)
                 language = project.language
                 framework = project.framework
                 run_type = run.run_type

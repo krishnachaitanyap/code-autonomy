@@ -71,6 +71,55 @@ def init_db(url: str = "") -> None:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE test_runs ADD COLUMN branch VARCHAR(256) DEFAULT 'main'"))
 
+    # Backfill TestProject.repo_id → ensure every project points to a valid Repo
+    _backfill_test_project_repos(engine)
+
+
+def _backfill_test_project_repos(engine) -> None:
+    """Ensure every TestProject has a valid repo_id pointing to an existing Repo."""
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        # Find test_projects with NULL repo_id or repo_id not in repos table
+        rows = conn.execute(text(
+            "SELECT tp.id, tp.repo_id, tp.repo_url, tp.local_path "
+            "FROM test_projects tp "
+            "LEFT JOIN repos r ON tp.repo_id = r.id "
+            "WHERE tp.repo_id IS NULL OR r.id IS NULL"
+        )).fetchall()
+
+        if not rows:
+            return
+
+        from src.agent.knowledge import compute_repo_id
+
+        for row in rows:
+            tp_id, old_repo_id, repo_url, local_path = row
+            new_repo_id = compute_repo_id(local_path or "", repo_url or "")
+
+            # Create Repo record if it doesn't exist
+            existing = conn.execute(
+                text("SELECT id FROM repos WHERE id = :rid"),
+                {"rid": new_repo_id},
+            ).fetchone()
+
+            if not existing:
+                platform = "local"
+                url = repo_url or ""
+                if "github.com" in url:
+                    platform = "github"
+                elif "bitbucket" in url:
+                    platform = "bitbucket"
+                conn.execute(text(
+                    "INSERT INTO repos (id, url, local_path, platform, created_at, updated_at) "
+                    "VALUES (:id, :url, :lp, :platform, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ), {"id": new_repo_id, "url": url, "lp": local_path or "", "platform": platform})
+
+            # Update the test_project to point to the valid repo
+            conn.execute(text(
+                "UPDATE test_projects SET repo_id = :rid WHERE id = :tid"
+            ), {"rid": new_repo_id, "tid": tp_id})
+
 
 @contextmanager
 def get_session(url: str = "") -> Generator[Session, None, None]:

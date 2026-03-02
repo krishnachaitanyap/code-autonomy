@@ -1,13 +1,16 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { testing } from '@/lib/api';
+import { repos, testing, type Repo } from '@/lib/api';
 
 export default function OnboardPage() {
   const router = useRouter();
+  const [existingRepos, setExistingRepos] = useState<Repo[]>([]);
+  const [selectedRepoId, setSelectedRepoId] = useState('');
   const [form, setForm] = useState({
     name: '',
+    repo_id: '',
     repo_url: '',
     local_path: '',
     language: 'auto',
@@ -18,14 +21,35 @@ export default function OnboardPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
+  useEffect(() => {
+    repos.list().then(setExistingRepos).catch(() => {});
+  }, []);
+
+  const handleRepoSelect = (repoId: string) => {
+    setSelectedRepoId(repoId);
+    if (repoId === '' || repoId === '__new__') {
+      setForm({ ...form, repo_id: '', repo_url: '', local_path: '' });
+      return;
+    }
+    const repo = existingRepos.find((r) => r.id === repoId);
+    if (repo) {
+      setForm({
+        ...form,
+        repo_id: repo.id,
+        repo_url: repo.url || '',
+        local_path: repo.local_path || '',
+      });
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.name) {
       setError('Project name is required');
       return;
     }
-    if (!form.repo_url && !form.local_path) {
-      setError('Either repository URL or local path is required');
+    if (!form.repo_id && !form.repo_url && !form.local_path) {
+      setError('Either select an existing repository or provide a URL / local path');
       return;
     }
 
@@ -43,6 +67,8 @@ export default function OnboardPage() {
     }
   };
 
+  const isExistingRepo = selectedRepoId !== '' && selectedRepoId !== '__new__';
+
   return (
     <div className="max-w-2xl mx-auto">
       <h1 className="text-2xl font-bold text-gray-900 mb-6">Onboard Repository</h1>
@@ -53,6 +79,28 @@ export default function OnboardPage() {
             {error}
           </div>
         )}
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Repository
+          </label>
+          <select
+            value={selectedRepoId}
+            onChange={(e) => handleRepoSelect(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          >
+            <option value="">-- Select Repository --</option>
+            {existingRepos.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.url || r.local_path || r.id}
+              </option>
+            ))}
+            <option value="__new__">+ New Repository</option>
+          </select>
+          <p className="text-xs text-gray-400 mt-1">
+            Select an existing repo or add a new one
+          </p>
+        </div>
 
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -67,41 +115,45 @@ export default function OnboardPage() {
           />
         </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Repository URL
-          </label>
-          <input
-            type="text"
-            value={form.repo_url}
-            onChange={(e) => setForm({ ...form, repo_url: e.target.value })}
-            placeholder="https://github.com/org/repo.git"
-            className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-          <p className="text-xs text-gray-400 mt-1">GitHub, Bitbucket, or any Git URL</p>
-        </div>
+        {!isExistingRepo && (
+          <>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Repository URL
+              </label>
+              <input
+                type="text"
+                value={form.repo_url}
+                onChange={(e) => setForm({ ...form, repo_url: e.target.value })}
+                placeholder="https://github.com/org/repo.git"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+              <p className="text-xs text-gray-400 mt-1">GitHub, Bitbucket, or any Git URL</p>
+            </div>
 
-        <div className="relative">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-gray-200" />
-          </div>
-          <div className="relative flex justify-center text-xs uppercase">
-            <span className="bg-white px-2 text-gray-500">or</span>
-          </div>
-        </div>
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-gray-200" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-white px-2 text-gray-500">or</span>
+              </div>
+            </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Local Path
-          </label>
-          <input
-            type="text"
-            value={form.local_path}
-            onChange={(e) => setForm({ ...form, local_path: e.target.value })}
-            placeholder="/path/to/project"
-            className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-        </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Local Path
+              </label>
+              <input
+                type="text"
+                value={form.local_path}
+                onChange={(e) => setForm({ ...form, local_path: e.target.value })}
+                placeholder="/path/to/project"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+          </>
+        )}
 
         <div className="grid grid-cols-2 gap-4">
           <div>

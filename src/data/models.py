@@ -58,6 +58,7 @@ class Repo(Base):
     gcc_state = relationship("GCCState", back_populates="repo", uselist=False, cascade="all, delete-orphan")
     jira_sessions = relationship("JiraSession", back_populates="repo", cascade="all, delete-orphan")
     jira_runs = relationship("JiraRun", back_populates="repo", cascade="all, delete-orphan")
+    test_projects = relationship("TestProject", back_populates="repo", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Repo id={self.id!r} url={self.url!r}>"
@@ -297,7 +298,7 @@ class TestProject(Base):
     __tablename__ = "test_projects"
 
     id = Column(String(64), primary_key=True, default=_uuid)
-    repo_id = Column(String(64), ForeignKey("repos.id"), nullable=True, index=True)
+    repo_id = Column(String(64), ForeignKey("repos.id"), nullable=False, index=True)
     name = Column(String(256), nullable=False)
     repo_url = Column(String(1024), nullable=False, default="")
     local_path = Column(String(1024), nullable=False, default="")
@@ -312,6 +313,7 @@ class TestProject(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
 
     # Relationships
+    repo = relationship("Repo", back_populates="test_projects")
     test_runs = relationship("TestRun", back_populates="project", cascade="all, delete-orphan")
     coverage_reports = relationship("CoverageReport", back_populates="project", cascade="all, delete-orphan")
     data_injection_configs = relationship("DataInjectionConfig", back_populates="project", cascade="all, delete-orphan")

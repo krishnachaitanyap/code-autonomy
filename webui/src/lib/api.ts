@@ -211,7 +211,7 @@ export const jira = {
 
 export interface TestProject {
   id: string;
-  repo_id: string | null;
+  repo_id: string;
   name: string;
   repo_url: string;
   local_path: string;
@@ -394,9 +394,10 @@ export const workflows = {
 
 export const testing = {
   // Projects
-  listProjects: (params?: { status?: string; limit?: number }) => {
+  listProjects: (params?: { status?: string; repo_id?: string; limit?: number }) => {
     const qs = new URLSearchParams();
     if (params?.status) qs.set('status', params.status);
+    if (params?.repo_id) qs.set('repo_id', params.repo_id);
     if (params?.limit) qs.set('limit', String(params.limit));
     const query = qs.toString() ? `?${qs}` : '';
     return request<{ projects: TestProject[]; total: number }>(`/testing/projects${query}`);
@@ -404,6 +405,7 @@ export const testing = {
   getProject: (id: string) => request<TestProject>(`/testing/projects/${id}`),
   createProject: (data: {
     name: string;
+    repo_id?: string;
     repo_url?: string;
     local_path?: string;
     language?: string;

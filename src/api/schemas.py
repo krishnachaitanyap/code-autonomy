@@ -201,6 +201,7 @@ class WSMessage(BaseModel):
 
 class TestProjectCreate(BaseModel):
     name: str
+    repo_id: str = ""
     repo_url: str = ""
     local_path: str = ""
     language: str = "auto"
@@ -214,7 +215,7 @@ class TestProjectCreate(BaseModel):
 
 class TestProjectResponse(BaseModel):
     id: str
-    repo_id: Optional[str] = None
+    repo_id: str
     name: str
     repo_url: str = ""
     local_path: str = ""
