@@ -106,25 +106,54 @@ class BitbucketCloudClient(PlatformClient):
 
 
 class BitbucketServerAdapter(PlatformClient):
-    """Wraps the existing BitbucketServerClient for branch operations."""
+    """Bitbucket Server branch operations via REST API 1.0.
+
+    Uses plain requests.get with Bearer auth, matching the proven pattern
+    for Bitbucket Server / Data Center instances.
+    """
 
     def __init__(self, token: str, base_url: str):
-        from src.platform.bitbucket_server import BitbucketServerClient
-
-        self._client = BitbucketServerClient(base_url, token)
+        self._token = token
+        self._base_url = base_url
 
     def list_branches(self, repo_url: str) -> list[str]:
         from src.platform.bitbucket_server import parse_bitbucket_server_url
 
         project_key, repo_slug = parse_bitbucket_server_url(repo_url)
-        branch_dicts = self._client.get_branches(project_key, repo_slug)
-        return sorted(b["displayId"] for b in branch_dicts)
+        api_url = (
+            f"{self._base_url}/rest/api/1.0/projects/{project_key}"
+            f"/repos/{repo_slug}/branches"
+        )
+        headers = {"Authorization": f"Bearer {self._token}"}
+        logger.debug("Fetching branches from: %s", api_url)
+        try:
+            response = requests.get(api_url, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            logger.debug("API response: %s", data)
+            branches = [branch["displayId"] for branch in data.get("values", [])]
+            logger.debug("Fetched branches: %s", branches)
+            return branches
+        except requests.exceptions.RequestException as e:
+            logger.error("Failed to fetch branches: %s", e)
+            return []
 
     def get_default_branch(self, repo_url: str) -> str:
         from src.platform.bitbucket_server import parse_bitbucket_server_url
 
         project_key, repo_slug = parse_bitbucket_server_url(repo_url)
-        return self._client.get_default_branch(project_key, repo_slug)
+        api_url = (
+            f"{self._base_url}/rest/api/1.0/projects/{project_key}"
+            f"/repos/{repo_slug}/default-branch"
+        )
+        headers = {"Authorization": f"Bearer {self._token}"}
+        try:
+            response = requests.get(api_url, headers=headers)
+            if response.status_code == 200:
+                return response.json().get("displayId", "main")
+        except requests.exceptions.RequestException as e:
+            logger.error("Failed to fetch default branch: %s", e)
+        return "main"
 
 
 class LocalGitClient(PlatformClient):
