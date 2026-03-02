@@ -54,9 +54,18 @@ async def get_repo(repo_id: str):
 @router.get("/{repo_id}/branches")
 async def list_repo_branches(repo_id: str):
     """List available branches for a repository."""
+    import os
     repo = repo_service.get_repo(repo_id)
     if repo is None:
         raise HTTPException(status_code=404, detail="Repository not found")
+
+    # Resolve auth token for remote git operations
+    auth_token = (
+        os.environ.get("BITBUCKET_HTTP_ACCESS_TOKEN", "")
+        or os.environ.get("BITBUCKET_APP_PASSWORD", "")
+        or os.environ.get("BITBUCKET_SERVER_TOKEN", "")
+        or os.environ.get("GITHUB_TOKEN", "")
+    )
 
     try:
         from src.platform.git_ops import list_branches, list_remote_branches
@@ -84,7 +93,7 @@ async def list_repo_branches(repo_id: str):
 
             if _norm(local_remote) != _norm(repo.url):
                 # Local path doesn't match repo URL — use remote listing
-                branches = list_remote_branches(repo.url)
+                branches = list_remote_branches(repo.url, auth_token=auth_token or None)
                 if branches:
                     return {"branches": branches}
 
@@ -92,7 +101,7 @@ async def list_repo_branches(repo_id: str):
         if repo.local_path:
             branches = list_branches(repo.local_path)
         elif repo.url:
-            branches = list_remote_branches(repo.url)
+            branches = list_remote_branches(repo.url, auth_token=auth_token or None)
         else:
             raise HTTPException(status_code=400, detail="Repository has no local path or URL")
 
