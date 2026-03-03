@@ -102,10 +102,27 @@ async def create_session(body: SessionCreate):
                     "Session %s: repo_path missing/invalid (%r), auto-cloning...",
                     session_id, repo_path,
                 )
+                if progress_callback:
+                    progress_callback({
+                        "type": "turn",
+                        "data": {
+                            "turn": 0, "tool": "clone",
+                            "detail": f"Cloning repository ({body.branch or 'main'})...",
+                        },
+                    })
                 resolved_path = repo_service.ensure_local_clone(
                     body.repo_id, branch=body.branch or "main", config=config,
                 )
                 logger.info("Session %s: clone resolved to %s", session_id, resolved_path)
+                if progress_callback:
+                    progress_callback({
+                        "type": "turn",
+                        "data": {
+                            "turn": 0, "tool": "clone",
+                            "detail": "Clone complete",
+                            "result": resolved_path,
+                        },
+                    })
 
             if body.mode == "agent":
                 agent_service.run_agent(
