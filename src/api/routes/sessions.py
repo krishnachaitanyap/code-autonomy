@@ -1,6 +1,7 @@
 """API routes for session management including WebSocket streaming."""
 
 import asyncio
+import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -9,11 +10,13 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from src.api.schemas import SessionCreate, SessionListResponse, SessionResponse
 from src.api.websocket import session_manager
 from src.services.agent_service import AgentService
+from src.services.repo_service import RepoService
 from src.services.session_service import SessionService
 
 router = APIRouter(tags=["sessions"])
 session_service = SessionService()
 agent_service = AgentService()
+repo_service = RepoService()
 
 # Thread pool for running synchronous agent code
 _executor = ThreadPoolExecutor(max_workers=4)
@@ -89,23 +92,30 @@ async def create_session(body: SessionCreate):
     # Run agent in background thread
     def _run():
         try:
+            # Auto-clone if local_path is missing or doesn't exist
+            resolved_path = repo_path
+            if not repo_path or not os.path.isdir(repo_path):
+                resolved_path = repo_service.ensure_local_clone(
+                    body.repo_id, branch=body.branch or "main", config=config,
+                )
+
             if body.mode == "agent":
                 agent_service.run_agent(
-                    repo_path=repo_path, requirements=body.requirements,
+                    repo_path=resolved_path, requirements=body.requirements,
                     config=config, repo_url=repo_url, branch=body.branch,
                     progress_callback=progress_callback,
                     conversation_context=body.context or None,
                 )
             elif body.mode == "plan":
                 agent_service.run_plan(
-                    repo_path=repo_path, requirements=body.requirements,
+                    repo_path=resolved_path, requirements=body.requirements,
                     config=config, repo_url=repo_url, branch=body.branch,
                     progress_callback=progress_callback,
                     conversation_context=body.context or None,
                 )
             elif body.mode == "ask":
                 agent_service.run_ask(
-                    repo_path=repo_path, question=body.requirements,
+                    repo_path=resolved_path, question=body.requirements,
                     config=config, repo_url=repo_url, branch=body.branch,
                     progress_callback=progress_callback,
                     conversation_context=body.context or None,

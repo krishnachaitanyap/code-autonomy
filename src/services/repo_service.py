@@ -5,6 +5,7 @@ Wraps existing git operations, consciousness building, and code index building.
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -64,6 +65,74 @@ class RepoService:
                 return RepoRepository(db).list_all()
         except Exception:
             return []
+
+    def ensure_local_clone(
+        self,
+        repo_id: str,
+        branch: str = "main",
+        config: dict | None = None,
+    ) -> str:
+        """Ensure the repo has a local clone. Clone if needed. Returns local path.
+
+        Raises:
+            ValueError: If the repo has no URL and no valid local_path.
+        """
+        from src.data.database import get_session, init_db
+        from src.data.repositories import RepoRepository
+        from src.platform.git_ops import clone_repo
+        from src.platform.platform_client import _resolve_token
+
+        init_db()
+
+        with get_session() as db:
+            repo = RepoRepository(db).get_by_id(repo_id)
+            if repo is None:
+                raise ValueError(f"Repository not found: {repo_id}")
+
+            # Already has a valid local path
+            if repo.local_path and os.path.isdir(repo.local_path):
+                return repo.local_path
+
+            # Need a URL to clone from
+            if not repo.url:
+                raise ValueError(
+                    f"Repository {repo_id} has no local_path and no URL to clone from."
+                )
+
+            # Determine clone target directory
+            work_dir = (config or {}).get("workflow", {}).get("work_dir", "./workspace")
+            clone_target = str(Path(work_dir) / "repos" / repo_id)
+
+            # If the clone target already exists (previous clone), reuse it
+            if os.path.isdir(clone_target) and os.path.isdir(
+                os.path.join(clone_target, ".git")
+            ):
+                logger.info("Reusing existing clone at %s", clone_target)
+                RepoRepository(db).update(repo_id, local_path=clone_target)
+                return clone_target
+
+            # Resolve auth token for the platform
+            token = _resolve_token(repo.platform)
+
+            logger.info(
+                "Auto-cloning %s (branch=%s) into %s", repo.url, branch, clone_target,
+            )
+            try:
+                clone_repo(
+                    repo_url=repo.url,
+                    target_dir=clone_target,
+                    branch=branch,
+                    auth_token=token or None,
+                )
+            except Exception as exc:
+                raise ValueError(
+                    f"Failed to clone {repo.url}: {exc}"
+                ) from exc
+
+            # Persist the local_path so future requests skip cloning
+            RepoRepository(db).update(repo_id, local_path=clone_target)
+            logger.info("Clone complete. Updated repo %s local_path=%s", repo_id, clone_target)
+            return clone_target
 
     def build_consciousness(
         self,
