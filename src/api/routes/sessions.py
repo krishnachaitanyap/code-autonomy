@@ -1,6 +1,7 @@
 """API routes for session management including WebSocket streaming."""
 
 import asyncio
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -12,6 +13,8 @@ from src.api.websocket import session_manager
 from src.services.agent_service import AgentService
 from src.services.repo_service import RepoService
 from src.services.session_service import SessionService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sessions"])
 session_service = SessionService()
@@ -95,9 +98,14 @@ async def create_session(body: SessionCreate):
             # Auto-clone if local_path is missing or doesn't exist
             resolved_path = repo_path
             if not repo_path or not os.path.isdir(repo_path):
+                logger.info(
+                    "Session %s: repo_path missing/invalid (%r), auto-cloning...",
+                    session_id, repo_path,
+                )
                 resolved_path = repo_service.ensure_local_clone(
                     body.repo_id, branch=body.branch or "main", config=config,
                 )
+                logger.info("Session %s: clone resolved to %s", session_id, resolved_path)
 
             if body.mode == "agent":
                 agent_service.run_agent(
@@ -121,7 +129,14 @@ async def create_session(body: SessionCreate):
                     conversation_context=body.context or None,
                 )
         except Exception as exc:
+            logger.exception("Session %s failed: %s", session_id, exc)
             agent_service._update_session(session_id, "failed", str(exc))
+            # Notify frontend via WebSocket so it doesn't stay stuck on "running"
+            if progress_callback:
+                progress_callback({
+                    "type": "error",
+                    "data": {"message": str(exc)},
+                })
 
     loop = asyncio.get_running_loop()
     loop.run_in_executor(_executor, _run)
