@@ -6,6 +6,8 @@ Wraps existing git operations, consciousness building, and code index building.
 
 import logging
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -124,15 +126,65 @@ class RepoService:
                     branch=branch,
                     auth_token=token or None,
                 )
-            except Exception as exc:
-                raise ValueError(
-                    f"Failed to clone {repo.url}: {exc}"
-                ) from exc
+            except Exception as primary_exc:
+                logger.warning(
+                    "Primary clone failed (%s), trying plain clone fallback...",
+                    primary_exc,
+                )
+                # Clean up partial clone from the failed attempt
+                if os.path.isdir(clone_target):
+                    shutil.rmtree(clone_target, ignore_errors=True)
+                try:
+                    self._clone_and_checkout_fallback(
+                        repo.url, clone_target, branch,
+                    )
+                except Exception as fallback_exc:
+                    if os.path.isdir(clone_target):
+                        shutil.rmtree(clone_target, ignore_errors=True)
+                    raise ValueError(
+                        f"Failed to clone {repo.url}: "
+                        f"primary: {primary_exc}; fallback: {fallback_exc}"
+                    ) from fallback_exc
 
             # Persist the local_path so future requests skip cloning
             RepoRepository(db).update(repo_id, local_path=clone_target)
             logger.info("Clone complete. Updated repo %s local_path=%s", repo_id, clone_target)
             return clone_target
+
+    @staticmethod
+    def _clone_and_checkout_fallback(
+        repo_url: str, target_dir: str, branch: str,
+    ) -> None:
+        """Plain git clone + checkout fallback (uses system git credentials).
+
+        This mirrors the original POC approach: full clone without auth headers,
+        relying on git credential helpers / .gitconfig for authentication.
+        """
+        Path(target_dir).parent.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Fallback: plain git clone %s -> %s", repo_url, target_dir)
+        subprocess.check_call(
+            ["git", "clone", repo_url, target_dir],
+            timeout=600,
+        )
+
+        # Checkout the requested branch
+        try:
+            subprocess.check_call(
+                ["git", "checkout", branch],
+                cwd=target_dir, timeout=60,
+            )
+        except subprocess.CalledProcessError:
+            logger.info("Fallback: branch %s not local, fetching...", branch)
+            subprocess.check_call(
+                ["git", "fetch"],
+                cwd=target_dir, timeout=300,
+            )
+            subprocess.check_call(
+                ["git", "checkout", "-b", branch, f"origin/{branch}"],
+                cwd=target_dir, timeout=60,
+            )
+        logger.info("Fallback clone + checkout complete: %s @ %s", target_dir, branch)
 
     def build_consciousness(
         self,
