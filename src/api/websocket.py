@@ -66,7 +66,7 @@ class SessionManager:
 
         This is used to bridge the synchronous agent execution with async WebSocket.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def callback(event: dict) -> None:
             if self.has_clients(session_id):

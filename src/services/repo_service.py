@@ -42,7 +42,7 @@ class RepoService:
             return RepoRepository(db).get_or_create(
                 repo_id=repo_id,
                 url=repo_url,
-                local_path=str(Path(repo_path).resolve()),
+                local_path=str(Path(repo_path).resolve()) if repo_path else "",
                 platform=platform,
             )
 

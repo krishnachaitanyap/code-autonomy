@@ -82,6 +82,10 @@ async def create_session(body: SessionCreate):
     if session_id is None:
         raise HTTPException(status_code=500, detail="Could not create session")
 
+    # Capture progress callback on the event-loop thread (get_callback needs
+    # the running loop to schedule coroutines back via run_coroutine_threadsafe).
+    progress_callback = session_manager.get_callback(session_id)
+
     # Run agent in background thread
     def _run():
         try:
@@ -89,27 +93,27 @@ async def create_session(body: SessionCreate):
                 agent_service.run_agent(
                     repo_path=repo_path, requirements=body.requirements,
                     config=config, repo_url=repo_url, branch=body.branch,
-                    progress_callback=session_manager.get_callback(session_id),
+                    progress_callback=progress_callback,
                     conversation_context=body.context or None,
                 )
             elif body.mode == "plan":
                 agent_service.run_plan(
                     repo_path=repo_path, requirements=body.requirements,
                     config=config, repo_url=repo_url, branch=body.branch,
-                    progress_callback=session_manager.get_callback(session_id),
+                    progress_callback=progress_callback,
                     conversation_context=body.context or None,
                 )
             elif body.mode == "ask":
                 agent_service.run_ask(
                     repo_path=repo_path, question=body.requirements,
                     config=config, repo_url=repo_url, branch=body.branch,
-                    progress_callback=session_manager.get_callback(session_id),
+                    progress_callback=progress_callback,
                     conversation_context=body.context or None,
                 )
         except Exception as exc:
             agent_service._update_session(session_id, "failed", str(exc))
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     loop.run_in_executor(_executor, _run)
 
     return SessionResponse(
