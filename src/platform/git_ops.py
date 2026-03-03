@@ -67,9 +67,19 @@ def clone_repo(
     logger.info("Cloning %s (branch=%s)", repo_url, branch)
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if result.returncode != 0:
-        raise RuntimeError(
-            f"git clone failed (exit {result.returncode}): {result.stderr.strip()}"
-        )
+        # "Clone succeeded, but checkout failed" (exit 128) is OK on Windows
+        # when some files have paths exceeding 260 chars.  The .git/ data is
+        # complete; only a few working-tree files are missing.
+        git_dir = target / ".git"
+        if git_dir.is_dir():
+            logger.warning(
+                "Clone partial (exit %d): some long-path files missing from "
+                "working tree. Continuing with available files.", result.returncode,
+            )
+        else:
+            raise RuntimeError(
+                f"git clone failed (exit {result.returncode}): {result.stderr.strip()}"
+            )
     return str(target)
 
 

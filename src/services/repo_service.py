@@ -163,26 +163,44 @@ class RepoService:
         Path(target_dir).parent.mkdir(parents=True, exist_ok=True)
 
         logger.info("Fallback: plain git clone %s -> %s", repo_url, target_dir)
-        subprocess.check_call(
+        result = subprocess.run(
             ["git", "-c", "core.longpaths=true", "clone", repo_url, target_dir],
-            timeout=600,
+            capture_output=True, text=True, timeout=600,
         )
+
+        # "Clone succeeded, but checkout failed" (exit 128) is OK —
+        # the .git/ data is complete, only some long-path files are missing
+        # from the working tree (e.g. deployment artifacts).
+        git_dir = os.path.join(target_dir, ".git")
+        if result.returncode != 0 and not os.path.isdir(git_dir):
+            raise subprocess.CalledProcessError(
+                result.returncode, result.args,
+                output=result.stdout, stderr=result.stderr,
+            )
+        if result.returncode != 0:
+            logger.warning(
+                "Clone partial (exit %d): some files could not be checked out "
+                "(long paths). Continuing with available files.",
+                result.returncode,
+            )
 
         # Force-checkout the requested branch (safe — this is a fresh clone)
         try:
-            subprocess.check_call(
+            subprocess.run(
                 ["git", "checkout", "-f", branch],
                 cwd=target_dir, timeout=60,
+                capture_output=True, check=False,
             )
         except subprocess.CalledProcessError:
             logger.info("Fallback: branch %s not local, fetching...", branch)
-            subprocess.check_call(
-                ["git", "fetch"],
-                cwd=target_dir, timeout=300,
+            subprocess.run(
+                ["git", "fetch"], cwd=target_dir, timeout=300,
+                capture_output=True, check=False,
             )
-            subprocess.check_call(
+            subprocess.run(
                 ["git", "checkout", "-f", "-b", branch, f"origin/{branch}"],
                 cwd=target_dir, timeout=60,
+                capture_output=True, check=False,
             )
         logger.info("Fallback clone + checkout complete: %s @ %s", target_dir, branch)
 
