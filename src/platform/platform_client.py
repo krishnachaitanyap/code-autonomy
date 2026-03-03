@@ -179,17 +179,28 @@ def _is_bitbucket_cloud(repo_url: str) -> bool:
     return hostname == "bitbucket.org"
 
 
-def _resolve_token(platform: str) -> str:
-    """Resolve auth token from environment variables based on platform."""
+def _resolve_token(platform: str, config: dict | None = None) -> str:
+    """Resolve auth token from environment variables, with config.ini fallback.
+
+    Resolution order:
+      1. Platform-specific env vars (GITHUB_TOKEN, BITBUCKET_HTTP_ACCESS_TOKEN, etc.)
+      2. config["github_config"]["auth_token"] from config.ini (shared across platforms)
+    """
+    token = ""
     if platform == "github":
-        return os.environ.get("GITHUB_TOKEN", "")
-    if platform in ("bitbucket", "bitbucket_server"):
-        return (
+        token = os.environ.get("GITHUB_TOKEN", "")
+    elif platform in ("bitbucket", "bitbucket_server"):
+        token = (
             os.environ.get("BITBUCKET_HTTP_ACCESS_TOKEN", "")
             or os.environ.get("BITBUCKET_APP_PASSWORD", "")
             or os.environ.get("BITBUCKET_SERVER_TOKEN", "")
         )
-    return ""
+
+    # Fallback: config.ini [github_config] auth_token (used for all platforms)
+    if not token and config:
+        token = config.get("github_config", {}).get("auth_token", "")
+
+    return token
 
 
 def _extract_base_url(repo_url: str) -> str:
@@ -201,10 +212,12 @@ def _extract_base_url(repo_url: str) -> str:
     return base
 
 
-def get_platform_client(platform: str, repo_url: str = "") -> PlatformClient:
+def get_platform_client(
+    platform: str, repo_url: str = "", config: dict | None = None,
+) -> PlatformClient:
     """Factory that returns the appropriate PlatformClient for a platform.
 
-    Auth tokens are resolved from environment variables automatically.
+    Auth tokens are resolved from environment variables, with config.ini fallback.
     When platform is "bitbucket" but the URL is not bitbucket.org,
     auto-detects it as a Bitbucket Server instance.
     """
@@ -212,7 +225,7 @@ def get_platform_client(platform: str, repo_url: str = "") -> PlatformClient:
     if platform == "bitbucket" and repo_url and not _is_bitbucket_cloud(repo_url):
         platform = "bitbucket_server"
 
-    token = _resolve_token(platform)
+    token = _resolve_token(platform, config=config)
 
     if platform == "github":
         return GitHubClient(token)

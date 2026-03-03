@@ -60,8 +60,10 @@ async def list_repo_branches(repo_id: str):
 
     try:
         from src.platform.platform_client import get_platform_client
+        from src.services.config_service import ConfigService
 
-        client = get_platform_client(repo.platform, repo.url)
+        config = ConfigService().load_config()
+        client = get_platform_client(repo.platform, repo.url, config=config)
         branches = client.list_branches(repo.url)
 
         # Fallback to local git if REST returns empty and local path exists

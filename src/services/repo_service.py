@@ -111,8 +111,8 @@ class RepoService:
                 RepoRepository(db).update(repo_id, local_path=clone_target)
                 return clone_target
 
-            # Resolve auth token for the platform
-            token = _resolve_token(repo.platform)
+            # Resolve auth token for the platform (env vars first, config.ini fallback)
+            token = _resolve_token(repo.platform, config=config)
 
             logger.info(
                 "Auto-cloning %s (branch=%s) into %s", repo.url, branch, clone_target,
