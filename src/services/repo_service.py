@@ -101,9 +101,9 @@ class RepoService:
                     f"Repository {repo_id} has no local_path and no URL to clone from."
                 )
 
-            # Determine clone target directory
+            # Determine clone target directory (always absolute)
             work_dir = (config or {}).get("workflow", {}).get("work_dir", "./workspace")
-            clone_target = str(Path(work_dir) / "repos" / repo_id)
+            clone_target = str(Path(work_dir).resolve() / "repos" / repo_id)
 
             # If the clone target already exists (previous clone), reuse it
             if os.path.isdir(clone_target) and os.path.isdir(
