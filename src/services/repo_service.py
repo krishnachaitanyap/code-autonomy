@@ -168,10 +168,16 @@ class RepoService:
             timeout=600,
         )
 
-        # Checkout the requested branch
+        # Enable long paths (some repos have deeply nested file paths)
+        subprocess.check_call(
+            ["git", "config", "core.longpaths", "true"],
+            cwd=target_dir, timeout=10,
+        )
+
+        # Force-checkout the requested branch (safe — this is a fresh clone)
         try:
             subprocess.check_call(
-                ["git", "checkout", branch],
+                ["git", "checkout", "-f", branch],
                 cwd=target_dir, timeout=60,
             )
         except subprocess.CalledProcessError:
@@ -181,7 +187,7 @@ class RepoService:
                 cwd=target_dir, timeout=300,
             )
             subprocess.check_call(
-                ["git", "checkout", "-b", branch, f"origin/{branch}"],
+                ["git", "checkout", "-f", "-b", branch, f"origin/{branch}"],
                 cwd=target_dir, timeout=60,
             )
         logger.info("Fallback clone + checkout complete: %s @ %s", target_dir, branch)
