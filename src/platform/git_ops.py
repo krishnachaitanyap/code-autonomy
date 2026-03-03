@@ -59,7 +59,7 @@ def clone_repo(
 
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = ["git"]
+    cmd = ["git", "-c", "core.longpaths=true"]
     if auth_token:
         cmd += ["-c", f"http.extraHeader=Authorization: Bearer {auth_token}"]
     cmd += ["clone", "--branch", branch, "--depth", "1", repo_url, str(target)]

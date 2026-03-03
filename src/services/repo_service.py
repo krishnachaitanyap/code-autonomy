@@ -164,14 +164,8 @@ class RepoService:
 
         logger.info("Fallback: plain git clone %s -> %s", repo_url, target_dir)
         subprocess.check_call(
-            ["git", "clone", repo_url, target_dir],
+            ["git", "-c", "core.longpaths=true", "clone", repo_url, target_dir],
             timeout=600,
-        )
-
-        # Enable long paths (some repos have deeply nested file paths)
-        subprocess.check_call(
-            ["git", "config", "core.longpaths", "true"],
-            cwd=target_dir, timeout=10,
         )
 
         # Force-checkout the requested branch (safe — this is a fresh clone)
