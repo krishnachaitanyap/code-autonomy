@@ -321,7 +321,7 @@ export default function ChatPage() {
   const workflowPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // WebSocket streaming
-  const { messages: wsMessages, connected: wsConnected, disconnect: wsDisconnect, clearMessages: wsClearMessages } = useSessionStream(wsSessionId);
+  const { messages: wsMessages, connected: wsConnected, reconnecting: wsReconnecting, disconnect: wsDisconnect, clearMessages: wsClearMessages } = useSessionStream(wsSessionId);
 
   // --- process WebSocket messages into activity entries ---
   useEffect(() => {
@@ -903,9 +903,11 @@ export default function ChatPage() {
 
         {/* Activity toggle + WS indicator */}
         <div className="flex items-center gap-1">
-          {wsConnected && (
+          {wsConnected ? (
             <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" title="WebSocket connected" />
-          )}
+          ) : wsReconnecting ? (
+            <span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse" title="Reconnecting..." />
+          ) : null}
           <button
             onClick={() => setShowActivity(!showActivity)}
             className="px-2 py-1.5 text-xs border border-gray-300 rounded-md text-gray-500 hover:bg-gray-50"

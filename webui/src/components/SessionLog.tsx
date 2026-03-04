@@ -6,6 +6,7 @@ import type { WSMessage } from '@/lib/websocket';
 interface SessionLogProps {
   messages: WSMessage[];
   connected: boolean;
+  reconnecting?: boolean;
 }
 
 function MessageEntry({ msg }: { msg: WSMessage }) {
@@ -75,7 +76,7 @@ function MessageEntry({ msg }: { msg: WSMessage }) {
   );
 }
 
-export default function SessionLog({ messages, connected }: SessionLogProps) {
+export default function SessionLog({ messages, connected, reconnecting }: SessionLogProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -90,16 +91,18 @@ export default function SessionLog({ messages, connected }: SessionLogProps) {
           className={`px-2 py-0.5 rounded-full text-xs font-medium ${
             connected
               ? 'bg-green-100 text-green-700'
+              : reconnecting
+              ? 'bg-yellow-100 text-yellow-700'
               : 'bg-gray-200 text-gray-600'
           }`}
         >
-          {connected ? 'Connected' : 'Disconnected'}
+          {connected ? 'Connected' : reconnecting ? 'Reconnecting...' : 'Disconnected'}
         </span>
       </div>
       <div className="space-y-2 bg-gray-800 rounded p-3">
         {messages.length === 0 ? (
           <p className="text-gray-400 text-sm italic">
-            {connected ? 'Waiting for events...' : 'Not connected'}
+            {connected ? 'Waiting for events...' : reconnecting ? 'Reconnecting to server...' : 'Not connected'}
           </p>
         ) : (
           messages.map((msg, i) => (

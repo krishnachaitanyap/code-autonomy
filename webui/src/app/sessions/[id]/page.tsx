@@ -13,7 +13,7 @@ export default function SessionDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const { messages, connected, disconnect } = useSessionStream(
+  const { messages, connected, reconnecting, disconnect } = useSessionStream(
     session?.status === 'running' ? sessionId : null,
   );
 
@@ -160,7 +160,7 @@ export default function SessionDetailPage() {
 
       {/* Live log (only when running) */}
       {session.status === 'running' && (
-        <SessionLog messages={messages} connected={connected} />
+        <SessionLog messages={messages} connected={connected} reconnecting={reconnecting} />
       )}
     </div>
   );
