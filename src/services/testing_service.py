@@ -1187,21 +1187,34 @@ class TestingService:
             effective_branch = branch or project.branch or ""
             if effective_branch and repo_path and os.path.isdir(repo_path):
                 try:
+                    # Unshallow if this is a shallow clone so all branches are reachable
+                    subprocess.run(
+                        ["git", "fetch", "--unshallow"],
+                        cwd=repo_path, capture_output=True, text=True, timeout=300,
+                    )
+                    # Fetch the specific branch from origin
+                    subprocess.run(
+                        ["git", "fetch", "origin", effective_branch],
+                        cwd=repo_path, capture_output=True, text=True, timeout=300,
+                    )
+                    # Try local checkout first
                     result = subprocess.run(
                         ["git", "checkout", effective_branch],
                         cwd=repo_path, capture_output=True, text=True, timeout=60,
                     )
                     if result.returncode != 0:
-                        # Try fetching first, then checkout
-                        subprocess.run(
-                            ["git", "fetch", "--all"],
-                            cwd=repo_path, capture_output=True, text=True, timeout=300,
-                        )
-                        subprocess.run(
-                            ["git", "checkout", effective_branch],
+                        # Branch doesn't exist locally — create tracking branch from remote
+                        result = subprocess.run(
+                            ["git", "checkout", "-b", effective_branch, f"origin/{effective_branch}"],
                             cwd=repo_path, capture_output=True, text=True, timeout=60,
                         )
-                    logger.info("Checked out branch %s for coverage analysis", effective_branch)
+                    if result.returncode == 0:
+                        logger.info("Checked out branch %s for coverage analysis", effective_branch)
+                    else:
+                        logger.warning(
+                            "Git checkout result: %d, stdout: %s, stderr: %s",
+                            result.returncode, result.stdout.strip(), result.stderr.strip(),
+                        )
                 except Exception as exc:
                     logger.warning("Could not checkout branch %s: %s", effective_branch, exc)
 
