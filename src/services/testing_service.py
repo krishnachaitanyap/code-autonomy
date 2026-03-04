@@ -1152,14 +1152,68 @@ class TestingService:
             )
 
     def analyze_coverage(self, project_id: str, branch: str = "") -> Optional[CoverageReport]:
-        """Run coverage analysis on a project."""
+        """Run coverage analysis on a project.
+
+        Resolves the repo's local path (auto-cloning if needed), checks out the
+        requested branch, re-runs discovery, and then calculates coverage.
+        """
+        from src.services.repo_service import RepoService
+
         with get_session() as db:
             project = db.get(TestProject, project_id)
             if not project:
                 return None
 
-            # Build coverage report from discovery data and test files
-            discovery = project.discovery_result or {}
+            # --- Resolve local path (auto-clone if needed) ---
+            repo_path = project.local_path or ""
+            if not repo_path or not os.path.isdir(repo_path):
+                # Try to resolve via the linked Repo record
+                if project.repo_id:
+                    try:
+                        from src.services.config_service import ConfigService
+                        config = ConfigService().load_config()
+                        repo_path = RepoService().ensure_local_clone(
+                            project.repo_id,
+                            branch=branch or project.branch or "main",
+                            config=config,
+                        )
+                        # Persist resolved path on the project
+                        project.local_path = repo_path
+                        db.flush()
+                    except Exception as exc:
+                        logger.warning("Could not resolve local path for project %s: %s", project_id, exc)
+
+            # --- Checkout the selected branch ---
+            effective_branch = branch or project.branch or ""
+            if effective_branch and repo_path and os.path.isdir(repo_path):
+                try:
+                    result = subprocess.run(
+                        ["git", "checkout", effective_branch],
+                        cwd=repo_path, capture_output=True, text=True, timeout=60,
+                    )
+                    if result.returncode != 0:
+                        # Try fetching first, then checkout
+                        subprocess.run(
+                            ["git", "fetch", "--all"],
+                            cwd=repo_path, capture_output=True, text=True, timeout=300,
+                        )
+                        subprocess.run(
+                            ["git", "checkout", effective_branch],
+                            cwd=repo_path, capture_output=True, text=True, timeout=60,
+                        )
+                    logger.info("Checked out branch %s for coverage analysis", effective_branch)
+                except Exception as exc:
+                    logger.warning("Could not checkout branch %s: %s", effective_branch, exc)
+
+            # --- Re-run discovery on the current branch ---
+            if repo_path and os.path.isdir(repo_path):
+                discovery = self._discover_from_path(Path(repo_path), project.language or "auto")
+                # Persist fresh discovery results
+                project.discovery_result = discovery
+                db.flush()
+            else:
+                discovery = project.discovery_result or {}
+
             endpoints = discovery.get("endpoints", [])
             test_files = discovery.get("test_files", [])
             services = discovery.get("services", [])
