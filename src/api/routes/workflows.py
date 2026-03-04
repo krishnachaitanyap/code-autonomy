@@ -136,7 +136,7 @@ async def create_workflow(data: WorkflowCreate):
             wf = workflow
 
     # Launch background execution
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     loop.run_in_executor(
         _executor, lambda: _execute_workflow_background(wf.id, config)
     )
@@ -182,7 +182,7 @@ async def resume_workflow(workflow_id: str):
         config = {}
 
     # Launch resume in background
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     loop.run_in_executor(
         _executor,
         lambda: _service.resume_workflow(workflow_id, config),

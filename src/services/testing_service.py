@@ -140,7 +140,23 @@ class TestingService:
                 "frameworks_detected": [],
             }
 
+            # Resolve local path (auto-clone if needed)
             repo_path = project.local_path or ""
+            if (not repo_path or not Path(repo_path).is_dir()) and project.repo_id:
+                try:
+                    from src.services.config_service import ConfigService
+                    from src.services.repo_service import RepoService
+                    config = ConfigService().load_config()
+                    repo_path = RepoService().ensure_local_clone(
+                        project.repo_id,
+                        branch=project.branch or "main",
+                        config=config,
+                    )
+                    project.local_path = repo_path
+                    db.flush()
+                except Exception as exc:
+                    logger.warning("Could not resolve local path for discovery on project %s: %s", project_id, exc)
+
             if repo_path and Path(repo_path).exists():
                 discovery = self._discover_from_path(Path(repo_path), project.language)
 

@@ -163,15 +163,24 @@ class JiraRunService:
                 repo_url = repo.url if repo else ""
 
             if not repo_path or not Path(repo_path).is_dir():
-                _log_event("error", f"Repository path not found: {repo_path}")
-                with get_session() as db:
-                    run = db.get(JiraRun, run_id)
-                    if run:
-                        run.status = "error"
-                        run.completed_at = datetime.now(timezone.utc)
-                        run.result_summary = "Repository path not found"
-                        db.flush()
-                return None
+                # Auto-clone if repo has a URL
+                try:
+                    from src.services.repo_service import RepoService
+                    _log_event("initializing", "Repository path not found locally, auto-cloning...")
+                    repo_path = RepoService().ensure_local_clone(
+                        repo_id, branch="main", config=config,
+                    )
+                    _log_event("initializing", f"Clone complete: {repo_path}")
+                except Exception as clone_exc:
+                    _log_event("error", f"Repository path not found and auto-clone failed: {clone_exc}")
+                    with get_session() as db:
+                        run = db.get(JiraRun, run_id)
+                        if run:
+                            run.status = "error"
+                            run.completed_at = datetime.now(timezone.utc)
+                            run.result_summary = f"Repository path not found: {clone_exc}"
+                            db.flush()
+                    return None
 
             _log_event("initializing", f"Repository: {repo_path}")
 

@@ -126,7 +126,7 @@ async def create_jira_run(data: JiraRunCreate):
     except Exception:
         config = {}
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     loop.run_in_executor(
         _jira_executor, lambda: _execute_jira_run_background(run.id, config)
     )
@@ -173,7 +173,7 @@ async def retry_jira_run(run_id: str):
     except Exception:
         config = {}
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     loop.run_in_executor(
         _jira_executor, lambda: _execute_jira_run_background(run.id, config)
     )
