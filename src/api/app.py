@@ -61,7 +61,7 @@ def _recover_queued_runs():
     for run in queued:
         logger.info("  Re-launching queued run %s (project=%s)", run.id, run.project_id)
         loop.run_in_executor(
-            _executor, lambda rid=run.id: _execute_run_background(rid, config)
+            _executor, lambda rid=run.id: _execute_run_background(rid, config, None)
         )
 
 

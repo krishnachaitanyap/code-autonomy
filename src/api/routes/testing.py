@@ -165,26 +165,27 @@ async def create_run(data: TestRunCreate):
     except Exception:
         config = {}
 
-    loop = asyncio.get_event_loop()
+    # Capture WebSocket callback on the main async thread (has the event loop)
+    from src.api.websocket import session_manager
+    progress_callback = session_manager.get_callback(run.id)
+
+    loop = asyncio.get_running_loop()
     loop.run_in_executor(
-        _executor, lambda: _execute_run_background(run.id, config)
+        _executor, lambda: _execute_run_background(run.id, config, progress_callback)
     )
 
     return _run_to_response(run)
 
 
-def _execute_run_background(run_id: str, config: dict) -> None:
+def _execute_run_background(run_id: str, config: dict, progress_callback=None) -> None:
     """Background thread: execute the test run pipeline."""
     try:
-        from src.api.websocket import session_manager
-        callback = (
-            session_manager.get_callback(run_id)
-            if session_manager.has_clients(run_id)
-            else None
-        )
-        _service.execute_run(run_id, config, progress_callback=callback)
+        _service.execute_run(run_id, config, progress_callback=progress_callback)
     except Exception as exc:
         logger.error("Test run %s background execution failed: %s", run_id, exc)
+        # Notify frontend so it doesn't stay stuck on "queued"/"running"
+        if progress_callback:
+            progress_callback({"type": "error", "data": {"message": str(exc)}})
 
 
 @router.get("/runs/{run_id}", response_model=TestRunResponse)
@@ -221,9 +222,13 @@ async def retry_run(run_id: str):
     except Exception:
         config = {}
 
-    loop = asyncio.get_event_loop()
+    # Capture WebSocket callback on the main async thread (has the event loop)
+    from src.api.websocket import session_manager
+    progress_callback = session_manager.get_callback(run.id)
+
+    loop = asyncio.get_running_loop()
     loop.run_in_executor(
-        _executor, lambda: _execute_run_background(run.id, config)
+        _executor, lambda: _execute_run_background(run.id, config, progress_callback)
     )
 
     return _run_to_response(run)
