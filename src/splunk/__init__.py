@@ -54,6 +54,11 @@ _SPLUNK_DISCOVER_SCHEMA = _tool(
             "type": "integer",
             "description": "Number of metadata hits to return (default 5)",
         },
+        "index": {
+            "type": "string",
+            "description": "OpenSearch index to search (default: splunk-metadata). "
+            "Use the logical index name from config, e.g. 'splunk', 'code', 'incident'.",
+        },
     },
     required=["query"],
 )
@@ -254,7 +259,15 @@ def _execute_discover(config: dict, args: dict) -> str:
         return "Error: query is required for splunk_discover"
 
     top_k = args.get("top_k", 5)
-    hits = search_splunk_metadata(config, query, top_k=top_k)
+
+    # Resolve logical index name → actual OpenSearch index name
+    index_name = None
+    requested = args.get("index", "")
+    if requested:
+        indexes = config.get("indexes", {})
+        index_name = indexes.get(requested, requested)
+
+    hits = search_splunk_metadata(config, query, top_k=top_k, index_name=index_name)
     return format_metadata_context(hits)
 
 

@@ -45,19 +45,50 @@ def _embed_text(text: str, config: dict) -> list[float]:
 # ---------------------------------------------------------------------------
 
 def _get_opensearch_client(config: dict):
-    """Create an ``OpenSearch`` client using AWS SigV4 auth."""
+    """Create an ``OpenSearch`` client using AWS SigV4 auth.
+
+    Credential resolution order (via boto3):
+      1. Explicit access key / secret key / session token in config
+      2. Environment variables (``AWS_ACCESS_KEY_ID``, etc.)
+      3. AWS profile / IAM role (instance profile, ECS task role, etc.)
+
+    Uses ``aws_requests_auth.AWSRequestsAuth`` to sign every request
+    with SigV4 for the ``es`` (Elasticsearch/OpenSearch) service.
+    """
+    import boto3
+    from aws_requests_auth.aws_auth import AWSRequestsAuth
     from opensearchpy import OpenSearch, RequestsHttpConnection
-    from requests_aws4auth import AWS4Auth
 
     endpoint = config["endpoint"].rstrip("/")
     region = config.get("region", "us-east-1")
-    access_key = config.get("aws_access_key_id", "")
-    secret_key = config.get("aws_secret_access_key", "")
 
-    awsauth = AWS4Auth(access_key, secret_key, region, "es")
+    # --- Resolve AWS credentials via boto3 ---
+    explicit_key = config.get("aws_access_key_id", "")
+    explicit_secret = config.get("aws_secret_access_key", "")
 
-    # Strip scheme for host param
+    if explicit_key and explicit_secret:
+        session = boto3.Session(
+            aws_access_key_id=explicit_key,
+            aws_secret_access_key=explicit_secret,
+            region_name=region,
+        )
+    else:
+        session = boto3.Session(region_name=region)
+
+    credentials = session.get_credentials().get_frozen_credentials()
+
+    # --- Extract host from endpoint URL ---
     host = endpoint.replace("https://", "").replace("http://", "")
+
+    # --- Build SigV4 auth with AWSRequestsAuth ---
+    awsauth = AWSRequestsAuth(
+        aws_access_key=credentials.access_key,
+        aws_secret_access_key=credentials.secret_key,
+        aws_token=credentials.token or "",
+        aws_host=host,
+        aws_region=region,
+        aws_service="es",
+    )
 
     client = OpenSearch(
         hosts=[{"host": host, "port": 443}],
@@ -74,25 +105,31 @@ def _get_opensearch_client(config: dict):
 # Search
 # ---------------------------------------------------------------------------
 
-def search_splunk_metadata(
+_SPLUNK_SOURCE_FIELDS = [
+    "index", "field", "tail_source", "description", "doc_type",
+    "metadata", "relationship", "content",
+]
+
+
+def search_index(
     config: dict,
+    index_name: str,
     query_text: str,
     top_k: int = 5,
+    source_fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Search the ``splunk-metadata`` OpenSearch index via knn.
+    """Search any OpenSearch index via knn similarity.
 
-    1. Embeds *query_text* using the configured embedding model.
-    2. Runs a knn query on the ``content_vector`` field.
-    3. Returns a list of hit dicts with keys:
-       ``index``, ``field``, ``tail_source``, ``metadata``, ``relationship``,
-       ``description``, ``score``.
+    This is the generic entry point — callers specify *index_name* and
+    optionally which ``_source`` fields to return.
+
+    Returns a list of hit dicts keyed by the requested source fields plus
+    ``score``.
     """
     vector = _embed_text(query_text, config)
-    index_name = config.get("index_name", "splunk-metadata")
-
     client = _get_opensearch_client(config)
 
-    body = {
+    body: dict[str, Any] = {
         "size": top_k,
         "query": {
             "knn": {
@@ -102,33 +139,72 @@ def search_splunk_metadata(
                 }
             }
         },
-        "_source": [
-            "index", "field", "tail_source", "description", "doc_type",
-            "metadata", "relationship", "content",
-        ],
     }
+    if source_fields:
+        body["_source"] = source_fields
 
     try:
         resp = client.search(index=index_name, body=body)
     except Exception as exc:
-        logger.error("OpenSearch knn search failed: %s", exc)
+        logger.error("OpenSearch knn search on '%s' failed: %s", index_name, exc)
         return []
 
     hits = []
     for h in resp.get("hits", {}).get("hits", []):
         src = h.get("_source", {})
-        hits.append({
-            "score": round(h.get("_score", 0.0), 4),
-            "index": src.get("index", ""),
-            "field": src.get("field", ""),
-            "tail_source": src.get("tail_source", ""),
-            "description": src.get("description", ""),
-            "doc_type": src.get("doc_type", ""),
-            "metadata": src.get("metadata", {}),
-            "relationship": src.get("relationship", {}),
-            "content": src.get("content", ""),
-        })
+        hit: dict[str, Any] = {"score": round(h.get("_score", 0.0), 4)}
+        if source_fields:
+            for f in source_fields:
+                hit[f] = src.get(f, "" if f not in ("metadata", "relationship") else {})
+        else:
+            hit.update(src)
+        hits.append(hit)
     return hits
+
+
+def search_splunk_metadata(
+    config: dict,
+    query_text: str,
+    top_k: int = 5,
+    index_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """Search the Splunk metadata OpenSearch index via knn.
+
+    *index_name* resolution: explicit arg > ``config["index_name"]`` >
+    ``"splunk-metadata"`` fallback.
+    """
+    resolved = index_name or config.get("index_name", "splunk-metadata")
+    return search_index(
+        config,
+        index_name=resolved,
+        query_text=query_text,
+        top_k=top_k,
+        source_fields=_SPLUNK_SOURCE_FIELDS,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Index listing
+# ---------------------------------------------------------------------------
+
+def list_available_indexes(config: dict) -> dict[str, str]:
+    """Return the named indexes from config that have a non-empty value.
+
+    Reads ``config["indexes"]`` (the named-index dict produced by
+    ``config_loader``).  Falls back to the legacy ``config["index_name"]``
+    key when the ``indexes`` dict is absent.
+
+    Returns ``{ logical_name: actual_index_name }`` for every entry that
+    has a truthy value.
+    """
+    indexes = config.get("indexes", {})
+    available = {k: v for k, v in indexes.items() if v}
+    if not available:
+        # Backward compat: expose the single legacy index_name
+        legacy = config.get("index_name", "")
+        if legacy:
+            available["splunk"] = legacy
+    return available
 
 
 # ---------------------------------------------------------------------------

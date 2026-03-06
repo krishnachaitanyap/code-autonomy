@@ -218,6 +218,11 @@ def load_config(config_path: str = "config.ini") -> dict:
             "aws_access_key_id": get("opensearch", "aws_access_key_id", "") or os.environ.get("AWS_ACCESS_KEY_ID", ""),
             "aws_secret_access_key": get("opensearch", "aws_secret_access_key", "") or os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
             "index_name": get("opensearch", "index_name", "splunk-metadata"),
+            "indexes": {
+                "splunk": get("opensearch", "splunk_index", "") or get("opensearch", "index_name", "splunk-metadata"),
+                "code": get("opensearch", "code_index", ""),
+                "incident": get("opensearch", "incident_index", ""),
+            },
             "embedding_model": get("opensearch", "embedding_model", "text-embedding-3-small"),
             "verify_ssl": get_bool("opensearch", "verify_ssl", True),
             "timeout": get_int("opensearch", "timeout", 30),
