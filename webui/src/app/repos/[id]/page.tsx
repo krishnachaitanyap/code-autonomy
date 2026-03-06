@@ -39,25 +39,33 @@ export default function RepoDetailPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [claudeMd, setClaudeMd] = useState('');
+  const [claudeMdLoading, setClaudeMdLoading] = useState(true);
+  const [claudeMdSaving, setClaudeMdSaving] = useState(false);
+  const [claudeMdSaved, setClaudeMdSaved] = useState(false);
+  const [claudeMdGenerating, setClaudeMdGenerating] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
     async function load() {
       try {
-        const [repoData, branchData, skillsData] = await Promise.all([
+        const [repoData, branchData, skillsData, claudeMdData] = await Promise.all([
           repos.get(repoId),
           repos.branches(repoId).catch(() => ({ branches: [] })),
           repos.getSkills(repoId).catch(() => ({ content: '' })),
+          repos.getClaudeMd(repoId).catch(() => ({ content: '' })),
         ]);
         setRepo(repoData);
         setBranches(branchData.branches);
         setSkills(skillsData.content);
+        setClaudeMd(claudeMdData.content);
       } catch (err: any) {
         setError(err.message || 'Failed to load repository');
       } finally {
         setLoading(false);
         setSkillsLoading(false);
+        setClaudeMdLoading(false);
       }
     }
     load();
@@ -98,6 +106,32 @@ export default function RepoDetailPage() {
       alert(err.message || 'Failed to generate SKILLS.md');
     } finally {
       setGenerating(false);
+    }
+  }
+
+  async function handleSaveClaudeMd() {
+    setClaudeMdSaving(true);
+    setClaudeMdSaved(false);
+    try {
+      await repos.updateClaudeMd(repoId, claudeMd);
+      setClaudeMdSaved(true);
+      setTimeout(() => setClaudeMdSaved(false), 3000);
+    } catch (err: any) {
+      alert(err.message || 'Failed to save CLAUDE.md');
+    } finally {
+      setClaudeMdSaving(false);
+    }
+  }
+
+  async function handleGenerateClaudeMd() {
+    setClaudeMdGenerating(true);
+    try {
+      const result = await repos.generateClaudeMd(repoId);
+      setClaudeMd(result.content);
+    } catch (err: any) {
+      alert(err.message || 'Failed to generate CLAUDE.md');
+    } finally {
+      setClaudeMdGenerating(false);
     }
   }
 
@@ -257,6 +291,45 @@ export default function RepoDetailPage() {
           placeholder="# SKILLS.md&#10;&#10;Describe repo conventions, domain knowledge, testing patterns, etc."
           className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm font-mono focus:ring-indigo-500 focus:border-indigo-500 resize-y"
           disabled={skillsLoading}
+        />
+      </div>
+
+      {/* CLAUDE.md Editor */}
+      <div className="bg-white rounded-lg border border-teal-200 p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">CLAUDE.md</h2>
+            <p className="text-sm text-gray-500 mt-1">
+              Prescriptive rules for Claude Code — auto-generated from stack analysis.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {claudeMdSaved && (
+              <span className="text-sm text-green-600 font-medium">Saved</span>
+            )}
+            <button
+              onClick={handleGenerateClaudeMd}
+              disabled={claudeMdGenerating || claudeMdLoading}
+              className="px-4 py-2 bg-teal-600 text-white rounded-md text-sm font-medium hover:bg-teal-700 disabled:opacity-50 transition-colors"
+            >
+              {claudeMdGenerating ? 'Generating...' : claudeMd ? 'Regenerate' : 'Generate'}
+            </button>
+            <button
+              onClick={handleSaveClaudeMd}
+              disabled={claudeMdSaving || claudeMdLoading}
+              className="px-4 py-2 bg-indigo-600 text-white rounded-md text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+            >
+              {claudeMdSaving ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+        </div>
+        <textarea
+          value={claudeMd}
+          onChange={(e) => setClaudeMd(e.target.value)}
+          rows={16}
+          placeholder="# CLAUDE.md&#10;&#10;Prescriptive rules — build commands, API patterns, data-layer rules, etc."
+          className="w-full border border-teal-300 rounded-md px-3 py-2 text-sm font-mono focus:ring-teal-500 focus:border-teal-500 resize-y"
+          disabled={claudeMdLoading}
         />
       </div>
     </div>

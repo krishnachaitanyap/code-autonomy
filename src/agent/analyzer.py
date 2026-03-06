@@ -353,7 +353,12 @@ _SPLUNK_PROMPT_SECTION = """
 
 ## Splunk tools (query production logs and metrics)
 
-### Two-step workflow (ALWAYS follow this order):
+### Quick one-shot (recommended for most questions):
+- `splunk_ask(question, index?, earliest?, latest?)` — automatically discovers metadata,
+  generates SPL via AI, executes on Splunk, and returns results in one call.
+  Example: `splunk_ask(question="what is the TPS of REST invoker")`
+
+### Advanced two-step workflow (for custom/complex SPL):
 1. First call `splunk_discover(query)` to find relevant Splunk indexes, fields, and sources
 2. Read the returned metadata (index names, fields, sourcetypes, relationships)
 3. Then call `splunk_search(spl)` or `splunk_stats(spl)` with a precise SPL query
@@ -373,10 +378,39 @@ _SPLUNK_PROMPT_SECTION = """
 - For charts, use `splunk_stats` with timechart/stats/chart commands
 
 ### Tools:
+- splunk_ask(question, index?, earliest?, latest?): One-shot question → answer pipeline
 - splunk_discover(query, top_k?): Search for relevant Splunk indexes/fields/sources
 - splunk_search(spl, earliest?, latest?, max_results?): Run SPL query, returns table
 - splunk_stats(spl, chart_type?, earliest?, latest?): Run SPL aggregation for charts
 - splunk_saved_search(name?): List or run saved searches"""
+
+
+_CERTS_PROMPT_SECTION = """
+
+## Certificate inspection tools (Java KeyStore / PKCS12)
+
+### Recommended workflow:
+1. Call `cert_find()` to discover all keystore files (.jks, .p12, .pfx, .keystore, .truststore)
+2. Call `cert_list(keystore_path)` to list aliases/entries in a specific keystore
+3. Call `cert_details(keystore_path, alias)` to get full certificate details (expiry, subject, issuer, fingerprints)
+
+### When to use (auto-detect these patterns):
+- Certificate questions: "certificate", "cert", "SSL", "TLS", "keystore", "truststore"
+- Expiry checks: "expire", "expiry", "expiration", "valid", "renewal"
+- Security audit: "fingerprint", "issuer", "subject", "self-signed"
+
+### Password handling:
+- If no password is provided, these defaults are tried automatically: changeit, changeme, password, empty
+- If defaults fail, ask the user for the password
+
+### Store type auto-detection:
+- .jks / .keystore → JKS
+- .p12 / .pfx / .pkcs12 → PKCS12
+
+### Tools:
+- cert_find(path?): Find all keystore files in the repo (or subdirectory)
+- cert_list(keystore_path, password?, storetype?): List aliases in a keystore
+- cert_details(keystore_path, alias, password?, storetype?): Full cert info with expiry status"""
 
 
 # ---------------------------------------------------------------------------
@@ -622,6 +656,8 @@ def generate_changes_with_agent(
         system_prompt += _GCC_PROMPT_SECTION
     if agent_cfg.get("splunk_enabled"):
         system_prompt += _SPLUNK_PROMPT_SECTION
+    if agent_cfg.get("certs_enabled"):
+        system_prompt += _CERTS_PROMPT_SECTION
 
     if conversation_context:
         context_lines = []
@@ -1498,6 +1534,8 @@ def generate_plan_with_agent(
         system_prompt += _GCC_PROMPT_SECTION
     if agent_cfg.get("splunk_enabled"):
         system_prompt += _SPLUNK_PROMPT_SECTION
+    if agent_cfg.get("certs_enabled"):
+        system_prompt += _CERTS_PROMPT_SECTION
 
     if conversation_context:
         context_lines = []
@@ -2058,6 +2096,8 @@ def generate_answer_with_agent(
         system_prompt += _GCC_ASK_PROMPT_SECTION
     if agent_cfg.get("splunk_enabled"):
         system_prompt += _SPLUNK_PROMPT_SECTION
+    if agent_cfg.get("certs_enabled"):
+        system_prompt += _CERTS_PROMPT_SECTION
 
     if conversation_context:
         context_lines = []

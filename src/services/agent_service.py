@@ -120,6 +120,7 @@ class AgentService:
             "testing_budget": int(agent_cfg.get("testing_budget", 0)),
             "skip_tests": agent_cfg.get("skip_tests", False),
             "splunk_enabled": splunk_enabled,
+            "certs_enabled": agent_cfg.get("certs_enabled", True),
         }
         if splunk_enabled:
             result["splunk_config"] = splunk_cfg
@@ -273,6 +274,7 @@ class AgentService:
             "max_turns": int(agent_cfg.get("max_turns", 50)),
             "smart_summarization": agent_cfg.get("smart_summarization", True),
             "truncation_limit": int(agent_cfg.get("truncation_limit", 30000)),
+            "certs_enabled": agent_cfg.get("certs_enabled", True),
         }
 
         session_id = self._create_session(repo_id, "plan", requirements)
@@ -350,6 +352,7 @@ class AgentService:
             "max_turns": int(agent_cfg.get("max_turns", 50)),
             "smart_summarization": agent_cfg.get("smart_summarization", True),
             "truncation_limit": int(agent_cfg.get("truncation_limit", 30000)),
+            "certs_enabled": agent_cfg.get("certs_enabled", True),
         }
 
         session_id = self._create_session(repo_id, "ask", question)

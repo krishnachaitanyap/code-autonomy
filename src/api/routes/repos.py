@@ -20,6 +20,10 @@ class SkillsBody(BaseModel):
     content: str
 
 
+class ClaudeMdBody(BaseModel):
+    content: str
+
+
 @router.get("", response_model=list[RepoResponse])
 async def list_repos():
     """List all registered repositories."""
@@ -45,23 +49,34 @@ async def register_repo(body: RepoCreate):
         repo_url=body.url,
     )
 
-    # Auto-generate SKILLS.md if local path exists and file doesn't already exist
+    # Auto-generate SKILLS.md and CLAUDE.md if local path exists
     if repo.local_path and os.path.isdir(repo.local_path):
         skills_path = Path(repo.local_path) / "SKILLS.md"
-        if not skills_path.is_file():
+        claude_path = Path(repo.local_path) / "CLAUDE.md"
+        needs_skills = not skills_path.is_file()
+        needs_claude = not claude_path.is_file()
+
+        if needs_skills or needs_claude:
             try:
-                from src.agent.knowledge_generator import generate_skills_markdown
+                from src.agent.knowledge_generator import generate_skills_markdown, generate_claude_md
                 from src.services.config_service import ConfigService
 
                 config = ConfigService().load_config()
                 consciousness = repo_service.build_consciousness(
                     repo.local_path, config, repo.url,
                 )
-                content = generate_skills_markdown(consciousness, repo_path=repo.local_path)
-                skills_path.write_text(content, encoding="utf-8")
-                logger.info("Auto-generated SKILLS.md for repo %s", repo.id)
+
+                if needs_skills:
+                    content = generate_skills_markdown(consciousness, repo_path=repo.local_path)
+                    skills_path.write_text(content, encoding="utf-8")
+                    logger.info("Auto-generated SKILLS.md for repo %s", repo.id)
+
+                if needs_claude:
+                    content = generate_claude_md(consciousness, repo_path=repo.local_path)
+                    claude_path.write_text(content, encoding="utf-8")
+                    logger.info("Auto-generated CLAUDE.md for repo %s", repo.id)
             except Exception as exc:
-                logger.warning("Failed to auto-generate SKILLS.md for repo %s: %s", repo.id, exc)
+                logger.warning("Failed to auto-generate knowledge files for repo %s: %s", repo.id, exc)
 
     return RepoResponse(
         id=repo.id, url=repo.url, local_path=repo.local_path,
@@ -180,6 +195,77 @@ async def generate_skills(repo_id: str):
     # Write to repo root
     skills_path = Path(repo.local_path) / "SKILLS.md"
     skills_path.write_text(content, encoding="utf-8")
+
+    # Invalidate cached repo_knowledge
+    try:
+        from src.services.cache import repo_cache
+        repo_cache.invalidate(repo_id, "repo_knowledge")
+    except Exception:
+        pass
+
+    return {"content": content}
+
+
+@router.get("/{repo_id}/claude-md")
+async def get_claude_md(repo_id: str):
+    """Read CLAUDE.md from the repository root."""
+    repo = repo_service.get_repo(repo_id)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    if not repo.local_path or not os.path.isdir(repo.local_path):
+        return {"content": ""}
+    claude_path = Path(repo.local_path) / "CLAUDE.md"
+    if claude_path.is_file():
+        try:
+            return {"content": claude_path.read_text(encoding="utf-8")}
+        except Exception:
+            return {"content": ""}
+    return {"content": ""}
+
+
+@router.put("/{repo_id}/claude-md")
+async def update_claude_md(repo_id: str, body: ClaudeMdBody):
+    """Write CLAUDE.md to the repository root."""
+    repo = repo_service.get_repo(repo_id)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    if not repo.local_path or not os.path.isdir(repo.local_path):
+        raise HTTPException(status_code=400, detail="Repository has no local path")
+    claude_path = Path(repo.local_path) / "CLAUDE.md"
+    claude_path.write_text(body.content, encoding="utf-8")
+    # Invalidate cached repo_knowledge so the next agent run picks up changes
+    try:
+        from src.services.cache import repo_cache
+        repo_cache.invalidate(repo_id, "repo_knowledge")
+    except Exception:
+        pass
+    return {"content": body.content}
+
+
+@router.post("/{repo_id}/claude-md/generate")
+async def generate_claude_md_endpoint(repo_id: str):
+    """Auto-generate CLAUDE.md from project consciousness and stack analysis."""
+    repo = repo_service.get_repo(repo_id)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    if not repo.local_path or not os.path.isdir(repo.local_path):
+        raise HTTPException(status_code=400, detail="Repository has no local path")
+
+    try:
+        from src.agent.knowledge_generator import generate_claude_md
+        from src.services.config_service import ConfigService
+
+        config = ConfigService().load_config()
+        consciousness = repo_service.build_consciousness(
+            repo.local_path, config, repo.url,
+        )
+        content = generate_claude_md(consciousness, repo_path=repo.local_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to generate CLAUDE.md: {exc}")
+
+    # Write to repo root
+    claude_path = Path(repo.local_path) / "CLAUDE.md"
+    claude_path.write_text(content, encoding="utf-8")
 
     # Invalidate cached repo_knowledge
     try:

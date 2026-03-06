@@ -1,17 +1,19 @@
 """
 Splunk integration — tool schemas, dispatcher, and SPLUNK_TOOLS list.
 
-Provides four agent tools:
+Provides five agent tools:
 
     splunk_discover     — knn search on OpenSearch ``splunk-metadata`` to find
                           relevant indexes, fields, sourcetypes, relationships
     splunk_search       — run SPL query, return tabular results
     splunk_stats        — run SPL aggregation for chart visualisation
     splunk_saved_search — list or run saved searches/reports
+    splunk_ask          — one-shot pipeline: discover → LLM generates SPL → execute
 """
 
 import json
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -131,11 +133,41 @@ _SPLUNK_SAVED_SEARCH_SCHEMA = _tool(
     },
 )
 
+_SPLUNK_ASK_SCHEMA = _tool(
+    "splunk_ask",
+    "One-shot Splunk pipeline: automatically discovers relevant metadata, "
+    "generates an SPL query using AI, executes it on Splunk, and returns results. "
+    "Use this when you want a quick answer without manually building SPL.",
+    {
+        "question": {
+            "type": "string",
+            "description": "Natural language question about Splunk data "
+            "(e.g. 'what is the TPS of REST invoker', 'error rates for profile service')",
+        },
+        "index": {
+            "type": "string",
+            "description": "Optional: OpenSearch index to search for metadata "
+            "(e.g. 'splunk', 'incident'). Omit to search the default index.",
+        },
+        "earliest": {
+            "type": "string",
+            "description": "Earliest time for the Splunk search (default: -24h). "
+            "Examples: -1h, -7d, 2024-01-01T00:00:00",
+        },
+        "latest": {
+            "type": "string",
+            "description": "Latest time for the Splunk search (default: now)",
+        },
+    },
+    required=["question"],
+)
+
 SPLUNK_TOOLS = [
     _SPLUNK_DISCOVER_SCHEMA,
     _SPLUNK_SEARCH_SCHEMA,
     _SPLUNK_STATS_SCHEMA,
     _SPLUNK_SAVED_SEARCH_SCHEMA,
+    _SPLUNK_ASK_SCHEMA,
 ]
 
 SPLUNK_TOOL_NAMES = {
@@ -143,6 +175,7 @@ SPLUNK_TOOL_NAMES = {
     "splunk_search",
     "splunk_stats",
     "splunk_saved_search",
+    "splunk_ask",
 }
 
 
@@ -245,6 +278,8 @@ def execute_splunk_tool(cfg: dict, tool_name: str, args: dict) -> str:
             return _execute_stats(splunk_config, args)
         if tool_name == "splunk_saved_search":
             return _execute_saved_search(splunk_config, args)
+        if tool_name == "splunk_ask":
+            return _execute_splunk_ask(cfg, args)
         return f"Error: Unknown splunk tool: {tool_name}"
     except Exception as exc:
         logger.error("Splunk tool %s failed: %s", tool_name, exc, exc_info=True)
@@ -331,3 +366,115 @@ def _execute_saved_search(config: dict, args: dict) -> str:
     rows = run_saved_search(config, name)
     title = f"Saved Search: {name}"
     return _structured_table(title, rows)
+
+
+# ---------------------------------------------------------------------------
+# splunk_ask — one-shot pipeline helpers
+# ---------------------------------------------------------------------------
+
+_SPL_SYSTEM_PROMPT = (
+    "You are an expert Splunk SPL query generator. Given metadata about available "
+    "Splunk indexes, fields, sourcetypes and relationships, generate a precise SPL "
+    "query to answer the user's question.\n\n"
+    "Rules:\n"
+    "- Use ONLY indexes and fields from the provided metadata\n"
+    "- Return ONLY the SPL query inside a ```spl code block\n"
+    "- No explanations outside the code block\n"
+    "- Use appropriate time ranges and aggregations\n"
+    "- For counts/rates use stats or timechart commands"
+)
+
+
+def _extract_spl(text: str) -> str:
+    """Extract SPL from LLM markdown response.
+
+    Looks for ```spl or ```splunk code blocks first, then falls back to the
+    bare text (stripped of markdown fences).
+    """
+    # Try ```spl or ```splunk fenced blocks
+    match = re.search(r"```(?:spl|splunk)\s*\n(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+
+    # Try generic ``` fenced blocks
+    match = re.search(r"```\s*\n(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+
+    # Fallback: strip any stray backticks and return the text as-is
+    return text.strip().strip("`").strip()
+
+
+def _execute_splunk_ask(cfg: dict, args: dict) -> str:
+    """One-shot pipeline: discover → LLM generates SPL → execute → return."""
+    from src.splunk.opensearch_client import search_splunk_metadata, format_metadata_context
+    from src.splunk.client import run_search_oneshot
+    from src.llm_client import chat_completion
+
+    question = args.get("question", "")
+    if not question:
+        return "Error: question is required for splunk_ask"
+
+    opensearch_config = cfg.get("opensearch", {})
+    splunk_config = cfg.get("splunk", {})
+    ai_config = cfg.get("ai", {})
+
+    # --- Step 1: Discover metadata ---
+    index_name = None
+    requested = args.get("index", "")
+    if requested:
+        indexes = opensearch_config.get("indexes", {})
+        index_name = indexes.get(requested, requested)
+
+    hits = search_splunk_metadata(opensearch_config, question, top_k=5, index_name=index_name)
+    metadata_context = format_metadata_context(hits)
+
+    if not hits:
+        return (
+            "Error: No matching Splunk metadata found for your question. "
+            "Try rephrasing, or use splunk_discover with different keywords."
+        )
+
+    # --- Step 2: LLM generates SPL ---
+    user_prompt = (
+        f"## Available Splunk Metadata\n\n{metadata_context}\n\n"
+        f"## Question\n\n{question}"
+    )
+    messages = [
+        {"role": "system", "content": _SPL_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    generated_spl = ""
+    try:
+        content, _msg = chat_completion(messages, ai_config, tools=None, temperature=0.1)
+        generated_spl = _extract_spl(content)
+    except Exception as exc:
+        logger.error("splunk_ask: SPL generation failed: %s", exc, exc_info=True)
+        return f"Error: SPL generation failed — {exc}\n\nMetadata found:\n{metadata_context}"
+
+    if not generated_spl:
+        return (
+            f"Error: LLM returned empty SPL.\n\n"
+            f"Raw LLM response:\n{content}\n\n"
+            f"Metadata found:\n{metadata_context}"
+        )
+
+    # --- Step 3: Execute on Splunk ---
+    try:
+        rows = run_search_oneshot(
+            splunk_config,
+            generated_spl,
+            earliest=args.get("earliest"),
+            latest=args.get("latest"),
+        )
+    except Exception as exc:
+        logger.error("splunk_ask: SPL execution failed: %s", exc, exc_info=True)
+        return (
+            f"Error: SPL execution failed — {exc}\n\n"
+            f"Generated SPL:\n```spl\n{generated_spl}\n```\n\n"
+            f"You can fix the SPL and run it manually with splunk_search."
+        )
+
+    title = f"Splunk Ask: {question}"
+    return _structured_table(title, rows, spl=generated_spl)

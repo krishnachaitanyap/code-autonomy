@@ -20,6 +20,68 @@ from src.agent.knowledge import (
 
 _BUDGET = 9500  # leave headroom below _REPO_KNOWLEDGE_MAX_CHARS (10,000)
 _SKILLS_BUDGET = 12000  # SKILLS.md with deep stack analysis
+_CLAUDE_BUDGET = 15000  # CLAUDE.md — prescriptive rules for Claude Code
+
+# ---------------------------------------------------------------------------
+# Build-command lookup: (language, build_tool) → commands
+# ---------------------------------------------------------------------------
+
+_BUILD_COMMANDS: dict[tuple[str, str], dict[str, str]] = {
+    ("java", "maven"): {
+        "build": "mvn clean package -DskipTests",
+        "test": "mvn test",
+        "single_test": "mvn test -Dtest={ClassName}",
+        "run": "mvn spring-boot:run",
+    },
+    ("java", "gradle"): {
+        "build": "./gradlew build -x test",
+        "test": "./gradlew test",
+        "single_test": "./gradlew test --tests {ClassName}",
+        "run": "./gradlew bootRun",
+    },
+    ("python", "pip"): {
+        "build": "pip install -e .",
+        "test": "pytest",
+        "single_test": "pytest {file}::{test}",
+        "run": "python -m app",
+    },
+    ("python", "poetry"): {
+        "build": "poetry install",
+        "test": "poetry run pytest",
+        "single_test": "poetry run pytest {file}::{test}",
+        "run": "poetry run python -m app",
+    },
+    ("javascript", "npm"): {
+        "build": "npm run build",
+        "test": "npm test",
+        "single_test": "npx jest {file}",
+        "run": "npm start",
+    },
+    ("javascript", "yarn"): {
+        "build": "yarn build",
+        "test": "yarn test",
+        "single_test": "yarn jest {file}",
+        "run": "yarn start",
+    },
+    ("typescript", "npm"): {
+        "build": "npm run build",
+        "test": "npm test",
+        "single_test": "npx jest {file}",
+        "run": "npm start",
+    },
+    ("typescript", "yarn"): {
+        "build": "yarn build",
+        "test": "yarn test",
+        "single_test": "yarn jest {file}",
+        "run": "yarn start",
+    },
+    ("go", "go"): {
+        "build": "go build ./...",
+        "test": "go test ./...",
+        "single_test": "go test -run {TestName} ./...",
+        "run": "go run .",
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +512,381 @@ def generate_knowledge_markdown(consciousness: ProjectConsciousness) -> str:
 
     content = "\n".join(parts)
     return _trim_to_budget(content, _BUDGET)
+
+
+# ---------------------------------------------------------------------------
+# Prescriptive section generators for CLAUDE.md (consume StackProfile)
+# ---------------------------------------------------------------------------
+
+def _resolve_build_commands(conventions: dict, profile) -> dict[str, str]:
+    """Resolve build/test/run commands from conventions and profile."""
+    lang = conventions.get("language", "").lower()
+    build_tool = conventions.get("build_tool", "").lower()
+    test_fw = conventions.get("test_framework", "").lower()
+
+    cmds = dict(_BUILD_COMMANDS.get((lang, build_tool), {}))
+    if not cmds:
+        # Try partial match on language
+        for (l, _b), c in _BUILD_COMMANDS.items():
+            if l == lang:
+                cmds = dict(c)
+                break
+
+    # Refine test command based on test framework
+    if test_fw:
+        if "pytest" in test_fw:
+            cmds["test"] = "pytest"
+            cmds["single_test"] = "pytest {file}::{test}"
+        elif "unittest" in test_fw:
+            cmds["test"] = "python -m unittest discover"
+            cmds["single_test"] = "python -m unittest {module}.{TestClass}.{test}"
+        elif "junit5" in test_fw or "jupiter" in test_fw:
+            pass  # maven/gradle defaults are fine
+        elif "jest" in test_fw:
+            cmds["single_test"] = "npx jest {file}"
+        elif "mocha" in test_fw:
+            cmds["test"] = "npx mocha"
+            cmds["single_test"] = "npx mocha --grep '{pattern}'"
+
+    # Add port from config_properties if available
+    if profile and profile.config_properties:
+        port = profile.config_properties.get("server.port", "")
+        if port and "run" in cmds:
+            cmds["run"] = cmds["run"] + f"  # serves on port {port}"
+
+    return cmds
+
+
+def _claude_section_build_and_test(conventions: dict, profile) -> str:
+    """Prescriptive build, test, and run commands."""
+    cmds = _resolve_build_commands(conventions, profile)
+    if not cmds:
+        return "\n".join([
+            "## Build & Test",
+            "",
+            "<!-- TODO: Add build command, e.g. `mvn clean package` -->",
+            "<!-- TODO: Add test command, e.g. `mvn test` -->",
+        ])
+
+    lines = ["## Build & Test", ""]
+    if "build" in cmds:
+        lines.append(f"- **Build:** `{cmds['build']}`")
+    if "test" in cmds:
+        lines.append(f"- **Test:** `{cmds['test']}`")
+    if "single_test" in cmds:
+        lines.append(f"- **Single test:** `{cmds['single_test']}`")
+    if "run" in cmds:
+        lines.append(f"- **Run:** `{cmds['run']}`")
+    return "\n".join(lines)
+
+
+def _claude_section_project_structure(structure: dict) -> str:
+    """Prescriptive directory layout rules."""
+    lines = ["## Project Structure", ""]
+    if not structure:
+        lines.append("<!-- TODO: Define source and test directories -->")
+        return "\n".join(lines)
+
+    tree = _format_structure(structure, indent=0, max_depth=2)
+    if len(tree) > 1200:
+        tree = tree[:1200] + "\n... (trimmed)"
+
+    # Extract top-level dirs for prescriptive rules
+    subdirs = structure.get("subdirs", {})
+    src_dirs = [d for d in subdirs if "src" in d.lower()]
+    test_dirs = [d for d in subdirs if "test" in d.lower()]
+
+    if src_dirs:
+        lines.append(f"- **Source:** `{', '.join(src_dirs)}`")
+    if test_dirs:
+        lines.append(f"- **Tests:** `{', '.join(test_dirs)}`")
+    if not src_dirs and not test_dirs:
+        lines.append("```")
+        lines.append(tree)
+        lines.append("```")
+    return "\n".join(lines)
+
+
+def _claude_section_code_style(conventions: dict) -> str:
+    """Prescriptive naming and style rules."""
+    naming = conventions.get("naming_style", "")
+    lang = conventions.get("language", "").lower()
+    lines = ["## Code Style", ""]
+
+    if naming and naming != "unknown":
+        lines.append(f"- Use **{naming}** for variables and functions")
+    elif lang == "java":
+        lines.append("- Use **camelCase** for methods, **PascalCase** for classes")
+    elif lang in ("python",):
+        lines.append("- Use **snake_case** for functions/variables, **PascalCase** for classes")
+    elif lang in ("javascript", "typescript"):
+        lines.append("- Use **camelCase** for functions/variables, **PascalCase** for components/classes")
+    else:
+        lines.append("<!-- TODO: Define naming conventions -->")
+
+    return "\n".join(lines)
+
+
+def _claude_section_api_rules(profile) -> str:
+    """Prescriptive rules for API layer."""
+    if not profile or not profile.api_endpoints:
+        return ""
+
+    api_techs = profile.technologies.get("api", [])
+    lines = ["## API Rules", ""]
+
+    # Detect framework
+    if any("spring" in t.lower() for t in api_techs):
+        lines.append("- Use `@RestController` for REST endpoints")
+        lines.append("- Use `@RequestMapping` or shorthand (`@GetMapping`, `@PostMapping`) for routes")
+        lines.append("- Return `ResponseEntity<>` for explicit status codes")
+    elif any("flask" in t.lower() for t in api_techs):
+        lines.append("- Use `@app.route()` or Blueprint for route definitions")
+        lines.append("- Use `jsonify()` for JSON responses")
+    elif any("fastapi" in t.lower() for t in api_techs):
+        lines.append("- Use `@router` decorators for route definitions")
+        lines.append("- Use Pydantic models for request/response validation")
+    elif any("express" in t.lower() for t in api_techs):
+        lines.append("- Use `router.get/post/put/delete` for route definitions")
+        lines.append("- Use `res.json()` for JSON responses")
+
+    # List existing controllers as patterns to follow
+    classes = {ep.get("class", "") for ep in profile.api_endpoints if ep.get("class")}
+    if classes:
+        examples = list(classes)[:3]
+        lines.append(f"- Follow the pattern of: `{'`, `'.join(examples)}`")
+
+    return "\n".join(lines)
+
+
+def _claude_section_messaging_rules(profile) -> str:
+    """Prescriptive messaging rules (Kafka, RabbitMQ, etc.)."""
+    if not profile or not profile.messaging:
+        return ""
+
+    msg_techs = profile.technologies.get("messaging", [])
+    lines = ["## Messaging Rules", ""]
+
+    if any("kafka" in t.lower() for t in msg_techs):
+        lines.append("- Use `@KafkaListener` with `JsonDeserializer` for consumers")
+        lines.append("- Always specify `groupId` on consumer annotations")
+        lines.append("- Use `KafkaTemplate` for producers")
+    elif any("rabbit" in t.lower() for t in msg_techs):
+        lines.append("- Use `@RabbitListener` for consumers")
+        lines.append("- Define exchanges and queues in configuration")
+    elif any("sqs" in t.lower() for t in msg_techs):
+        lines.append("- Use `@SqsListener` for consumers")
+
+    # List existing topics
+    topics = {m.get("topic", "") for m in profile.messaging if m.get("topic")}
+    if topics:
+        lines.append(f"- Existing topics: `{'`, `'.join(t for t in topics if t)}`")
+
+    return "\n".join(lines)
+
+
+def _claude_section_data_rules(profile) -> str:
+    """Prescriptive data-layer rules."""
+    if not profile or not profile.data_stores:
+        return ""
+
+    db_techs = profile.technologies.get("database", [])
+    lines = ["## Data Layer Rules", ""]
+
+    has_jpa = any("jpa" in t.lower() or "hibernate" in t.lower() for t in db_techs)
+    has_flyway = any("flyway" in t.lower() for t in db_techs)
+    has_liquibase = any("liquibase" in t.lower() for t in db_techs)
+    has_sqlalchemy = any("sqlalchemy" in t.lower() for t in db_techs)
+
+    if has_jpa:
+        lines.append("- Use `@Entity` with `@Table` for JPA entities")
+        lines.append("- Use Spring Data `JpaRepository<>` for data access")
+    if has_sqlalchemy:
+        lines.append("- Use SQLAlchemy `declarative_base()` models")
+        lines.append("- Use sessions via dependency injection")
+    if has_flyway:
+        lines.append("- Always add a Flyway migration for schema changes (`db/migration/V{N}__{desc}.sql`)")
+    if has_liquibase:
+        lines.append("- Always add a Liquibase changeset for schema changes")
+
+    # List entities
+    entities = []
+    for store in profile.data_stores:
+        entities.extend(store.get("entities", []))
+    if entities:
+        lines.append(f"- Existing entities: `{'`, `'.join(entities[:10])}`")
+
+    return "\n".join(lines)
+
+
+def _claude_section_caching_rules(profile) -> str:
+    """Prescriptive caching rules."""
+    cache_techs = profile.technologies.get("cache", []) if profile else []
+    if not cache_techs:
+        return ""
+
+    lines = ["## Caching Rules", ""]
+    if any("redis" in t.lower() for t in cache_techs):
+        lines.append("- Use `@Cacheable` / `@CacheEvict` for method-level caching")
+        lines.append("- Always set TTL — do not cache indefinitely")
+        lines.append("- Use Redis as the backing store")
+    elif any("ehcache" in t.lower() for t in cache_techs):
+        lines.append("- Use `@Cacheable` with Ehcache configuration")
+        lines.append("- Always set TTL in ehcache.xml")
+    else:
+        lines.append(f"- Cache provider: {', '.join(cache_techs)}")
+        lines.append("- Always set TTL on cache entries")
+
+    return "\n".join(lines)
+
+
+def _claude_section_downstream_rules(profile) -> str:
+    """Prescriptive rules for calling downstream services."""
+    if not profile or not profile.downstream_services:
+        return ""
+
+    http_techs = profile.technologies.get("http_client", [])
+    lines = ["## Downstream Service Rules", ""]
+
+    has_feign = any("feign" in t.lower() for t in http_techs)
+    has_resilience = any("resilience" in t.lower() or "circuit" in t.lower() for t in http_techs)
+
+    if has_feign:
+        lines.append("- Use `@FeignClient` for declarative HTTP clients")
+    if has_resilience:
+        lines.append("- Always wrap external calls with `@CircuitBreaker` (fallback required)")
+        lines.append("- Use `@Retry` for transient failures")
+
+    for svc in profile.downstream_services[:5]:
+        name = svc.get("name", "")
+        client = svc.get("client_type", "")
+        if name:
+            lines.append(f"- `{name}` — via {client}" if client else f"- `{name}`")
+
+    return "\n".join(lines)
+
+
+def _claude_section_config_rules(profile) -> str:
+    """Prescriptive configuration rules."""
+    if not profile:
+        return ""
+    config_techs = profile.technologies.get("config", [])
+    if not config_techs and not profile.config_sources:
+        return ""
+
+    lines = ["## Configuration Rules", ""]
+
+    if any("cloud config" in t.lower() or "consul" in t.lower() for t in config_techs):
+        lines.append("- Configuration is externalized — do not hardcode values")
+
+    # RefreshScope classes
+    refresh = [cs.get("source", "") for cs in profile.config_sources if cs.get("type") == "RefreshScope"]
+    if refresh:
+        for cls in refresh:
+            lines.append(f"- `@RefreshScope` on `{cls}` — do not remove")
+
+    # ConfigurationProperties
+    config_props = [cs for cs in profile.config_sources if cs.get("type") == "ConfigurationProperties"]
+    if config_props:
+        for cp in config_props[:5]:
+            prefix = cp.get("key_prefix", "")
+            source = cp.get("source", "")
+            if prefix and source:
+                lines.append(f"- `@ConfigurationProperties(\"{prefix}\")` bound to `{source}`")
+
+    return "\n".join(lines)
+
+
+def _claude_section_deployment_rules(profile) -> str:
+    """Prescriptive deployment rules."""
+    if not profile or not profile.k8s_resources:
+        return ""
+
+    lines = ["## Deployment Rules", ""]
+    for res in profile.k8s_resources[:5]:
+        kind = res.get("kind", "")
+        name = res.get("name", "")
+        image = res.get("image", "")
+        replicas = res.get("replicas", "")
+        if kind == "Deployment" or kind == "StatefulSet":
+            if image:
+                lines.append(f"- Docker base image: `{image}`")
+            if replicas:
+                lines.append(f"- Default replicas: {replicas}")
+
+    # Check for port in config_properties
+    if profile.config_properties:
+        port = profile.config_properties.get("server.port", "")
+        if port:
+            lines.append(f"- Application port: {port}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# CLAUDE.md assembly + write
+# ---------------------------------------------------------------------------
+
+def generate_claude_md(consciousness: ProjectConsciousness, repo_path: str = "") -> str:
+    """Assemble a prescriptive CLAUDE.md from ProjectConsciousness + stack analysis.
+
+    CLAUDE.md is prescriptive — it tells Claude Code *how* to work in this repo
+    with imperative rules like "Use @KafkaListener", "Always add migration".
+    Enforces a 15,000 character budget.
+    """
+    conventions = consciousness.conventions or {}
+    structure = consciousness.structure or {}
+
+    # Run stack analysis if repo_path available
+    profile = None
+    if repo_path:
+        try:
+            from src.consciousness.stack_analyzer import analyze_stack
+            profile = analyze_stack(repo_path, consciousness)
+        except Exception:
+            pass
+
+    lang = conventions.get("language", "unknown")
+    build = conventions.get("build_tool", "unknown")
+
+    parts = [
+        "# CLAUDE.md",
+        "",
+        f"Prescriptive rules for working in this {lang} project.",
+        "",
+        _claude_section_build_and_test(conventions, profile),
+    ]
+
+    parts.extend(["", _claude_section_project_structure(structure)])
+    parts.extend(["", _claude_section_code_style(conventions)])
+
+    if profile:
+        # Conditional prescriptive sections — only include when data exists
+        for section_fn, check in [
+            (_claude_section_api_rules, profile.api_endpoints),
+            (_claude_section_messaging_rules, profile.messaging),
+            (_claude_section_data_rules, profile.data_stores),
+            (_claude_section_caching_rules, profile.technologies.get("cache")),
+            (_claude_section_downstream_rules, profile.downstream_services),
+            (_claude_section_config_rules,
+             profile.technologies.get("config") or profile.config_sources),
+            (_claude_section_deployment_rules, profile.k8s_resources),
+        ]:
+            if check:
+                section = section_fn(profile)
+                if section:
+                    parts.extend(["", section])
+
+    content = "\n".join(parts)
+    return _trim_to_budget(content, _CLAUDE_BUDGET)
+
+
+def write_claude_md(repo_path: str, content: str) -> str:
+    """Write CLAUDE.md to the repo root. Returns absolute path."""
+    root = Path(repo_path)
+    target = root / "CLAUDE.md"
+    target.write_text(content, encoding="utf-8")
+    return str(target.resolve())
 
 
 def generate_skills_markdown(consciousness: ProjectConsciousness, repo_path: str = "") -> str:

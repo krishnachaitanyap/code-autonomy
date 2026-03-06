@@ -503,6 +503,13 @@ def _splunk_enabled(agent_config: Optional[dict] = None) -> bool:
     return bool(agent_config.get("splunk_enabled", False))
 
 
+def _certs_enabled(agent_config: Optional[dict] = None) -> bool:
+    """Check if certificate inspection tools are enabled in agent config."""
+    if agent_config is None:
+        return False
+    return bool(agent_config.get("certs_enabled", False))
+
+
 def build_agent_tools(agent_config: Optional[dict] = None, code_index: Optional["CodeIndex"] = None) -> list[dict]:
     """Build the full tool list for the new agent mode."""
     tools: list[dict] = []
@@ -519,6 +526,9 @@ def build_agent_tools(agent_config: Optional[dict] = None, code_index: Optional[
     if _splunk_enabled(agent_config):
         from src.splunk import SPLUNK_TOOLS
         tools.extend(SPLUNK_TOOLS)
+    if _certs_enabled(agent_config):
+        from src.certs import CERTS_TOOLS
+        tools.extend(CERTS_TOOLS)
     return tools
 
 
@@ -537,6 +547,9 @@ def build_plan_tools(agent_config: Optional[dict] = None, code_index: Optional["
     if _splunk_enabled(agent_config):
         from src.splunk import SPLUNK_TOOLS
         tools.extend(SPLUNK_TOOLS)
+    if _certs_enabled(agent_config):
+        from src.certs import CERTS_TOOLS
+        tools.extend(CERTS_TOOLS)
     return tools
 
 
@@ -554,6 +567,9 @@ def build_ask_tools(agent_config: Optional[dict] = None, code_index: Optional["C
     if _splunk_enabled(agent_config):
         from src.splunk import SPLUNK_TOOLS
         tools.extend(SPLUNK_TOOLS)
+    if _certs_enabled(agent_config):
+        from src.certs import CERTS_TOOLS
+        tools.extend(CERTS_TOOLS)
     return tools
 
 
@@ -665,7 +681,7 @@ def execute_tool(
             return execute_code_index_tool(code_index, tool_name, args)
 
     # --- Splunk tools ---
-    if tool_name in ("splunk_discover", "splunk_search", "splunk_stats", "splunk_saved_search"):
+    if tool_name in ("splunk_discover", "splunk_search", "splunk_stats", "splunk_saved_search", "splunk_ask"):
         splunk_cfg = {
             "splunk": (agent_config or {}).get("splunk_config", {}),
             "opensearch": (agent_config or {}).get("opensearch_config", {}),
@@ -673,6 +689,11 @@ def execute_tool(
         }
         from src.splunk import execute_splunk_tool
         return execute_splunk_tool(splunk_cfg, tool_name, args)
+
+    # --- Certificate inspection tools ---
+    if tool_name in ("cert_find", "cert_list", "cert_details"):
+        from src.certs import execute_certs_tool
+        return execute_certs_tool(str(repo_root), tool_name, args)
 
     return f"Unknown tool: {tool_name}"
 
