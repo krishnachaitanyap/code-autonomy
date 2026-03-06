@@ -117,6 +117,7 @@ async def create_jira_run(data: JiraRunCreate):
     run = _jira_run_service.create_run(
         repo_id=data.repo_id,
         jira_project=data.jira_project,
+        branch=data.branch,
     )
 
     # Load config and launch background execution

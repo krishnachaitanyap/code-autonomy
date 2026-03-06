@@ -162,6 +162,7 @@ class JiraSessionResponse(BaseModel):
 class JiraRunCreate(BaseModel):
     repo_id: str
     jira_project: str = ""
+    branch: str = ""
 
 class JiraRunResponse(BaseModel):
     id: str

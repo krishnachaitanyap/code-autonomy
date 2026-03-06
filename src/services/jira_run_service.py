@@ -49,14 +49,17 @@ class JiraRunService:
             return db.get(JiraRun, run_id)
 
     def create_run(
-        self, *, repo_id: str, jira_project: str = "", config: Optional[dict] = None
+        self, *, repo_id: str, jira_project: str = "", branch: str = "", config: Optional[dict] = None
     ) -> JiraRun:
         with get_session() as db:
+            run_config = config or {}
+            if branch:
+                run_config["branch"] = branch
             run = JiraRun(
                 id=_uuid(),
                 repo_id=repo_id,
                 jira_project=jira_project,
-                config=config or {},
+                config=run_config,
             )
             db.add(run)
             db.flush()
@@ -191,6 +194,12 @@ class JiraRunService:
             bb_cfg = config.get("bitbucket") or {}
             bb_enabled = bb_cfg.get("enabled", False)
 
+            # Per-run branch override from UI
+            with get_session() as db:
+                _run = db.get(JiraRun, run_id)
+                run_branch = (_run.config or {}).get("branch", "") if _run else ""
+            base_branch = run_branch or bb_cfg.get("base_branch", "main")
+
             if not jira_cfg.get("base_url"):
                 _log_event("error", "Missing [jira] section in config — cannot connect to JIRA")
                 with get_session() as db:
@@ -289,7 +298,7 @@ class JiraRunService:
                 "max_turns": int(agent_cfg_section.get("max_turns", 50)),
                 "smart_summarization": agent_cfg_section.get("smart_summarization", True),
                 "truncation_limit": int(agent_cfg_section.get("truncation_limit", 30000)),
-                "skip_tests": False,
+                "skip_tests": agent_cfg_section.get("skip_tests", False),
             }
 
             # Resolve API key
@@ -343,14 +352,20 @@ class JiraRunService:
                     except Exception:
                         pass
 
-                # Bitbucket branch (optional)
+                # Branch creation
                 story_branch = ""
                 if bb_enabled:
-                    story_branch = self._create_branch(bb_cfg, repo_path, key)
+                    story_branch = self._create_branch(bb_cfg, repo_path, key, base_branch)
                     if story_branch:
                         _log_event("story_branch", f"Created branch: {story_branch}")
                     else:
                         _log_event("story_error", f"{key}: Branch creation failed")
+                else:
+                    story_branch = self._create_local_branch(repo_path, key, base_branch)
+                    if story_branch:
+                        _log_event("story_branch", f"Created local branch: {story_branch}")
+                    else:
+                        _log_event("story_error", f"{key}: Local branch creation failed")
 
                 # Run agent with StdoutTee
                 _log_event("generating_tests", f"Invoking agent for {key}...")
@@ -377,14 +392,17 @@ class JiraRunService:
                     if result.working_memory:
                         accumulated_wm.update(result.working_memory)
 
-                    # Bitbucket: commit + PR
+                    # Commit + PR
                     pr_url = ""
                     if bb_enabled and story_branch:
                         pr_url = self._commit_and_pr(
-                            bb_cfg, repo_path, story_branch, key, story, result, repo_url
+                            bb_cfg, repo_path, story_branch, key, story, result, repo_url, base_branch
                         )
                         if pr_url:
                             _log_event("story_pr", f"{key}: PR created -> {pr_url}")
+                    elif story_branch:
+                        self._commit_local(repo_path, story_branch, key, result)
+                        _log_event("story_commit", f"{key}: Changes committed locally on {story_branch}")
 
                     # JIRA comment + transition
                     self._post_success_comment(config, key, result, pr_url, token, add_jira_comment)
@@ -405,7 +423,9 @@ class JiraRunService:
 
                     # Discard branch on failure
                     if bb_enabled:
-                        self._discard_branch(bb_cfg, repo_path)
+                        self._discard_branch(repo_path, base_branch)
+                    elif story_branch:
+                        self._discard_local_branch(repo_path, base_branch)
 
                     # JIRA failure comment
                     self._post_failure_comment(config, key, error_msg, token, add_jira_comment)
@@ -531,8 +551,8 @@ class JiraRunService:
         finally:
             sys.stdout = original_stdout
 
-    def _create_branch(self, bb_cfg: dict, repo_path: str, key: str) -> str:
-        """Create a feature branch for a story. Returns branch name or empty string."""
+    def _create_branch(self, bb_cfg: dict, repo_path: str, key: str, base_branch: str) -> str:
+        """Create a feature branch for a story via Bitbucket. Returns branch name or empty string."""
         try:
             from src.jira.bitbucket_bridge import clone_and_prepare_branch
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -542,7 +562,7 @@ class JiraRunService:
             result_dir = clone_and_prepare_branch(
                 bb_cfg.get("clone_url", ""),
                 branch_name=story_branch,
-                from_branch=bb_cfg.get("base_branch", "main"),
+                from_branch=base_branch,
                 target_dir=repo_path,
                 auth_token=bb_token,
                 protocol=bb_cfg.get("clone_protocol", "ssh"),
@@ -551,7 +571,7 @@ class JiraRunService:
         except Exception:
             return ""
 
-    def _commit_and_pr(self, bb_cfg, repo_path, story_branch, key, story, result, repo_url) -> str:
+    def _commit_and_pr(self, bb_cfg, repo_path, story_branch, key, story, result, repo_url, base_branch: str) -> str:
         """Commit changes and create PR. Returns PR URL or empty string."""
         try:
             from src.jira.bitbucket_bridge import commit_and_push, create_story_pr
@@ -563,7 +583,7 @@ class JiraRunService:
             if pushed:
                 pr_url = create_story_pr(
                     bb_cfg, repo_url, story_branch,
-                    bb_cfg.get("base_branch", "main"),
+                    base_branch,
                     key, story["summary"], result.summary,
                 ) or ""
                 return pr_url
@@ -571,10 +591,41 @@ class JiraRunService:
             pass
         return ""
 
-    def _discard_branch(self, bb_cfg: dict, repo_path: str):
+    def _discard_branch(self, repo_path: str, base_branch: str):
         try:
             from src.jira.bitbucket_bridge import discard_story_changes
-            discard_story_changes(repo_path, bb_cfg.get("base_branch", "main"))
+            discard_story_changes(repo_path, base_branch)
+        except Exception:
+            pass
+
+    def _create_local_branch(self, repo_path: str, key: str, base_branch: str) -> str:
+        """Create a local feature branch for a story (no Bitbucket). Returns branch name or empty string."""
+        try:
+            from src.platform.git_ops import _git, checkout_branch
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            safe_key = re.sub(r"[^\w\-]", "-", key.strip()).strip("-")
+            story_branch = f"feature/auto-{safe_key}-{ts}"
+            _git(repo_path, "checkout", base_branch)
+            checkout_branch(repo_path, story_branch, create=True)
+            return story_branch
+        except Exception:
+            return ""
+
+    def _commit_local(self, repo_path: str, story_branch: str, key: str, result) -> None:
+        """Commit changes locally on the story branch (no push, no PR)."""
+        try:
+            from src.platform.git_ops import stage_and_commit
+            stage_and_commit(repo_path, f"{key}: {result.summary}")
+        except Exception:
+            pass
+
+    def _discard_local_branch(self, repo_path: str, base_branch: str) -> None:
+        """Discard local branch changes and return to base branch."""
+        try:
+            from src.platform.git_ops import _git
+            _git(repo_path, "checkout", base_branch)
+            _git(repo_path, "clean", "-fd")
+            _git(repo_path, "reset", "--hard")
         except Exception:
             pass
 
