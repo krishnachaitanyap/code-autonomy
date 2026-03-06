@@ -19,7 +19,7 @@ from src.agent.knowledge import (
 )
 
 _BUDGET = 9500  # leave headroom below _REPO_KNOWLEDGE_MAX_CHARS (10,000)
-_SKILLS_BUDGET = 5000  # SKILLS.md should be more concise
+_SKILLS_BUDGET = 12000  # SKILLS.md with deep stack analysis
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +140,182 @@ def _section_things_to_watch() -> str:
         "",
         "<!-- TODO: gotchas, common mistakes, files that should not be modified, etc. -->",
     ])
+
+
+# ---------------------------------------------------------------------------
+# Stack-aware section generators (consume StackProfile)
+# ---------------------------------------------------------------------------
+
+def _section_app_type(profile) -> str:
+    return f"- **App type:** {profile.app_type}"
+
+
+def _section_tech_stack_table(profile) -> str:
+    if not profile.technologies:
+        return ""
+    lines = ["## Technology Stack", "",
+             "| Category | Technologies |",
+             "|----------|-------------|"]
+    category_labels = {
+        "api": "API", "messaging": "Messaging", "cache": "Cache",
+        "database": "Database", "http_client": "HTTP Clients",
+        "observability": "Observability", "config": "Config",
+        "security": "Security", "discovery": "Discovery",
+        "batch": "Batch", "frontend": "Frontend",
+    }
+    for cat, techs in profile.technologies.items():
+        label = category_labels.get(cat, cat.title())
+        lines.append(f"| {label} | {', '.join(techs)} |")
+    return "\n".join(lines)
+
+
+def _section_api_layer(profile) -> str:
+    if not profile.api_endpoints:
+        return ""
+    lines = ["## API Layer", ""]
+    # Group by class
+    by_class: dict[str, list] = {}
+    for ep in profile.api_endpoints:
+        cls = ep.get("class", "")
+        by_class.setdefault(cls, []).append(ep)
+    for cls, eps in by_class.items():
+        methods = []
+        for ep in eps:
+            http = ep.get("http_method", "")
+            path = ep.get("path", "")
+            if http and http != "CONTROLLER" and path:
+                methods.append(f"{http} {path}")
+        if methods:
+            lines.append(f"- `{cls}` \u2192 {', '.join(methods)}")
+        elif cls:
+            lines.append(f"- `{cls}` (REST controller)")
+    return "\n".join(lines)
+
+
+def _section_messaging(profile) -> str:
+    if not profile.messaging:
+        return ""
+    lines = ["## Messaging", "",
+             "| Direction | Type | Topic | Consumer Group |",
+             "|-----------|------|-------|----------------|"]
+    for msg in profile.messaging:
+        direction = msg.get("direction", "").title()
+        msg_type = msg.get("type", "")
+        topic = msg.get("topic", "") or "\u2014"
+        group = msg.get("group", "") or "\u2014"
+        lines.append(f"| {direction} | {msg_type} | {topic} | {group} |")
+    return "\n".join(lines)
+
+
+def _section_data_layer(profile) -> str:
+    if not profile.data_stores:
+        return ""
+    # Collect entities and types
+    db_techs = profile.technologies.get("database", [])
+    entities = []
+    for store in profile.data_stores:
+        entities.extend(store.get("entities", []))
+
+    lines = ["## Data Layer", ""]
+    if db_techs:
+        lines.append(f"- **Database:** {', '.join(db_techs)}")
+    if entities:
+        lines.append(f"- **Entities:** {', '.join(entities)}")
+    return "\n".join(lines)
+
+
+def _section_caching(profile) -> str:
+    cache_techs = profile.technologies.get("cache", [])
+    if not cache_techs:
+        return ""
+    lines = ["## Caching", ""]
+    lines.append(f"- **Provider:** {', '.join(cache_techs)}")
+    # List cache annotations from observability
+    cache_details = [o.get("detail", "") for o in profile.observability if o.get("type") == "cache"]
+    if cache_details:
+        lines.append(f"- **Cached:** {', '.join(cache_details)}")
+    return "\n".join(lines)
+
+
+def _section_downstream_calls(profile) -> str:
+    if not profile.downstream_services:
+        return ""
+    http_techs = profile.technologies.get("http_client", [])
+    lines = ["## Downstream Services", "",
+             "| Service | Client | Notes |",
+             "|---------|--------|-------|"]
+    for svc in profile.downstream_services:
+        name = svc.get("name", "")
+        client = svc.get("client_type", "")
+        url = svc.get("url", "") or ""
+        # Check for circuit breaker
+        cb = next((t for t in (http_techs or []) if "circuit" in t.lower() or "resilience" in t.lower()), "")
+        notes = cb if cb else url
+        lines.append(f"| {name} | {client} | {notes} |")
+    return "\n".join(lines)
+
+
+def _section_config_management(profile) -> str:
+    config_techs = profile.technologies.get("config", [])
+    if not config_techs and not profile.config_sources:
+        return ""
+    lines = ["## Config Management", ""]
+    if config_techs:
+        lines.append(f"- {', '.join(config_techs)}")
+    refresh_classes = [cs.get("source", "") for cs in profile.config_sources if cs.get("type") == "RefreshScope"]
+    if refresh_classes:
+        lines.append(f"- @RefreshScope on: {', '.join(refresh_classes)}")
+    config_props = [cs for cs in profile.config_sources if cs.get("type") == "ConfigurationProperties"]
+    if config_props:
+        prefixes = [cs.get("key_prefix", "") for cs in config_props if cs.get("key_prefix")]
+        if prefixes:
+            lines.append(f"- @ConfigurationProperties: {', '.join(prefixes)}")
+    return "\n".join(lines)
+
+
+def _section_observability_section(profile) -> str:
+    obs_techs = profile.technologies.get("observability", [])
+    if not obs_techs:
+        return ""
+    lines = ["## Observability", ""]
+    lines.append(f"- {', '.join(obs_techs)}")
+    # Custom metrics
+    custom = [o for o in profile.observability if o.get("type") in ("Timed", "Counted", "Traced")]
+    if custom:
+        details = [f"@{o['type']}({o.get('detail', '')})" for o in custom[:5]]
+        lines.append(f"- Custom: {', '.join(details)}")
+    return "\n".join(lines)
+
+
+def _section_deployment(profile) -> str:
+    if not profile.k8s_resources:
+        return ""
+    lines = ["## Deployment", ""]
+    for res in profile.k8s_resources:
+        kind = res.get("kind", "")
+        name = res.get("name", "")
+        image = res.get("image", "")
+        replicas = res.get("replicas", "")
+        parts_list = [kind]
+        if name:
+            parts_list.append(name)
+        detail_parts = []
+        if image:
+            detail_parts.append(image)
+        if replicas:
+            detail_parts.append(f"{replicas} replicas")
+        detail = ", ".join(detail_parts)
+        lines.append(f"- **{': '.join(parts_list)}** \u2014 {detail}" if detail else f"- **{': '.join(parts_list)}**")
+    return "\n".join(lines)
+
+
+def _section_security(profile) -> str:
+    sec_techs = profile.technologies.get("security", [])
+    if not sec_techs:
+        return ""
+    lines = ["## Security", ""]
+    lines.append(f"- {', '.join(sec_techs)}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -276,51 +452,83 @@ def generate_knowledge_markdown(consciousness: ProjectConsciousness) -> str:
     return _trim_to_budget(content, _BUDGET)
 
 
-def generate_skills_markdown(consciousness: ProjectConsciousness) -> str:
-    """Assemble a concise SKILLS.md from ProjectConsciousness data.
+def generate_skills_markdown(consciousness: ProjectConsciousness, repo_path: str = "") -> str:
+    """Assemble a rich SKILLS.md from ProjectConsciousness + stack analysis.
 
-    Focused on actionable project context for agent prompts.
-    Enforces a 5,000 character budget (more concise than .code-autonomy.md).
+    When repo_path is provided, runs the static stack analyzer to extract
+    deep technology profiles (APIs, messaging, caching, databases, etc.).
+    Falls back to template-based output when repo_path is empty.
+
+    Enforces a 12,000 character budget.
     """
     conventions = consciousness.conventions or {}
     structure = consciousness.structure or {}
     signatures = consciousness.signatures or []
     samples = consciousness.implementation_samples or []
 
-    lang = conventions.get("language", "unknown")
-    build = conventions.get("build_tool", "unknown")
-    framework = conventions.get("test_framework", "unknown")
-
-    # Compact tech stack summary instead of separate sections
-    tech_lines = ["## Tech Stack", ""]
-    tech_items = []
-    if lang != "unknown":
-        tech_items.append(f"**Language:** {lang}")
-    if build != "unknown":
-        tech_items.append(f"**Build tool:** {build}")
-    if framework != "unknown":
-        tech_items.append(f"**Test framework:** {framework}")
-    if tech_items:
-        tech_lines.append(" | ".join(tech_items))
-    else:
-        tech_lines.append("Not detected")
-    tech_stack = "\n".join(tech_lines)
+    # Run stack analysis if repo_path available
+    profile = None
+    if repo_path:
+        try:
+            from src.consciousness.stack_analyzer import analyze_stack
+            profile = analyze_stack(repo_path, consciousness)
+        except Exception:
+            pass
 
     parts = [
         "# SKILLS.md",
         "",
         _section_project_overview(conventions),
-        "",
-        tech_stack,
-        "",
-        _section_repository_layout(structure),
-        "",
-        _section_important_files(signatures, samples),
-        "",
-        _section_coding_conventions(conventions),
-        "",
-        _section_testing(conventions),
     ]
+
+    if profile:
+        # Inject app type into overview
+        parts.append(_section_app_type(profile))
+
+        # Rich technology stack table
+        tech_table = _section_tech_stack_table(profile)
+        if tech_table:
+            parts.extend(["", tech_table])
+
+        # Conditional sections — only include when data was detected
+        for section_fn, check in [
+            (_section_api_layer, profile.api_endpoints),
+            (_section_messaging, profile.messaging),
+            (_section_data_layer, profile.data_stores),
+            (_section_caching, profile.technologies.get("cache")),
+            (_section_downstream_calls, profile.downstream_services),
+            (_section_config_management,
+             profile.technologies.get("config") or profile.config_sources),
+            (_section_observability_section,
+             profile.technologies.get("observability")),
+            (_section_deployment, profile.k8s_resources),
+            (_section_security, profile.technologies.get("security")),
+        ]:
+            if check:
+                section = section_fn(profile)
+                if section:
+                    parts.extend(["", section])
+    else:
+        # Fallback: basic tech stack summary (original behavior)
+        lang = conventions.get("language", "unknown")
+        build = conventions.get("build_tool", "unknown")
+        framework = conventions.get("test_framework", "unknown")
+        tech_lines = ["", "## Tech Stack", ""]
+        tech_items = []
+        if lang != "unknown":
+            tech_items.append(f"**Language:** {lang}")
+        if build != "unknown":
+            tech_items.append(f"**Build tool:** {build}")
+        if framework != "unknown":
+            tech_items.append(f"**Test framework:** {framework}")
+        if tech_items:
+            tech_lines.append(" | ".join(tech_items))
+        else:
+            tech_lines.append("Not detected")
+        parts.extend(tech_lines)
+
+    parts.extend(["", _section_repository_layout(structure)])
+    parts.extend(["", _section_important_files(signatures, samples)])
 
     content = "\n".join(parts)
     return _trim_to_budget(content, _SKILLS_BUDGET)

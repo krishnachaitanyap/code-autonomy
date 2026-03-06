@@ -351,7 +351,68 @@ def _detect_conventions_from_index(repo: Path, idx: _RepoIndex) -> dict:
 
     conventions["naming_style"] = "camelCase" if conventions["language"] == "java" else "snake_case"
     conventions["_total_code_files"] = idx.total_code_files
+
+    # Quick app_type classification from dependency files
+    conventions["app_type"] = _classify_app_type_quick(repo)
+
     return conventions
+
+
+def _classify_app_type_quick(repo: Path) -> str:
+    """Quick app_type classification from dependency manifests (no full analysis)."""
+    has_api = False
+    has_messaging = False
+    has_batch = False
+    has_frontend = False
+
+    pom = repo / "pom.xml"
+    if pom.is_file():
+        try:
+            content = pom.read_text(errors="replace")
+            if "spring-boot-starter-web" in content or "spring-boot-starter-webflux" in content:
+                has_api = True
+            if "spring-kafka" in content or "spring-boot-starter-amqp" in content:
+                has_messaging = True
+            if "spring-boot-starter-batch" in content or "quartz" in content:
+                has_batch = True
+        except Exception:
+            pass
+
+    pkg = repo / "package.json"
+    if pkg.is_file():
+        try:
+            content = pkg.read_text(errors="replace")
+            if any(fw in content for fw in ('"express"', '"fastify"', '"@nestjs/core"', '"koa"')):
+                has_api = True
+            if '"kafkajs"' in content or '"amqplib"' in content:
+                has_messaging = True
+            if any(fw in content for fw in ('"react"', '"vue"', '"@angular/core"', '"svelte"')):
+                has_frontend = True
+        except Exception:
+            pass
+
+    req = repo / "requirements.txt"
+    pyproj = repo / "pyproject.toml"
+    for dep_file in (req, pyproj):
+        if dep_file.is_file():
+            try:
+                content = dep_file.read_text(errors="replace").lower()
+                if any(fw in content for fw in ("flask", "fastapi", "django")):
+                    has_api = True
+                if "celery" in content or "kafka" in content:
+                    has_messaging = True
+            except Exception:
+                pass
+
+    if has_api and has_messaging:
+        return "middleware"
+    if has_batch:
+        return "batch"
+    if has_frontend and not has_api:
+        return "web-frontend"
+    if has_api:
+        return "microservice"
+    return "service"
 
 
 def _detect_conventions(repo: Path) -> dict:

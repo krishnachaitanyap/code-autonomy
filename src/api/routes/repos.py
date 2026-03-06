@@ -57,7 +57,7 @@ async def register_repo(body: RepoCreate):
                 consciousness = repo_service.build_consciousness(
                     repo.local_path, config, repo.url,
                 )
-                content = generate_skills_markdown(consciousness)
+                content = generate_skills_markdown(consciousness, repo_path=repo.local_path)
                 skills_path.write_text(content, encoding="utf-8")
                 logger.info("Auto-generated SKILLS.md for repo %s", repo.id)
             except Exception as exc:
@@ -173,7 +173,7 @@ async def generate_skills(repo_id: str):
         consciousness = repo_service.build_consciousness(
             repo.local_path, config, repo.url,
         )
-        content = generate_skills_markdown(consciousness)
+        content = generate_skills_markdown(consciousness, repo_path=repo.local_path)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to generate SKILLS.md: {exc}")
 
