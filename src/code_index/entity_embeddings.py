@@ -342,14 +342,19 @@ class EntityEmbeddings:
             return False
 
     def _embed_texts(self, texts: list[str]):
-        """Call OpenAI embeddings API via litellm. Returns numpy array (n, dim)."""
+        """Call embeddings API. Uses Azure OpenAI when provider=azure, else litellm."""
         import numpy as np
-        from src.llm_client import _resolve_api_key
+        from src.llm_client import _is_azure_provider, _resolve_api_key
 
         ai_cfg = self._config.get("ai", self._config) if isinstance(
             self._config.get("ai"), dict
         ) else self._config
 
+        # --- Azure OpenAI path ---
+        if _is_azure_provider(ai_cfg):
+            return self._embed_texts_azure(texts)
+
+        # --- Standard OpenAI / litellm path ---
         api_key = _resolve_api_key(ai_cfg)
         if not api_key:
             raise ValueError("No API key available for embeddings")
@@ -368,6 +373,21 @@ class EntityEmbeddings:
             )
             # litellm returns response.data = [{"embedding": [...], "index": i}, ...]
             batch_vecs = [item["embedding"] for item in response.data]
+            all_vectors.extend(batch_vecs)
+
+        return np.array(all_vectors, dtype=np.float32)
+
+    def _embed_texts_azure(self, texts: list[str]):
+        """Call Azure OpenAI Embeddings via LangChain. Returns numpy array (n, dim)."""
+        import numpy as np
+        from src.azure_openai_client import create_embeddings_client
+
+        client = create_embeddings_client(self._config)
+
+        all_vectors = []
+        for i in range(0, len(texts), _BATCH_SIZE):
+            batch = texts[i : i + _BATCH_SIZE]
+            batch_vecs = client.embed_documents(batch)
             all_vectors.extend(batch_vecs)
 
         return np.array(all_vectors, dtype=np.float32)

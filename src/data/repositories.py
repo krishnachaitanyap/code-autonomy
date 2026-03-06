@@ -60,6 +60,14 @@ class RepoRepository:
         self.db.flush()
         return repo
 
+    def delete(self, repo_id: str) -> bool:
+        repo = self.get_by_id(repo_id)
+        if repo is None:
+            return False
+        self.db.delete(repo)
+        self.db.flush()
+        return True
+
 
 # ---------------------------------------------------------------------------
 # SessionRepository

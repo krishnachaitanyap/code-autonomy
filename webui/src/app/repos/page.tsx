@@ -6,6 +6,7 @@ import RepoCard from '@/components/RepoCard';
 
 export default function ReposPage() {
   const [repoList, setRepoList] = useState<Repo[]>([]);
+  const [branchCounts, setBranchCounts] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [url, setUrl] = useState('');
@@ -18,6 +19,19 @@ export default function ReposPage() {
     try {
       const data = await repos.list();
       setRepoList(data);
+      // Fetch branch counts in parallel
+      const counts: Record<string, number> = {};
+      await Promise.all(
+        data.map(async (repo) => {
+          try {
+            const { branches } = await repos.branches(repo.id);
+            counts[repo.id] = branches.length;
+          } catch {
+            // ignore — card will just not show a count
+          }
+        }),
+      );
+      setBranchCounts(counts);
     } catch (err) {
       console.error('Failed to load repos:', err);
     } finally {
@@ -47,6 +61,18 @@ export default function ReposPage() {
       setError(err.message || 'Failed to add repo');
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleDelete(id: string) {
+    if (!confirm('Are you sure you want to delete this repository? This will remove all related sessions, knowledge, and data.')) {
+      return;
+    }
+    try {
+      await repos.delete(id);
+      await loadRepos();
+    } catch (err: any) {
+      alert(err.message || 'Failed to delete repo');
     }
   }
 
@@ -123,7 +149,7 @@ export default function ReposPage() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {repoList.map((repo) => (
-            <RepoCard key={repo.id} repo={repo} />
+            <RepoCard key={repo.id} repo={repo} branchCount={branchCounts[repo.id]} onDelete={handleDelete} />
           ))}
         </div>
       )}

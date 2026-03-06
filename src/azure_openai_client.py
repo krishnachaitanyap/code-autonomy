@@ -247,3 +247,48 @@ def chat_completion_azure(
 
     msg = _LLMMessage(content=content, tool_calls=tool_calls)
     return content, msg
+
+
+# ---------------------------------------------------------------------------
+# Azure OpenAI Embeddings
+# ---------------------------------------------------------------------------
+
+def create_embeddings_client(config: dict):
+    """Create Azure OpenAI Embeddings client.
+
+    Args:
+        config: Full application config dict (with "ai" section).
+
+    Returns:
+        AzureOpenAIEmbeddings instance.
+    """
+    from langchain_openai import AzureOpenAIEmbeddings
+
+    ai = config.get("ai") or config
+    api_key = (ai.get("api_key") or "").strip()
+    endpoint = (ai.get("endpoint") or "").strip()
+    api_version = (ai.get("api_version") or "2024-02-15-preview").strip()
+    deployment = (ai.get("embedding_model") or ai.get("deployment_name") or "text-embedding-3-small").strip()
+
+    # Try certificate-based access token first, fall back to API key
+    access_token = _get_access_token(config)
+
+    embed_kwargs: dict[str, Any] = {
+        "azure_endpoint": endpoint,
+        "openai_api_version": api_version,
+        "model": deployment,
+    }
+
+    if access_token:
+        embed_kwargs["openai_api_key"] = access_token
+        embed_kwargs["openai_api_type"] = "azure"
+        embed_kwargs["default_headers"] = {
+            "Authorization": f"Bearer {access_token}",
+            "user_sid": "default_user",
+        }
+    elif api_key:
+        embed_kwargs["openai_api_key"] = api_key
+    else:
+        raise ValueError("No API key or certificate available for Azure OpenAI Embeddings.")
+
+    return AzureOpenAIEmbeddings(**embed_kwargs)

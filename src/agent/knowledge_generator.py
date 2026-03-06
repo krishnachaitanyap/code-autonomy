@@ -19,6 +19,7 @@ from src.agent.knowledge import (
 )
 
 _BUDGET = 9500  # leave headroom below _REPO_KNOWLEDGE_MAX_CHARS (10,000)
+_SKILLS_BUDGET = 5000  # SKILLS.md should be more concise
 
 
 # ---------------------------------------------------------------------------
@@ -273,3 +274,53 @@ def generate_knowledge_markdown(consciousness: ProjectConsciousness) -> str:
 
     content = "\n".join(parts)
     return _trim_to_budget(content, _BUDGET)
+
+
+def generate_skills_markdown(consciousness: ProjectConsciousness) -> str:
+    """Assemble a concise SKILLS.md from ProjectConsciousness data.
+
+    Focused on actionable project context for agent prompts.
+    Enforces a 5,000 character budget (more concise than .code-autonomy.md).
+    """
+    conventions = consciousness.conventions or {}
+    structure = consciousness.structure or {}
+    signatures = consciousness.signatures or []
+    samples = consciousness.implementation_samples or []
+
+    lang = conventions.get("language", "unknown")
+    build = conventions.get("build_tool", "unknown")
+    framework = conventions.get("test_framework", "unknown")
+
+    # Compact tech stack summary instead of separate sections
+    tech_lines = ["## Tech Stack", ""]
+    tech_items = []
+    if lang != "unknown":
+        tech_items.append(f"**Language:** {lang}")
+    if build != "unknown":
+        tech_items.append(f"**Build tool:** {build}")
+    if framework != "unknown":
+        tech_items.append(f"**Test framework:** {framework}")
+    if tech_items:
+        tech_lines.append(" | ".join(tech_items))
+    else:
+        tech_lines.append("Not detected")
+    tech_stack = "\n".join(tech_lines)
+
+    parts = [
+        "# SKILLS.md",
+        "",
+        _section_project_overview(conventions),
+        "",
+        tech_stack,
+        "",
+        _section_repository_layout(structure),
+        "",
+        _section_important_files(signatures, samples),
+        "",
+        _section_coding_conventions(conventions),
+        "",
+        _section_testing(conventions),
+    ]
+
+    content = "\n".join(parts)
+    return _trim_to_budget(content, _SKILLS_BUDGET)

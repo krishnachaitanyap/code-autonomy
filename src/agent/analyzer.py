@@ -6,6 +6,7 @@ agentic loop.  Supports OpenAI, Anthropic, Gemini via the unified LLM client.
 """
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -231,6 +232,47 @@ You are an expert software engineer in PLAN mode. You can explore the codebase \
 - Be precise with old_string — it must match exactly (whitespace, indentation)."""
 
 
+# ---------------------------------------------------------------------------
+# Question classification for ask-mode efficiency
+# ---------------------------------------------------------------------------
+
+# File extensions that indicate a targeted lookup question
+_LOOKUP_EXTENSIONS_RE = re.compile(
+    r"\.(properties|yml|yaml|xml|json|env|cfg|ini|conf|toml|sql|proto|graphql)\b",
+    re.IGNORECASE,
+)
+
+# Keywords that suggest a config/property lookup
+_LOOKUP_KEYWORDS_RE = re.compile(
+    r"\b(propert(?:y|ies)|value\s+of|config(?:uration)?|setting|variable|environment|"
+    r"application\.yml|application\.properties|env\.properties|bootstrap\.yml|"
+    r"pom\.xml|build\.gradle)\b",
+    re.IGNORECASE,
+)
+
+# Path-like patterns (e.g., /prod/, src/main/resources/)
+_LOOKUP_PATH_RE = re.compile(
+    r"(?:/(?:prod|dev|staging|test|qa|uat)/|src/main/resources/|resources/)",
+    re.IGNORECASE,
+)
+
+
+def _classify_question(question: str) -> str:
+    """Classify a question as 'lookup' (targeted file/property) or 'general'.
+
+    Lookup questions mention specific file types, config keys, property names,
+    or path patterns — they can be answered in 2-4 tool calls.
+    General questions require broad exploration (architecture, flow, design).
+    """
+    if _LOOKUP_EXTENSIONS_RE.search(question):
+        return "lookup"
+    if _LOOKUP_KEYWORDS_RE.search(question):
+        return "lookup"
+    if _LOOKUP_PATH_RE.search(question):
+        return "lookup"
+    return "general"
+
+
 _ASK_SYSTEM_PROMPT = """\
 You are an expert software engineer in ASK mode. You can explore the codebase \
 (read-only) to answer questions, but you CANNOT write files, run commands, or \
@@ -263,6 +305,21 @@ propose changes.
 2. **RECORD** — Use update_memory to record what you learn.
 3. **ANSWER** — Call task_complete with your complete answer and the list of source files consulted.
 
+## Strategy — be efficient, minimize tool calls
+- For targeted lookups (specific file, property, config value):
+  1. find_files(extension=".properties") to locate the file
+  2. read_file(path) to read its contents
+  3. task_complete(answer, sources) immediately
+  You should need 2-4 tool calls, not 20.
+- For broad exploration (architecture, flow, design):
+  1. list_dir("") to see the structure
+  2. grep + read_file to find relevant code
+  3. task_complete when you have enough
+- Do NOT repeat the same grep pattern. If grep returns empty, try a different
+  extension filter, or use find_files/list_dir to locate the file first.
+- Prefer read_file over grep when you know or can guess the file path.
+- Call task_complete as soon as you have enough information to answer.
+
 ## Rules
 - ALWAYS explore before answering. Read relevant files first.
 - Do NOT attempt to use write_file, edit_file, delete_file, run_command, or propose_change — they are blocked in ask mode.
@@ -290,6 +347,36 @@ _GCC_ASK_PROMPT_SECTION = """
 ## Context management tools (Git Context Controller)
 - gcc_commit(summary, milestone?): Checkpoint exploration progress.
 - gcc_context(scope?, branch?): Retrieve stored context. Scopes: status, main, commits, branch, all."""
+
+
+_SPLUNK_PROMPT_SECTION = """
+
+## Splunk tools (query production logs and metrics)
+
+### Two-step workflow (ALWAYS follow this order):
+1. First call `splunk_discover(query)` to find relevant Splunk indexes, fields, and sources
+2. Read the returned metadata (index names, fields, sourcetypes, relationships)
+3. Then call `splunk_search(spl)` or `splunk_stats(spl)` with a precise SPL query
+   built from the discovered metadata
+
+### When to use Splunk (auto-detect these patterns):
+- Error investigation: errors, exceptions, stack traces, 500s, failures
+- Performance: slow responses, timeouts, latency, resource exhaustion
+- Log analysis: check logs, audit trails, events
+- Monitoring: error rates, traffic, SLA breaches
+- Deployment: before/after comparison, release validation
+
+### SPL tips (use metadata from splunk_discover):
+- Always use the exact `index` and `sourcetype` from discover results
+- Use `field` values for filtering (e.g., `error_message="NullPointerException"`)
+- Use `relationship` fields for correlation across services
+- For charts, use `splunk_stats` with timechart/stats/chart commands
+
+### Tools:
+- splunk_discover(query, top_k?): Search for relevant Splunk indexes/fields/sources
+- splunk_search(spl, earliest?, latest?, max_results?): Run SPL query, returns table
+- splunk_stats(spl, chart_type?, earliest?, latest?): Run SPL aggregation for charts
+- splunk_saved_search(name?): List or run saved searches"""
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +620,8 @@ def generate_changes_with_agent(
         )
     if gcc_controller:
         system_prompt += _GCC_PROMPT_SECTION
+    if agent_cfg.get("splunk_enabled"):
+        system_prompt += _SPLUNK_PROMPT_SECTION
 
     if conversation_context:
         context_lines = []
@@ -1407,6 +1496,8 @@ def generate_plan_with_agent(
     system_prompt = _PLAN_SYSTEM_PROMPT
     if gcc_controller:
         system_prompt += _GCC_PROMPT_SECTION
+    if agent_cfg.get("splunk_enabled"):
+        system_prompt += _SPLUNK_PROMPT_SECTION
 
     if conversation_context:
         context_lines = []
@@ -1705,33 +1796,114 @@ Rules:
 - If unsure, respond with: INSUFFICIENT_CONTEXT"""
 
 
+def _retrieve_rag_context(
+    question: str,
+    code_index: "CodeIndex | None",
+    top_k: int = 5,
+) -> str:
+    """Retrieve relevant code chunks via embeddings for the fast-path.
+
+    Uses hybrid vector + BM25 search to find the most relevant symbols,
+    then returns their source text (signature + body) formatted as context.
+    """
+    if code_index is None:
+        return ""
+    if code_index.embeddings is None or len(code_index.embeddings) == 0:
+        return ""
+
+    try:
+        results = code_index.embeddings.find_similar(question, top_k=top_k)
+    except Exception:
+        return ""
+
+    if not results:
+        return ""
+
+    parts: list[str] = ["\n\n## Relevant Code (retrieved via semantic search)"]
+    chars_budget = 12_000
+    chars_used = 0
+
+    for fqn, score in results:
+        if chars_used >= chars_budget:
+            break
+
+        # Get the symbol entry for file path and line info
+        entry = code_index.symbol_table.get_by_fqn(fqn) if code_index.symbol_table else None
+
+        # Get the full embedded text for this FQN (includes signature + body)
+        chunk_text = _get_embedded_text(code_index.embeddings, fqn)
+        if not chunk_text:
+            continue
+
+        file_info = f" ({entry.file_path}:{entry.line_start})" if entry else ""
+        section = f"\n### {fqn}{file_info}\n```\n{chunk_text}\n```"
+
+        if chars_used + len(section) > chars_budget:
+            # Truncate this chunk to fit
+            remaining = chars_budget - chars_used - 100
+            if remaining > 200:
+                section = f"\n### {fqn}{file_info}\n```\n{chunk_text[:remaining]}\n...\n```"
+            else:
+                break
+
+        parts.append(section)
+        chars_used += len(section)
+
+    if len(parts) <= 1:
+        return ""
+    return "\n".join(parts)
+
+
+def _get_embedded_text(embeddings: "EntityEmbeddings", fqn: str) -> str:
+    """Get the full embedded text for a given FQN, merging all chunks."""
+    texts = []
+    for i, stored_fqn in enumerate(embeddings._fqns):
+        if stored_fqn == fqn:
+            texts.append(embeddings._texts[i])
+    if not texts:
+        return ""
+    # For single-chunk symbols, return as-is; for multi-chunk, join with separator
+    if len(texts) == 1:
+        return texts[0]
+    return "\n...\n".join(texts)
+
+
 def _try_fast_answer(
     question: str,
     context: str,
     llm_config: dict,
     full_config: Optional[dict] = None,
     usage_stats: "LLMUsageStats | None" = None,
+    code_index: "CodeIndex | None" = None,
 ) -> Optional[str]:
-    """Attempt to answer *question* from pre-built context in a single LLM call.
+    """Attempt to answer *question* from pre-built context + RAG retrieval.
+
+    If ``code_index`` is provided, retrieves relevant code chunks via
+    embedding similarity and appends them to the context. This allows
+    the fast-path to answer code-specific questions without agent exploration.
 
     Returns the answer string if the LLM is confident, or ``None`` if the
     context is insufficient (triggering fallback to the full agent loop).
     """
     from src.llm_client import chat_completion
 
+    # Retrieve relevant code via embeddings (RAG)
+    rag_context = _retrieve_rag_context(question, code_index, top_k=5)
+
     # Cap context to avoid blowing token limits on the fast path
     max_context_chars = 15_000
+    max_rag_chars = 12_000
     trimmed_context = context[:max_context_chars]
+    trimmed_rag = rag_context[:max_rag_chars]
+
+    user_content = f"## Project context\n{trimmed_context}\n"
+    if trimmed_rag:
+        user_content += f"\n{trimmed_rag}\n"
+    user_content += f"\n## Question\n{question}"
 
     messages = [
         {"role": "system", "content": _FAST_ANSWER_SYSTEM},
-        {
-            "role": "user",
-            "content": (
-                f"## Project context\n{trimmed_context}\n\n"
-                f"## Question\n{question}"
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]
 
     content, _msg = chat_completion(
@@ -1836,39 +2008,56 @@ def generate_answer_with_agent(
             pass
     knowledge_section = f"\n\n{knowledge_context}\n" if knowledge_context else ""
 
-    # --- Fast-path: try answering from available context without agent loop ---
+    # --- Fast-path: try answering from available context + RAG retrieval ---
     available_context = (initial_context + repo_knowledge_section + knowledge_section).strip()
     if available_context and len(available_context) > 200:
         try:
             fast_answer = _try_fast_answer(
                 question, available_context, llm_config, config, usage_stats,
+                code_index=code_index,
             )
             if fast_answer is not None:
+                rag_used = " + RAG" if code_index and code_index.embeddings and len(code_index.embeddings) > 0 else ""
                 if verbose:
-                    print("  Ask fast-path: answered from existing context (0 tool calls)")
+                    print(f"  Ask fast-path{rag_used}: answered from existing context (0 tool calls)")
                 return AskResult(
                     success=True,
                     answer=fast_answer,
                     sources=[],
-                    summary="Answered from project context (fast path, no file exploration needed)",
+                    summary=f"Answered from project context{rag_used} (fast path, no file exploration needed)",
                     turns_used=1,
                     usage_stats=usage_stats,
                 )
         except Exception:
             pass  # Fall through to full agent loop
 
+    # Classify question to provide efficient search guidance
+    q_type = _classify_question(question)
+    if q_type == "lookup":
+        search_guidance = (
+            "The question targets a specific file or property. "
+            "Use find_files to locate the file, read_file to get its contents, "
+            "then call task_complete with the answer. Aim for 2-4 tool calls."
+        )
+    else:
+        search_guidance = (
+            "Start by listing the repo root with list_dir, then explore relevant files "
+            "to answer the question. When you have a complete answer, call task_complete."
+        )
+
     user_msg = (
         f"## Question\n{question}\n"
         f"{initial_context}\n"
         f"{repo_knowledge_section}"
         f"{knowledge_section}\n\n"
-        "Start by listing the repo root with list_dir, then explore relevant files "
-        "to answer the question. When you have a complete answer, call task_complete."
+        f"{search_guidance}"
     )
 
     system_prompt = _ASK_SYSTEM_PROMPT
     if gcc_controller:
         system_prompt += _GCC_ASK_PROMPT_SECTION
+    if agent_cfg.get("splunk_enabled"):
+        system_prompt += _SPLUNK_PROMPT_SECTION
 
     if conversation_context:
         context_lines = []
@@ -1885,6 +2074,7 @@ def generate_answer_with_agent(
 
     task_complete_data: Optional[dict] = None
     consecutive_empty = 0
+    consecutive_empty_greps = 0  # Track consecutive grep calls with 0 results
     tool_call_counts: dict[str, int] = {}
     tool_errors: dict[str, int] = {}
     consecutive_api_errors = 0
@@ -2060,6 +2250,15 @@ def generate_answer_with_agent(
                 # Track sources from successful read_file calls
                 if name == "read_file" and not result.startswith("Error:"):
                     sources_consulted.add(args.get("path", ""))
+                # Track consecutive empty grep results for anti-loop detection
+                if name == "grep":
+                    if result.strip() in ("", "No matches found.", "No matches found"):
+                        consecutive_empty_greps += 1
+                    else:
+                        consecutive_empty_greps = 0
+                else:
+                    # Non-grep tool call resets the counter
+                    consecutive_empty_greps = 0
                 if result.startswith("Error"):
                     tool_errors[name] = tool_errors.get(name, 0) + 1
                 if agent_cfg.get("show_activity", True):
@@ -2107,6 +2306,20 @@ def generate_answer_with_agent(
 
         if task_complete_data:
             break
+
+        # --- Grep anti-loop nudge ---
+        # After 3 consecutive empty grep results, nudge the agent to try
+        # a different strategy (find_files / list_dir).
+        if consecutive_empty_greps >= 3:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Your last 3 grep calls returned no results. The file type may not "
+                    "be in the default search set. Try find_files(extension='.properties') "
+                    "or list_dir to explore the directory structure instead."
+                ),
+            })
+            consecutive_empty_greps = 0  # Reset after nudge
 
         # --- Answer deadline nudge ---
         # At 60% of max_turns, nudge the agent to wrap up.

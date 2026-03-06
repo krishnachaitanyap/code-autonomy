@@ -347,6 +347,25 @@ def summarize_tool_result(result: str, tool_name: str) -> str:
         return result[:40] + ("..." if len(result) > 40 else "")
     if tool_name.startswith("gcc_"):
         return result[:60] + ("..." if len(result) > 60 else "")
+    if tool_name == "splunk_discover":
+        hits = result.count("### Hit")
+        return f"{hits} metadata hit(s)" if hits else "no hits"
+    if tool_name in ("splunk_search", "splunk_stats", "splunk_saved_search"):
+        if '"__structured"' in result:
+            import json as _json
+            try:
+                envelope = _json.loads(result.split("\n")[0])
+                total = envelope.get("total", 0)
+                fmt = envelope.get("format", "table")
+                return f"{total} rows ({fmt})"
+            except Exception:
+                pass
+        if "No saved searches" in result:
+            return "none found"
+        if "Available Saved Searches" in result:
+            n = result.count("- **")
+            return f"{n} saved searches"
+        return result[:50] + ("..." if len(result) > 50 else "")
     return result[:50] + ("..." if len(result) > 50 else "")
 
 
@@ -393,6 +412,19 @@ def _format_tool_arg_hint(tool_name: str, args: dict) -> str:
         return f" {args.get('branch_name', '')}"
     if tool_name == "gcc_context":
         return f" {args.get('scope', 'status')}"
+    if tool_name == "splunk_discover":
+        q = args.get("query", "")
+        return f" \"{q[:40]}{'...' if len(q) > 40 else ''}\"" if q else ""
+    if tool_name == "splunk_search":
+        spl = args.get("spl", "")
+        return f" {spl[:50]}{'...' if len(spl) > 50 else ''}" if spl else ""
+    if tool_name == "splunk_stats":
+        spl = args.get("spl", "")
+        chart = args.get("chart_type", "auto")
+        return f" [{chart}] {spl[:40]}{'...' if len(spl) > 40 else ''}" if spl else ""
+    if tool_name == "splunk_saved_search":
+        name = args.get("name", "")
+        return f" {name}" if name else " (list)"
     return ""
 
 

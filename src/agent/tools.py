@@ -496,6 +496,13 @@ ASK_COMPLETION_TOOLS = [_ASK_TASK_COMPLETE_SCHEMA]
 AGENT_TOOLS = list(READ_TOOLS)
 
 
+def _splunk_enabled(agent_config: Optional[dict] = None) -> bool:
+    """Check if Splunk integration is enabled in agent config."""
+    if agent_config is None:
+        return False
+    return bool(agent_config.get("splunk_enabled", False))
+
+
 def build_agent_tools(agent_config: Optional[dict] = None, code_index: Optional["CodeIndex"] = None) -> list[dict]:
     """Build the full tool list for the new agent mode."""
     tools: list[dict] = []
@@ -509,6 +516,9 @@ def build_agent_tools(agent_config: Optional[dict] = None, code_index: Optional[
     if code_index is not None:
         from src.code_index import CODE_INDEX_TOOLS
         tools.extend(CODE_INDEX_TOOLS)
+    if _splunk_enabled(agent_config):
+        from src.splunk import SPLUNK_TOOLS
+        tools.extend(SPLUNK_TOOLS)
     return tools
 
 
@@ -524,6 +534,9 @@ def build_plan_tools(agent_config: Optional[dict] = None, code_index: Optional["
     if code_index is not None:
         from src.code_index import CODE_INDEX_TOOLS
         tools.extend(CODE_INDEX_TOOLS)
+    if _splunk_enabled(agent_config):
+        from src.splunk import SPLUNK_TOOLS
+        tools.extend(SPLUNK_TOOLS)
     return tools
 
 
@@ -538,6 +551,9 @@ def build_ask_tools(agent_config: Optional[dict] = None, code_index: Optional["C
     if code_index is not None:
         from src.code_index import CODE_INDEX_TOOLS
         tools.extend(CODE_INDEX_TOOLS)
+    if _splunk_enabled(agent_config):
+        from src.splunk import SPLUNK_TOOLS
+        tools.extend(SPLUNK_TOOLS)
     return tools
 
 
@@ -647,6 +663,16 @@ def execute_tool(
         from src.code_index import CODE_INDEX_TOOL_NAMES, execute_code_index_tool
         if tool_name in CODE_INDEX_TOOL_NAMES:
             return execute_code_index_tool(code_index, tool_name, args)
+
+    # --- Splunk tools ---
+    if tool_name in ("splunk_discover", "splunk_search", "splunk_stats", "splunk_saved_search"):
+        splunk_cfg = {
+            "splunk": (agent_config or {}).get("splunk_config", {}),
+            "opensearch": (agent_config or {}).get("opensearch_config", {}),
+            "ai": (agent_config or {}).get("ai_config", {}),
+        }
+        from src.splunk import execute_splunk_tool
+        return execute_splunk_tool(splunk_cfg, tool_name, args)
 
     return f"Unknown tool: {tool_name}"
 

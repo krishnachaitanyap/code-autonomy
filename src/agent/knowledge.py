@@ -521,6 +521,9 @@ def load_repo_knowledge(repo_path: str) -> str:
     2. ``.code-autonomy.md`` — single file
     3. ``AGENT.md`` — alternative single file
 
+    Additionally, ``SKILLS.md`` is always loaded if present and appended
+    (additive — it doesn't compete with the above files).
+
     Returns a formatted markdown string ready for injection into context,
     or ``""`` if nothing is found.
     """
@@ -528,28 +531,36 @@ def load_repo_knowledge(repo_path: str) -> str:
     if not root.is_dir():
         return ""
 
+    result = ""
+
     # Priority 1: directory of .md files
     knowledge_dir = root / _REPO_KNOWLEDGE_DIR
     if knowledge_dir.is_dir():
-        result = _load_from_directory(knowledge_dir)
-        if result:
-            return _cap_length(result)
+        result = _load_from_directory(knowledge_dir) or ""
 
     # Priority 2: .code-autonomy.md
-    knowledge_file = root / _REPO_KNOWLEDGE_FILE
-    if knowledge_file.is_file():
-        result = _load_single_file(knowledge_file)
-        if result:
-            return _cap_length(result)
+    if not result:
+        knowledge_file = root / _REPO_KNOWLEDGE_FILE
+        if knowledge_file.is_file():
+            result = _load_single_file(knowledge_file) or ""
 
     # Priority 3: AGENT.md
-    alt_file = root / _REPO_KNOWLEDGE_ALT_FILE
-    if alt_file.is_file():
-        result = _load_single_file(alt_file)
-        if result:
-            return _cap_length(result)
+    if not result:
+        alt_file = root / _REPO_KNOWLEDGE_ALT_FILE
+        if alt_file.is_file():
+            result = _load_single_file(alt_file) or ""
 
-    return ""
+    # Always append SKILLS.md if present (additive)
+    skills_file = root / "SKILLS.md"
+    if skills_file.is_file():
+        skills_content = _load_single_file(skills_file)
+        if skills_content:
+            result = result + skills_content
+
+    if not result:
+        return ""
+
+    return _cap_length(result)
 
 
 def _load_single_file(path: Path) -> str:

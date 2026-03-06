@@ -57,6 +57,14 @@ class RepoService:
         with get_session() as db:
             return RepoRepository(db).get_by_id(repo_id)
 
+    def delete_repo(self, repo_id: str) -> bool:
+        """Delete a repository and all related data (cascades)."""
+        from src.data.database import get_session
+        from src.data.repositories import RepoRepository
+
+        with get_session() as db:
+            return RepoRepository(db).delete(repo_id)
+
     def list_repos(self) -> list:
         """List all registered repos."""
         try:
@@ -132,24 +140,80 @@ class RepoService:
                     primary_exc,
                 )
                 # Clean up partial clone from the failed attempt
+                git_dir = os.path.join(clone_target, ".git")
                 if os.path.isdir(clone_target):
-                    shutil.rmtree(clone_target, ignore_errors=True)
-                try:
-                    self._clone_and_checkout_fallback(
-                        repo.url, clone_target, branch,
-                    )
-                except Exception as fallback_exc:
-                    if os.path.isdir(clone_target):
+                    # If .git exists, the clone data is complete — cleanup
+                    # failed checkout and reuse the .git data instead of
+                    # re-cloning (rmtree can fail silently on Windows long paths).
+                    if os.path.isdir(git_dir):
+                        logger.info(
+                            "Primary clone left valid .git at %s, "
+                            "reusing instead of re-cloning", clone_target,
+                        )
+                        self._retry_checkout_with_longpaths(clone_target, branch)
+                    else:
                         shutil.rmtree(clone_target, ignore_errors=True)
-                    raise ValueError(
-                        f"Failed to clone {repo.url}: "
-                        f"primary: {primary_exc}; fallback: {fallback_exc}"
-                    ) from fallback_exc
+                        # If rmtree silently failed, abort re-clone
+                        if os.path.isdir(clone_target):
+                            shutil.rmtree(clone_target, ignore_errors=True)
+
+                # If no .git dir exists yet, try the fallback clone
+                if not os.path.isdir(git_dir):
+                    try:
+                        self._clone_and_checkout_fallback(
+                            repo.url, clone_target, branch,
+                        )
+                    except Exception as fallback_exc:
+                        if os.path.isdir(clone_target):
+                            shutil.rmtree(clone_target, ignore_errors=True)
+                        raise ValueError(
+                            f"Failed to clone {repo.url}: "
+                            f"primary: {primary_exc}; fallback: {fallback_exc}"
+                        ) from fallback_exc
 
             # Persist the local_path so future requests skip cloning
             RepoRepository(db).update(repo_id, local_path=clone_target)
             logger.info("Clone complete. Updated repo %s local_path=%s", repo_id, clone_target)
             return clone_target
+
+    @staticmethod
+    def _retry_checkout_with_longpaths(target_dir: str, branch: str) -> None:
+        """Enable core.longpaths and retry checkout on an existing .git dir.
+
+        Used when the primary clone downloaded all objects but failed to
+        create the working tree (common on Windows with paths > 260 chars).
+        """
+        # Enable long paths for this repo
+        subprocess.run(
+            ["git", "config", "core.longpaths", "true"],
+            cwd=target_dir, timeout=10,
+            capture_output=True, check=False,
+        )
+        # Reset working tree to HEAD, then checkout the desired branch
+        subprocess.run(
+            ["git", "checkout", "-f", "HEAD"],
+            cwd=target_dir, timeout=120,
+            capture_output=True, check=False,
+        )
+        if branch:
+            result = subprocess.run(
+                ["git", "checkout", "-f", branch],
+                cwd=target_dir, timeout=60,
+                capture_output=True, check=False,
+            )
+            if result.returncode != 0:
+                # Branch may be remote-only
+                subprocess.run(
+                    ["git", "fetch", "--all"],
+                    cwd=target_dir, timeout=300,
+                    capture_output=True, check=False,
+                )
+                subprocess.run(
+                    ["git", "checkout", "-f", "-b", branch, f"origin/{branch}"],
+                    cwd=target_dir, timeout=60,
+                    capture_output=True, check=False,
+                )
+        logger.info("Retried checkout with longpaths: %s @ %s", target_dir, branch)
 
     @staticmethod
     def _clone_and_checkout_fallback(
@@ -183,6 +247,13 @@ class RepoService:
                 "(long paths). Continuing with available files.",
                 result.returncode,
             )
+
+        # Enable long paths (important on Windows repos with deep paths)
+        subprocess.run(
+            ["git", "config", "core.longpaths", "true"],
+            cwd=target_dir, timeout=10,
+            capture_output=True, check=False,
+        )
 
         # Force-checkout the requested branch (safe — this is a fresh clone)
         try:

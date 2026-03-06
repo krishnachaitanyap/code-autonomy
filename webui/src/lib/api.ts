@@ -44,10 +44,28 @@ export const repos = {
   get: (id: string) => request<Repo>(`/repos/${id}`),
   create: (data: { url?: string; local_path?: string; platform?: string }) =>
     request<Repo>('/repos', { method: 'POST', body: JSON.stringify(data) }),
+  delete: (id: string) => {
+    const url = `${API_BASE}/repos/${id}`;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const apiKey = process.env.NEXT_PUBLIC_API_KEY;
+    if (apiKey) headers['X-API-Key'] = apiKey;
+    return fetch(url, { method: 'DELETE', headers }).then(res => {
+      if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
+    });
+  },
+  getSkills: (id: string) =>
+    request<{ content: string }>(`/repos/${id}/skills`),
+  updateSkills: (id: string, content: string) =>
+    request<{ content: string }>(`/repos/${id}/skills`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
   symbols: (id: string, filePath?: string) =>
     request<any[]>(`/repos/${id}/symbols${filePath ? `?file_path=${filePath}` : ''}`),
   branches: (id: string) =>
     request<{ branches: string[] }>(`/repos/${id}/branches`),
+  generateSkills: (id: string) =>
+    request<{ content: string }>(`/repos/${id}/skills/generate`, { method: 'POST' }),
 };
 
 // ---------------------------------------------------------------------------

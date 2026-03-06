@@ -211,6 +211,29 @@ def load_config(config_path: str = "config.ini") -> dict:
             "cache_dir": get("code_index", "cache_dir", ".code-index"),
             "max_age_hours": get_float("code_index", "max_age_hours", 24.0),
         },
+        "opensearch": {
+            "enabled": get_bool("opensearch", "enabled", False),
+            "endpoint": get("opensearch", "endpoint", ""),
+            "region": get("opensearch", "region", "us-east-1"),
+            "aws_access_key_id": get("opensearch", "aws_access_key_id", "") or os.environ.get("AWS_ACCESS_KEY_ID", ""),
+            "aws_secret_access_key": get("opensearch", "aws_secret_access_key", "") or os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
+            "index_name": get("opensearch", "index_name", "splunk-metadata"),
+            "embedding_model": get("opensearch", "embedding_model", "text-embedding-3-small"),
+            "verify_ssl": get_bool("opensearch", "verify_ssl", True),
+            "timeout": get_int("opensearch", "timeout", 30),
+        },
+        "splunk": {
+            "enabled": get_bool("splunk", "enabled", False),
+            "base_url": get("splunk", "base_url", ""),
+            "username": get("splunk", "username", "") or os.environ.get("SPLUNK_USERNAME", ""),
+            "password": get("splunk", "password", "") or os.environ.get("SPLUNK_PASSWORD", ""),
+            "app": get("splunk", "app", "search"),
+            "default_earliest": get("splunk", "default_earliest", "-24h"),
+            "default_latest": get("splunk", "default_latest", "now"),
+            "verify_ssl": get_bool("splunk", "verify_ssl", False),
+            "timeout": get_int("splunk", "timeout", 30),
+            "max_results": get_int("splunk", "max_results", 1000),
+        },
     }
 
 

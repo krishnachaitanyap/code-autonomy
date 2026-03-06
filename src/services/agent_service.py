@@ -11,6 +11,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from src.agent.knowledge import compute_repo_id
+from src.services.cache import (
+    TTL_CODE_INDEX,
+    TTL_CONSCIOUSNESS,
+    TTL_REPO_KNOWLEDGE,
+    repo_cache,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +26,50 @@ ProgressCallback = Optional[Callable[[dict], None]]
 
 class AgentService:
     """Service for running agent, plan, and ask sessions."""
+
+    # ------------------------------------------------------------------
+    # Cached helpers
+    # ------------------------------------------------------------------
+
+    def _get_cached_consciousness(self, repo_id, repo_path, config, repo_url):
+        """Return consciousness from cache, or build/load and cache it."""
+        cached = repo_cache.get(repo_id, "consciousness", TTL_CONSCIOUSNESS)
+        if cached is not None:
+            return cached
+        from src.consciousness.core import build_or_load_consciousness
+        consciousness = build_or_load_consciousness(repo_path, config, repo_url=repo_url)
+        repo_cache.put(repo_id, "consciousness", consciousness)
+        return consciousness
+
+    def _get_cached_code_index(self, repo_id, repo_path, config, repo_url, consciousness):
+        """Return code_index from cache, or build/load and cache it."""
+        cached = repo_cache.get(repo_id, "code_index", TTL_CODE_INDEX)
+        if cached is not None:
+            return cached
+        try:
+            from src.code_index import build_or_load_code_index
+            code_index = build_or_load_code_index(
+                repo_path, config, repo_url=repo_url, consciousness=consciousness
+            )
+        except Exception:
+            code_index = None
+        if code_index is not None:
+            repo_cache.put(repo_id, "code_index", code_index)
+        return code_index
+
+    def _get_cached_repo_knowledge(self, repo_id, repo_path):
+        """Return repo_knowledge from cache, or load and cache it."""
+        cached = repo_cache.get(repo_id, "repo_knowledge", TTL_REPO_KNOWLEDGE)
+        if cached is not None:
+            return cached
+        from src.agent.knowledge import load_repo_knowledge
+        repo_knowledge = load_repo_knowledge(repo_path)
+        repo_cache.put(repo_id, "repo_knowledge", repo_knowledge)
+        return repo_knowledge
+
+    # ------------------------------------------------------------------
+    # Session helpers
+    # ------------------------------------------------------------------
 
     def _append_session_log(self, session_id, entry):
         """Append an entry to the session's log column."""
@@ -51,7 +101,15 @@ class AgentService:
     def _build_agent_config(self, config: dict) -> dict:
         """Extract agent config section from full config."""
         agent_cfg = config.get("agent", {})
-        return {
+        splunk_cfg = config.get("splunk", {})
+        opensearch_cfg = config.get("opensearch", {})
+        splunk_enabled = (
+            splunk_cfg.get("enabled", False)
+            and opensearch_cfg.get("enabled", False)
+            and bool(splunk_cfg.get("base_url"))
+            and bool(opensearch_cfg.get("endpoint"))
+        )
+        result = {
             "max_turns": int(agent_cfg.get("max_turns", 50)),
             "smart_summarization": agent_cfg.get("smart_summarization", True),
             "truncation_limit": int(agent_cfg.get("truncation_limit", 30000)),
@@ -61,7 +119,13 @@ class AgentService:
             "summarization_budget": int(agent_cfg.get("summarization_budget", 0)),
             "testing_budget": int(agent_cfg.get("testing_budget", 0)),
             "skip_tests": agent_cfg.get("skip_tests", False),
+            "splunk_enabled": splunk_enabled,
         }
+        if splunk_enabled:
+            result["splunk_config"] = splunk_cfg
+            result["opensearch_config"] = opensearch_cfg
+            result["ai_config"] = config.get("ai", {})
+        return result
 
     def _create_session(self, repo_id: str, mode: str, requirements: str) -> Optional[str]:
         """Create a Session record in the database. Returns session_id or None."""
@@ -106,6 +170,10 @@ class AgentService:
         except Exception as exc:
             logger.debug("Could not update session record: %s", exc)
 
+    # ------------------------------------------------------------------
+    # Agent / Plan / Ask
+    # ------------------------------------------------------------------
+
     def run_agent(
         self,
         repo_path: str,
@@ -119,9 +187,7 @@ class AgentService:
     ) -> "AgentResult":
         """Run agent mode — full agentic loop with exploration, editing, and testing."""
         from src.agent.analyzer import generate_changes_with_agent
-        from src.agent.knowledge import load_repo_knowledge
         from src.code.executor import detect_build_tool
-        from src.consciousness.core import build_or_load_consciousness
 
         self._checkout_branch(repo_path, branch)
         repo_id = compute_repo_id(repo_path, repo_url)
@@ -131,19 +197,10 @@ class AgentService:
         # Create session record
         session_id = self._create_session(repo_id, "agent", requirements)
 
-        # Build consciousness and code index
-        consciousness = build_or_load_consciousness(repo_path, config, repo_url=repo_url)
-
-        code_index = None
-        try:
-            from src.code_index import build_or_load_code_index
-            code_index = build_or_load_code_index(
-                repo_path, config, repo_url=repo_url, consciousness=consciousness
-            )
-        except Exception:
-            pass
-
-        repo_knowledge = load_repo_knowledge(repo_path)
+        # Build consciousness and code index (cached)
+        consciousness = self._get_cached_consciousness(repo_id, repo_path, config, repo_url)
+        code_index = self._get_cached_code_index(repo_id, repo_path, config, repo_url, consciousness)
+        repo_knowledge = self._get_cached_repo_knowledge(repo_id, repo_path)
         build_tool = detect_build_tool(repo_path)
 
         from src.agent.activity import set_progress_callback, clear_progress_callback
@@ -205,9 +262,7 @@ class AgentService:
     ) -> "PlanResult":
         """Run plan mode — read-only exploration + proposed changes."""
         from src.agent.analyzer import generate_plan_with_agent
-        from src.agent.knowledge import load_repo_knowledge
         from src.code.executor import detect_build_tool
-        from src.consciousness.core import build_or_load_consciousness
 
         self._checkout_branch(repo_path, branch)
         repo_id = compute_repo_id(repo_path, repo_url)
@@ -222,18 +277,10 @@ class AgentService:
 
         session_id = self._create_session(repo_id, "plan", requirements)
 
-        consciousness = build_or_load_consciousness(repo_path, config, repo_url=repo_url)
-
-        code_index = None
-        try:
-            from src.code_index import build_or_load_code_index
-            code_index = build_or_load_code_index(
-                repo_path, config, repo_url=repo_url, consciousness=consciousness
-            )
-        except Exception:
-            pass
-
-        repo_knowledge = load_repo_knowledge(repo_path)
+        # Build consciousness and code index (cached)
+        consciousness = self._get_cached_consciousness(repo_id, repo_path, config, repo_url)
+        code_index = self._get_cached_code_index(repo_id, repo_path, config, repo_url, consciousness)
+        repo_knowledge = self._get_cached_repo_knowledge(repo_id, repo_path)
         build_tool = detect_build_tool(repo_path)
 
         from src.agent.activity import set_progress_callback, clear_progress_callback
@@ -293,8 +340,6 @@ class AgentService:
     ) -> "AskResult":
         """Run ask mode — answer a question about the codebase."""
         from src.agent.analyzer import generate_answer_with_agent
-        from src.agent.knowledge import load_repo_knowledge
-        from src.consciousness.core import build_or_load_consciousness
 
         self._checkout_branch(repo_path, branch)
         repo_id = compute_repo_id(repo_path, repo_url)
@@ -309,18 +354,13 @@ class AgentService:
 
         session_id = self._create_session(repo_id, "ask", question)
 
-        consciousness = build_or_load_consciousness(repo_path, config, repo_url=repo_url)
+        # Build consciousness (cached); skip eager code_index in ask mode
+        consciousness = self._get_cached_consciousness(repo_id, repo_path, config, repo_url)
 
-        code_index = None
-        try:
-            from src.code_index import build_or_load_code_index
-            code_index = build_or_load_code_index(
-                repo_path, config, repo_url=repo_url, consciousness=consciousness
-            )
-        except Exception:
-            pass
+        # Only use code_index if already cached — don't build it for simple questions
+        code_index = repo_cache.get(repo_id, "code_index", TTL_CODE_INDEX)
 
-        repo_knowledge = load_repo_knowledge(repo_path)
+        repo_knowledge = self._get_cached_repo_knowledge(repo_id, repo_path)
 
         from src.agent.activity import set_progress_callback, clear_progress_callback
 

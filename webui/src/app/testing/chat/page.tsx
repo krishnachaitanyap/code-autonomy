@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { repos, sessions, workflows as workflowsApi, type Repo, type Session, type Workflow, type WorkflowSubtask } from '@/lib/api';
 import { useSessionStream, type WSMessage } from '@/lib/websocket';
+import StructuredResult, { tryParseStructured } from '@/components/StructuredResult';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -36,19 +37,23 @@ const MODE_META: Record<Mode, { label: string; color: string; bg: string; desc: 
 };
 
 const TOOL_ICONS: Record<string, { icon: string; color: string }> = {
-  read_file:      { icon: '\u{1F4D6}', color: 'text-blue-400' },
-  grep:           { icon: '\u{1F50D}', color: 'text-purple-400' },
-  find_files:     { icon: '\u{1F50D}', color: 'text-purple-400' },
-  list_dir:       { icon: '\u{1F4C2}', color: 'text-blue-300' },
-  edit_file:      { icon: '\u270F\uFE0F', color: 'text-yellow-400' },
-  write_file:     { icon: '\u270F\uFE0F', color: 'text-yellow-400' },
-  delete_file:    { icon: '\u{1F5D1}\uFE0F', color: 'text-red-400' },
-  run_command:    { icon: '\u26A1', color: 'text-orange-400' },
-  propose_change: { icon: '\u{1F4DD}', color: 'text-green-400' },
-  update_memory:  { icon: '\u{1F9E0}', color: 'text-pink-400' },
-  gcc_commit:     { icon: '\u{1F4E6}', color: 'text-green-400' },
-  gcc_branch:     { icon: '\u{1F33F}', color: 'text-green-300' },
-  gcc_context:    { icon: '\u{1F4CB}', color: 'text-cyan-400' },
+  read_file:           { icon: '\u{1F4D6}', color: 'text-blue-400' },
+  grep:                { icon: '\u{1F50D}', color: 'text-purple-400' },
+  find_files:          { icon: '\u{1F50D}', color: 'text-purple-400' },
+  list_dir:            { icon: '\u{1F4C2}', color: 'text-blue-300' },
+  edit_file:           { icon: '\u270F\uFE0F', color: 'text-yellow-400' },
+  write_file:          { icon: '\u270F\uFE0F', color: 'text-yellow-400' },
+  delete_file:         { icon: '\u{1F5D1}\uFE0F', color: 'text-red-400' },
+  run_command:         { icon: '\u26A1', color: 'text-orange-400' },
+  propose_change:      { icon: '\u{1F4DD}', color: 'text-green-400' },
+  update_memory:       { icon: '\u{1F9E0}', color: 'text-pink-400' },
+  gcc_commit:          { icon: '\u{1F4E6}', color: 'text-green-400' },
+  gcc_branch:          { icon: '\u{1F33F}', color: 'text-green-300' },
+  gcc_context:         { icon: '\u{1F4CB}', color: 'text-cyan-400' },
+  splunk_discover:     { icon: '\u{1F50E}', color: 'text-teal-400' },
+  splunk_search:       { icon: '\u{1F4CA}', color: 'text-teal-400' },
+  splunk_stats:        { icon: '\u{1F4C8}', color: 'text-teal-400' },
+  splunk_saved_search: { icon: '\u{1F4CB}', color: 'text-teal-400' },
 };
 
 // ---------------------------------------------------------------------------
@@ -766,19 +771,23 @@ export default function ChatPage() {
     }
     // tool_call
     const meta = getToolMeta(entry.tool || '');
+    const structured = entry.result ? tryParseStructured(entry.result) : null;
     return (
-      <div key={i} className={`flex items-start gap-2 ${meta.color}`}>
-        <span className="flex-shrink-0">{meta.icon}</span>
-        <div className="min-w-0">
-          <span className="font-medium">{entry.tool}</span>
-          {entry.detail && <span className="text-gray-500 ml-1">{entry.detail}</span>}
-          {entry.result && (
-            <span className="text-gray-600 ml-1">{'\u2192'} {entry.result}</span>
-          )}
-          {entry.turn && (
-            <span className="text-gray-600 text-[10px] ml-2">T{entry.turn}</span>
-          )}
+      <div key={i}>
+        <div className={`flex items-start gap-2 ${meta.color}`}>
+          <span className="flex-shrink-0">{meta.icon}</span>
+          <div className="min-w-0">
+            <span className="font-medium">{entry.tool}</span>
+            {entry.detail && <span className="text-gray-500 ml-1">{entry.detail}</span>}
+            {!structured && entry.result && (
+              <span className="text-gray-600 ml-1">{'\u2192'} {entry.result}</span>
+            )}
+            {entry.turn && (
+              <span className="text-gray-600 text-[10px] ml-2">T{entry.turn}</span>
+            )}
+          </div>
         </div>
+        {structured && <StructuredResult data={structured} />}
       </div>
     );
   }
