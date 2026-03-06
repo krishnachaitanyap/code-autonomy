@@ -189,6 +189,13 @@ class TestingService:
             db.expunge(project)
         return project
 
+    @staticmethod
+    def _normalize_test_stem(stem: str) -> str:
+        """Strip common test suffixes/prefixes to get the source class name."""
+        name = re.sub(r'^test_', '', stem)
+        name = re.sub(r'(Tests?|IT|IntegrationTest|IntegrationTests|Spec|TestCase)$', '', name)
+        return name
+
     def _discover_from_path(self, repo_path: Path, language: str = "auto") -> dict:
         """Perform auto-discovery on a repository path."""
         discovery = {
@@ -197,6 +204,7 @@ class TestingService:
             "services": [],
             "dto_classes": [],
             "test_files": [],
+            "specifications": [],
             "frameworks_detected": [],
         }
 
@@ -248,31 +256,31 @@ class TestingService:
             if py_file.stem.startswith("test_") or py_file.stem.endswith("_test"):
                 discovery["test_files"].append({"file": rel, "language": "python"})
 
-        # Check for servlet XML files (JISI)
+        # Check for servlet XML files (JISI) — classify as specifications
         for xml_file in repo_path.rglob("*servlet*.xml"):
             if any(skip in xml_file.parts for skip in skip_dirs):
                 continue
             rel = str(xml_file.relative_to(repo_path))
             if "rest" in xml_file.stem.lower():
-                discovery["endpoints"].append({"file": rel, "type": "REST-servlet"})
+                discovery["specifications"].append({"file": rel, "type": "REST-servlet"})
             elif "cxf" in xml_file.stem.lower():
-                discovery["endpoints"].append({"file": rel, "type": "SOAP-servlet"})
+                discovery["specifications"].append({"file": rel, "type": "SOAP-servlet"})
 
-        # Check for OpenAPI/Swagger specs
+        # Check for OpenAPI/Swagger specs — classify as specifications
         for spec_name in ("openapi.yaml", "openapi.yml", "openapi.json", "swagger.yaml", "swagger.yml", "swagger.json"):
             for spec_file in repo_path.rglob(spec_name):
                 if any(skip in spec_file.parts for skip in skip_dirs):
                     continue
-                discovery["endpoints"].append({
+                discovery["specifications"].append({
                     "file": str(spec_file.relative_to(repo_path)),
                     "type": "OpenAPI",
                 })
 
-        # Check for WSDL files
+        # Check for WSDL files — classify as specifications
         for wsdl_file in repo_path.rglob("*.wsdl"):
             if any(skip in wsdl_file.parts for skip in skip_dirs):
                 continue
-            discovery["endpoints"].append({
+            discovery["specifications"].append({
                 "file": str(wsdl_file.relative_to(repo_path)),
                 "type": "WSDL",
             })
@@ -1152,6 +1160,27 @@ class TestingService:
             )
 
     # ------------------------------------------------------------------
+    # Coverage helpers
+    # ------------------------------------------------------------------
+
+    def _compute_function_coverage(self, endpoints, test_files, repo_path, overall_pct):
+        """Compute method-level function coverage by counting test methods vs API methods."""
+        total_methods = sum(len(ep.get("annotations", [])) or 1 for ep in endpoints)
+        if total_methods == 0:
+            return overall_pct
+        test_method_count = 0
+        for tf in test_files:
+            try:
+                content = (Path(repo_path) / tf["file"]).read_text(errors="ignore")
+            except Exception:
+                continue
+            if tf.get("language") == "java":
+                test_method_count += len(re.findall(r'@Test\b', content))
+            elif tf.get("language") == "python":
+                test_method_count += len(re.findall(r'def test_\w+', content))
+        return min(100.0, (test_method_count / total_methods) * 100) if test_method_count else overall_pct
+
+    # ------------------------------------------------------------------
     # Coverage
     # ------------------------------------------------------------------
 
@@ -1167,11 +1196,14 @@ class TestingService:
                 .all()
             )
 
-    def analyze_coverage(self, project_id: str, branch: str = "") -> Optional[CoverageReport]:
+    def analyze_coverage(
+        self, project_id: str, branch: str = "", sonarqube_project_key: str = ""
+    ) -> Optional[CoverageReport]:
         """Run coverage analysis on a project.
 
         Resolves the repo's local path (auto-cloning if needed), checks out the
         requested branch, re-runs discovery, and then calculates coverage.
+        If SonarQube is configured, overlays line/branch coverage from real metrics.
         """
         from src.services.repo_service import RepoService
 
@@ -1247,19 +1279,13 @@ class TestingService:
             test_files = discovery.get("test_files", [])
             services = discovery.get("services", [])
 
-            total_items = len(endpoints) + len(services)
-            tested_items = len(test_files)
+            # Normalise test file stems for matching
+            tested_file_stems = {self._normalize_test_stem(Path(t["file"]).stem) for t in test_files}
 
-            # Calculate coverage percentages
-            overall_pct = min(100.0, (tested_items / max(total_items, 1)) * 100)
-
-            # Identify uncovered areas
+            # Identify uncovered code items via stem matching
             uncovered = []
-            tested_file_stems = {Path(t["file"]).stem.replace("Test", "").replace("test_", "") for t in test_files}
-
             for ep in endpoints:
-                ep_stem = Path(ep["file"]).stem
-                if ep_stem not in tested_file_stems and f"test_{ep_stem}" not in tested_file_stems:
+                if Path(ep["file"]).stem not in tested_file_stems:
                     uncovered.append({
                         "type": "endpoint",
                         "file": ep["file"],
@@ -1268,13 +1294,32 @@ class TestingService:
                     })
 
             for svc in services:
-                svc_stem = Path(svc["file"]).stem
-                if svc_stem not in tested_file_stems:
+                if Path(svc["file"]).stem not in tested_file_stems:
                     uncovered.append({
                         "type": "service",
                         "file": svc["file"],
                         "priority": "medium",
                     })
+
+            # Specs listed separately, not in main coverage calc
+            for spec in discovery.get("specifications", []):
+                uncovered.append({
+                    "type": "specification",
+                    "file": spec["file"],
+                    "endpoint_type": spec.get("type", "spec"),
+                    "priority": "low",
+                })
+
+            # Derive percentage from match results
+            total_items = len(endpoints) + len(services)
+            uncovered_code = [u for u in uncovered if u["type"] != "specification"]
+            covered = total_items - len(uncovered_code)
+            overall_pct = (covered / max(total_items, 1)) * 100
+
+            # Compute real function coverage
+            function_coverage = self._compute_function_coverage(
+                endpoints, test_files, repo_path, overall_pct
+            ) if repo_path and os.path.isdir(repo_path) else overall_pct
 
             # Generate gap suggestions
             gaps = []
@@ -1286,22 +1331,62 @@ class TestingService:
                     "priority": item.get("priority", "medium"),
                 })
 
+            line_coverage = 0.0
+            branch_coverage = 0.0
+            details = {
+                "total_endpoints": len(endpoints),
+                "total_services": len(services),
+                "total_test_files": len(test_files),
+                "total_specifications": len(discovery.get("specifications", [])),
+                "frameworks": discovery.get("frameworks_detected", []),
+            }
+
+            # --- SonarQube overlay ---
+            try:
+                from src.services.config_service import ConfigService
+                app_config = ConfigService().load_config()
+            except Exception:
+                app_config = {}
+
+            sonar_config = app_config.get("sonarqube", {})
+            if sonar_config.get("enabled") and sonar_config.get("base_url"):
+                try:
+                    from src.sonarqube.client import fetch_measures, fetch_quality_gate, derive_project_key
+
+                    sq_key = sonarqube_project_key or derive_project_key(
+                        sonar_config,
+                        project.repo_url or "",
+                        project.name,
+                    )
+
+                    measures = fetch_measures(sonar_config, sq_key)
+                    quality_gate = fetch_quality_gate(sonar_config, sq_key)
+
+                    if measures:
+                        if "line_coverage" in measures:
+                            line_coverage = float(measures["line_coverage"])
+                        if "branch_coverage" in measures:
+                            branch_coverage = float(measures["branch_coverage"])
+
+                    details["sonarqube"] = {
+                        "project_key": sq_key,
+                        "measures": measures,
+                        "quality_gate": quality_gate,
+                    }
+                except Exception as exc:
+                    logger.warning("SonarQube overlay failed for project %s: %s", project_id, exc)
+
             report = CoverageReport(
                 id=_uuid(),
                 project_id=project_id,
                 report_type="functional",
                 overall_pct=round(overall_pct, 1),
-                line_coverage=0.0,  # Requires actual test execution
-                branch_coverage=0.0,
-                function_coverage=round(overall_pct, 1),
+                line_coverage=round(line_coverage, 1),
+                branch_coverage=round(branch_coverage, 1),
+                function_coverage=round(function_coverage, 1),
                 uncovered_areas=uncovered,
                 gaps=gaps,
-                details={
-                    "total_endpoints": len(endpoints),
-                    "total_services": len(services),
-                    "total_test_files": len(test_files),
-                    "frameworks": discovery.get("frameworks_detected", []),
-                },
+                details=details,
             )
             db.add(report)
             db.flush()

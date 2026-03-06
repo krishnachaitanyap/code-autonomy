@@ -298,9 +298,15 @@ async def list_coverage_reports(project_id: str, limit: int = Query(10, ge=1, le
 
 
 @router.post("/coverage/{project_id}/analyze", response_model=CoverageReportResponse)
-async def analyze_coverage(project_id: str, branch: str = ""):
+async def analyze_coverage(
+    project_id: str,
+    branch: str = "",
+    sonarqube_project_key: str = "",
+):
     """Trigger a coverage analysis for a project."""
-    report = _service.analyze_coverage(project_id, branch=branch)
+    report = _service.analyze_coverage(
+        project_id, branch=branch, sonarqube_project_key=sonarqube_project_key
+    )
     if not report:
         raise HTTPException(status_code=404, detail="Project not found")
     return CoverageReportResponse(

@@ -19,6 +19,9 @@ export default function CoveragePage() {
   const [branchList, setBranchList] = useState<string[]>([]);
   const [loadingBranches, setLoadingBranches] = useState(false);
 
+  // SonarQube project key
+  const [sonarProjectKey, setSonarProjectKey] = useState('');
+
   useEffect(() => {
     async function load() {
       try {
@@ -81,7 +84,7 @@ export default function CoveragePage() {
   async function handleAnalyze() {
     setAnalyzing(true);
     try {
-      await testing.analyzeCoverage(selectedProjectId, branch || undefined);
+      await testing.analyzeCoverage(selectedProjectId, branch || undefined, sonarProjectKey || undefined);
       await loadReports();
     } catch (err) {
       console.error('Coverage analysis failed:', err);
@@ -127,6 +130,13 @@ export default function CoveragePage() {
               ))
             )}
           </select>
+          <input
+            type="text"
+            placeholder="SonarQube project key (optional)"
+            value={sonarProjectKey}
+            onChange={(e) => setSonarProjectKey(e.target.value)}
+            className="px-3 py-2 border border-gray-300 rounded-md text-sm w-56"
+          />
           <button
             onClick={handleAnalyze}
             disabled={!selectedProjectId || analyzing}
@@ -227,7 +237,9 @@ export default function CoveragePage() {
             <div className="bg-white rounded-lg border border-gray-200 p-5">
               <h3 className="font-medium text-gray-900 mb-3">Summary</h3>
               <dl className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
-                {Object.entries(latestReport.details).map(([key, val]) => (
+                {Object.entries(latestReport.details)
+                  .filter(([key]) => key !== 'sonarqube')
+                  .map(([key, val]) => (
                   <div key={key}>
                     <dt className="text-gray-500">{key.replace(/_/g, ' ')}</dt>
                     <dd className="font-medium text-gray-900">
@@ -236,6 +248,57 @@ export default function CoveragePage() {
                   </div>
                 ))}
               </dl>
+            </div>
+          )}
+
+          {/* SonarQube section */}
+          {latestReport.details?.sonarqube && (
+            <div className="bg-white rounded-lg border border-gray-200 p-5">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-medium text-gray-900">SonarQube</h3>
+                <span className="text-xs text-gray-400">
+                  {latestReport.details.sonarqube.project_key}
+                </span>
+              </div>
+
+              {/* Quality gate badge */}
+              {latestReport.details.sonarqube.quality_gate?.status && (
+                <div className="mb-4">
+                  <span className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-medium ${
+                    latestReport.details.sonarqube.quality_gate.status === 'OK'
+                      ? 'bg-green-100 text-green-800'
+                      : latestReport.details.sonarqube.quality_gate.status === 'WARN'
+                        ? 'bg-yellow-100 text-yellow-800'
+                        : 'bg-red-100 text-red-800'
+                  }`}>
+                    Quality Gate: {latestReport.details.sonarqube.quality_gate.status}
+                  </span>
+                </div>
+              )}
+
+              {/* Metrics grid */}
+              {latestReport.details.sonarqube.measures && (
+                <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 text-sm">
+                  {[
+                    { key: 'bugs', label: 'Bugs' },
+                    { key: 'vulnerabilities', label: 'Vulnerabilities' },
+                    { key: 'code_smells', label: 'Code Smells' },
+                    { key: 'duplicated_lines_density', label: 'Duplication %' },
+                    { key: 'ncloc', label: 'Lines of Code' },
+                    { key: 'coverage', label: 'Coverage' },
+                  ]
+                    .filter(({ key }) => latestReport.details.sonarqube.measures[key] !== undefined)
+                    .map(({ key, label }) => (
+                      <div key={key}>
+                        <dt className="text-gray-500">{label}</dt>
+                        <dd className="font-medium text-gray-900">
+                          {latestReport.details.sonarqube.measures[key]}
+                          {key.includes('density') || key === 'coverage' ? '%' : ''}
+                        </dd>
+                      </div>
+                    ))}
+                </dl>
+              )}
             </div>
           )}
 

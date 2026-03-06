@@ -234,6 +234,14 @@ def load_config(config_path: str = "config.ini") -> dict:
             "timeout": get_int("splunk", "timeout", 30),
             "max_results": get_int("splunk", "max_results", 1000),
         },
+        "sonarqube": {
+            "enabled": get_bool("sonarqube", "enabled", False),
+            "base_url": get("sonarqube", "base_url", ""),
+            "token": get("sonarqube", "token", "") or os.environ.get("SONARQUBE_TOKEN", ""),
+            "verify_ssl": get_bool("sonarqube", "verify_ssl", False),
+            "timeout": get_int("sonarqube", "timeout", 30),
+            "project_key_pattern": get("sonarqube", "project_key_pattern", ""),
+        },
     }
 
 

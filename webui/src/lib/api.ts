@@ -66,6 +66,15 @@ export const repos = {
     request<{ branches: string[] }>(`/repos/${id}/branches`),
   generateSkills: (id: string) =>
     request<{ content: string }>(`/repos/${id}/skills/generate`, { method: 'POST' }),
+  getClaudeMd: (id: string) =>
+    request<{ content: string }>(`/repos/${id}/claude-md`),
+  updateClaudeMd: (id: string, content: string) =>
+    request<{ content: string }>(`/repos/${id}/claude-md`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
+  generateClaudeMd: (id: string) =>
+    request<{ content: string }>(`/repos/${id}/claude-md/generate`, { method: 'POST' }),
 };
 
 // ---------------------------------------------------------------------------
@@ -482,8 +491,13 @@ export const testing = {
   // Coverage
   listCoverage: (projectId: string) =>
     request<CoverageReport[]>(`/testing/coverage/${projectId}`),
-  analyzeCoverage: (projectId: string, branch?: string) =>
-    request<CoverageReport>(`/testing/coverage/${projectId}/analyze${branch ? `?branch=${encodeURIComponent(branch)}` : ''}`, { method: 'POST' }),
+  analyzeCoverage: (projectId: string, branch?: string, sonarqubeProjectKey?: string) => {
+    const qs = new URLSearchParams();
+    if (branch) qs.set('branch', branch);
+    if (sonarqubeProjectKey) qs.set('sonarqube_project_key', sonarqubeProjectKey);
+    const query = qs.toString() ? `?${qs}` : '';
+    return request<CoverageReport>(`/testing/coverage/${projectId}/analyze${query}`, { method: 'POST' });
+  },
 
   // Data Injection
   listDataInjection: (projectId: string) =>
