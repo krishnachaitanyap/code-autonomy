@@ -116,7 +116,7 @@ class AgentService:
             "command_allowlist_only": agent_cfg.get("command_allowlist_only", False),
             "allowed_command_prefixes": agent_cfg.get("allowed_command_prefixes", []),
             "blocked_commands": agent_cfg.get("blocked_commands", []),
-            "summarization_budget": int(agent_cfg.get("summarization_budget", 0)),
+            "summarization_budget": int(agent_cfg.get("summarization_budget", 8)),
             "testing_budget": int(agent_cfg.get("testing_budget", 0)),
             "skip_tests": agent_cfg.get("skip_tests", False),
             "splunk_enabled": splunk_enabled,
@@ -188,7 +188,6 @@ class AgentService:
     ) -> "AgentResult":
         """Run agent mode — full agentic loop with exploration, editing, and testing."""
         from src.agent.analyzer import generate_changes_with_agent
-        from src.code.executor import detect_build_tool
 
         self._checkout_branch(repo_path, branch)
         repo_id = compute_repo_id(repo_path, repo_url)
@@ -202,7 +201,7 @@ class AgentService:
         consciousness = self._get_cached_consciousness(repo_id, repo_path, config, repo_url)
         code_index = self._get_cached_code_index(repo_id, repo_path, config, repo_url, consciousness)
         repo_knowledge = self._get_cached_repo_knowledge(repo_id, repo_path)
-        build_tool = detect_build_tool(repo_path)
+        build_tool = consciousness.conventions.get("build_tool") if consciousness else None
 
         from src.agent.activity import set_progress_callback, clear_progress_callback
 
@@ -263,7 +262,6 @@ class AgentService:
     ) -> "PlanResult":
         """Run plan mode — read-only exploration + proposed changes."""
         from src.agent.analyzer import generate_plan_with_agent
-        from src.code.executor import detect_build_tool
 
         self._checkout_branch(repo_path, branch)
         repo_id = compute_repo_id(repo_path, repo_url)
@@ -279,11 +277,11 @@ class AgentService:
 
         session_id = self._create_session(repo_id, "plan", requirements)
 
-        # Build consciousness and code index (cached)
+        # Build consciousness (cached); only use code_index if already cached (skip eager build)
         consciousness = self._get_cached_consciousness(repo_id, repo_path, config, repo_url)
-        code_index = self._get_cached_code_index(repo_id, repo_path, config, repo_url, consciousness)
+        code_index = repo_cache.get(repo_id, "code_index", TTL_CODE_INDEX)
         repo_knowledge = self._get_cached_repo_knowledge(repo_id, repo_path)
-        build_tool = detect_build_tool(repo_path)
+        build_tool = consciousness.conventions.get("build_tool") if consciousness else None
 
         from src.agent.activity import set_progress_callback, clear_progress_callback
 
@@ -347,13 +345,26 @@ class AgentService:
         repo_id = compute_repo_id(repo_path, repo_url)
         ai_cfg = config["ai"]
         agent_cfg = config.get("agent", {})
+        splunk_cfg = config.get("splunk", {})
+        opensearch_cfg = config.get("opensearch", {})
+        splunk_enabled = (
+            splunk_cfg.get("enabled", False)
+            and opensearch_cfg.get("enabled", False)
+            and bool(splunk_cfg.get("base_url"))
+            and bool(opensearch_cfg.get("endpoint"))
+        )
         agent_config = {
             "ask_max_turns": int(agent_cfg.get("ask_max_turns", 20)),
             "max_turns": int(agent_cfg.get("max_turns", 50)),
             "smart_summarization": agent_cfg.get("smart_summarization", True),
             "truncation_limit": int(agent_cfg.get("truncation_limit", 30000)),
             "certs_enabled": agent_cfg.get("certs_enabled", True),
+            "splunk_enabled": splunk_enabled,
         }
+        if splunk_enabled:
+            agent_config["splunk_config"] = splunk_cfg
+            agent_config["opensearch_config"] = opensearch_cfg
+            agent_config["ai_config"] = config.get("ai", {})
 
         session_id = self._create_session(repo_id, "ask", question)
 
