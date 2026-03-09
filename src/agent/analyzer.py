@@ -91,7 +91,7 @@ class AskResult:
 # ---------------------------------------------------------------------------
 # Guard: abort after N consecutive empty LLM responses
 # ---------------------------------------------------------------------------
-MAX_CONSECUTIVE_EMPTY = 5
+MAX_CONSECUTIVE_EMPTY = 3
 MAX_CONSECUTIVE_API_ERRORS = 3
 
 
@@ -563,6 +563,8 @@ def generate_changes_with_agent(
     result carries ``changes`` instead.
     """
     from src.llm_client import chat_completion, LLMUsageStats
+    from src.code.file_cache import reset_session_cache
+    reset_session_cache()
 
     repo_root = Path(repo_path)
     agent_cfg = agent_config or {}
@@ -714,6 +716,12 @@ def generate_changes_with_agent(
     model_name = _resolve_model_name(llm_config)
 
     for turn in range(max_turns):
+        # --- Evict stale corrective messages (older than 3 turns) ---
+        messages = [
+            m for m in messages
+            if "_corrective_turn" not in m or (turn - m["_corrective_turn"]) < 3
+        ]
+
         # --- Context management (token-aware) ---
         ctx_span_id = None
         if collector:
@@ -1101,6 +1109,7 @@ def generate_changes_with_agent(
                         "3. Then use edit_file with the exact text from that read.\n"
                         "4. If grep finds no match, the property does not exist yet — add it near related properties."
                     ),
+                    "_corrective_turn": turn,
                 })
 
             # --- Detect repeated reads on the same file ---
@@ -1117,6 +1126,7 @@ def generate_changes_with_agent(
                             "read_file with start_line/end_line (e.g., ±1000 lines around the match), "
                             "and copy the exact text into old_string."
                         ),
+                        "_corrective_turn": turn,
                     })
 
             # --- Corrective injection after failed edit_file ---
@@ -1131,6 +1141,7 @@ def generate_changes_with_agent(
                         "3. Copy the EXACT text (including all whitespace) from that read_file output into old_string.\n"
                         "4. Retry edit_file with the corrected old_string."
                     ),
+                    "_corrective_turn": turn,
                 })
 
             # --- Nudge after many consecutive reads without any write ---
@@ -1143,6 +1154,7 @@ def generate_changes_with_agent(
                         "If you are struggling to match old_string for edit_file, use grep to find the exact line, "
                         "then read_file with a narrow line range to get the precise text."
                     ),
+                    "_corrective_turn": turn,
                 })
 
             # --- Inject working memory / GCC context into system prompt ---
@@ -1202,19 +1214,18 @@ def generate_changes_with_agent(
                 else:
                     last_error_hash = err_hash
                     stuck_count = 1
-                if stuck_count >= 3:
+                if stuck_count >= 2:
                     if collector:
                         collector.add_event(
-                            SPAN_STUCK_DETECT, "stuck_3x_same_error", turn,
+                            SPAN_STUCK_DETECT, "stuck_2x_same_error", turn,
                             inputs={"error_hash": err_hash},
                             reward=-1.0,
                         )
                     messages.append({
                         "role": "user",
                         "content": (
-                            "The same test failure has occurred 3 times. "
-                            "Step back and consider a different approach to fix this issue. "
-                            "Re-read the failing test and the relevant source code before editing."
+                            "Same test failure repeated. Try a different approach. "
+                            "Re-read the failing test and source before editing."
                         ),
                     })
                     stuck_count = 0
@@ -1237,24 +1248,15 @@ def generate_changes_with_agent(
         else:
             turns_without_write += 1
 
-        if turns_without_write == 5:
+        if turns_without_write == 4:
             messages.append({
                 "role": "user",
-                "content": (
-                    f"You have spent {turns_without_write} turns exploring without making any edits. "
-                    "You have enough context. "
-                    "Please call edit_file or write_file NOW to implement the required changes. "
-                    "If you cannot determine the exact text to edit, use grep to find the line, "
-                    "then read_file with start_line/end_line for a narrow range, then edit_file."
-                ),
+                "content": f"{turns_without_write} turns without edits. Start implementing now.",
             })
-        elif turns_without_write >= 12:
+        elif turns_without_write >= 6:
             messages.append({
                 "role": "user",
-                "content": (
-                    f"WARNING: {turns_without_write} turns with no edits. If you do not call edit_file or write_file "
-                    "on the next turn, the session will be considered failed. Make your best attempt NOW."
-                ),
+                "content": f"WARNING: {turns_without_write} turns, no edits. Edit now or session fails.",
             })
 
         if task_complete_data:
@@ -1273,46 +1275,26 @@ def generate_changes_with_agent(
             hard_deadline = int(max_turns * hard_pct)
 
             if turn + 1 == explore_limit and not has_writes and not has_plan:
-                # Only nudge if agent hasn't recorded anything useful yet
                 messages.append({
                     "role": "user",
-                    "content": (
-                        f"Hint: You have used {turn + 1} of {max_turns} turns exploring. "
-                        "Consider whether you have enough context to start implementing. "
-                        "If you need to edit a large file, use grep to find the exact location first, "
-                        "then read_file with a narrow line range, then edit_file."
-                    ),
+                    "content": f"{turn + 1}/{max_turns} turns exploring. Start implementing.",
                 })
             elif turn + 1 == soft_deadline:
                 if has_writes:
                     messages.append({
                         "role": "user",
-                        "content": (
-                            f"Progress check: {turn + 1}/{max_turns} turns used, "
-                            f"{len(changes_tracker)} file(s) modified so far. "
-                            "Consider running tests to verify your changes, then call task_complete."
-                        ),
+                        "content": f"{turn + 1}/{max_turns} turns, {len(changes_tracker)} file(s) modified. Run tests and call task_complete.",
                     })
                 else:
                     messages.append({
                         "role": "user",
-                        "content": (
-                            f"Note: {turn + 1}/{max_turns} turns used and no files modified yet. "
-                            "If you have enough understanding, start implementing changes. "
-                            "For large config files: use grep to locate properties, read a narrow range, "
-                            "then edit_file. If a property doesn't exist, add it near related entries."
-                        ),
+                        "content": f"{turn + 1}/{max_turns} turns, no edits yet. Start implementing now.",
                     })
             elif turn + 1 == hard_deadline:
+                status = f"{len(changes_tracker)} file(s) modified. Wrap up." if has_writes else "No edits. Make changes now."
                 messages.append({
                     "role": "user",
-                    "content": (
-                        f"Note: {turn + 1}/{max_turns} turns used, {max_turns - turn - 1} remaining. "
-                        + (f"{len(changes_tracker)} file(s) modified. "
-                           "Consider running final tests and calling task_complete."
-                           if has_writes else
-                           "No files modified yet. Focus on making the required changes now.")
-                    ),
+                    "content": f"{turn + 1}/{max_turns} turns, {max_turns - turn - 1} left. {status}",
                 })
 
     # ------------------------------------------------------------------ #
@@ -1473,6 +1455,8 @@ def generate_plan_with_agent(
     """
     from src.llm_client import chat_completion, LLMUsageStats
     from src.agent.plan import ChangePlan
+    from src.code.file_cache import reset_session_cache
+    reset_session_cache()
 
     repo_root = Path(repo_path)
     agent_cfg = agent_config or {}
@@ -1985,6 +1969,8 @@ def generate_answer_with_agent(
     No files are written to disk.
     """
     from src.llm_client import chat_completion, LLMUsageStats
+    from src.code.file_cache import reset_session_cache
+    reset_session_cache()
 
     repo_root = Path(repo_path)
     agent_cfg = agent_config or {}
@@ -2046,6 +2032,26 @@ def generate_answer_with_agent(
             pass
     knowledge_section = f"\n\n{knowledge_context}\n" if knowledge_context else ""
 
+    # Classify question early (used by direct lookup and search guidance)
+    q_type = _classify_question(question)
+
+    # --- Zero-LLM direct lookup for simple file/property questions ---
+    if q_type == "lookup":
+        try:
+            from src.agent.direct_lookup import direct_lookup
+            direct_answer = direct_lookup(question, repo_path, consciousness=consciousness)
+            if direct_answer is not None:
+                return AskResult(
+                    success=True,
+                    answer=direct_answer,
+                    sources=[],
+                    summary="Answered via direct file lookup (zero LLM calls)",
+                    turns_used=0,
+                    usage_stats=usage_stats,
+                )
+        except Exception:
+            pass
+
     # --- Fast-path: try answering from available context + RAG retrieval ---
     available_context = (initial_context + repo_knowledge_section + knowledge_section).strip()
     if available_context and len(available_context) > 200:
@@ -2068,14 +2074,21 @@ def generate_answer_with_agent(
                 )
         except Exception:
             pass  # Fall through to full agent loop
+    splunk_enabled = agent_cfg.get("splunk_enabled", False)
 
-    # Classify question to provide efficient search guidance
-    q_type = _classify_question(question)
     if q_type == "lookup":
+        max_turns = min(max_turns, 4)
         search_guidance = (
             "The question targets a specific file or property. "
             "Use find_files to locate the file, read_file to get its contents, "
             "then call task_complete with the answer. Aim for 2-4 tool calls."
+        )
+    elif splunk_enabled:
+        search_guidance = (
+            "For questions about logs, errors, metrics, or production behavior, "
+            "prefer splunk_ask() as the first tool call for a quick answer. "
+            "For code/file questions, use list_dir and find_files to explore the repo. "
+            "When you have a complete answer, call task_complete."
         )
     else:
         search_guidance = (
