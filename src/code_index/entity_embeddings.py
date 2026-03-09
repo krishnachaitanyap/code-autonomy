@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # OpenAI embedding model — small, fast, cheap ($0.02/1M tokens)
 _DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 _BATCH_SIZE = 2048  # max texts per API call
+_MAX_CONCURRENT_BATCHES = 5  # max parallel API calls
 
 # Sliding window chunking defaults
 _CHUNK_SIZE = 800        # chars per embedding chunk
@@ -76,12 +77,34 @@ class EntityEmbeddings:
         self._bm25_fqns: list[str] = []
         self._bm25_corpus: list[list[str]] = []
 
+        # Lazy build support
+        self._deferred_build_args: Optional[dict] = None
+        self._build_attempted: bool = False
+
     @property
     def count(self) -> int:
         return len(self._fqns)
 
     def __len__(self) -> int:
         return len(self._fqns)
+
+    def ensure_built(self) -> None:
+        """Build embeddings from deferred args on first use."""
+        if self._build_attempted or self._deferred_build_args is None:
+            return
+        self._build_attempted = True
+        args = self._deferred_build_args
+        self._deferred_build_args = None
+        try:
+            self.build(
+                repo_path=args["repo_path"],
+                symbol_table=args["symbol_table"],
+                config=args.get("config"),
+                file_contents=args.get("file_contents"),
+            )
+            logger.info("Lazy embedding build completed: %d embeddings", len(self))
+        except Exception as exc:
+            logger.warning("Lazy embedding build failed: %s", exc)
 
     def build(
         self,
@@ -190,8 +213,14 @@ class EntityEmbeddings:
             self._build_bm25_index(fqns, texts)
 
         # Encode via OpenAI embeddings API (through litellm)
+        import time
+        t0 = time.time()
+        logger.info("Embedding %d texts in batches of %d (max %d concurrent)...",
+                     len(texts), _BATCH_SIZE, _MAX_CONCURRENT_BATCHES)
         try:
             self._vectors = self._embed_texts(texts)
+            elapsed = time.time() - t0
+            logger.info("Embedding completed: %d vectors in %.2fs", len(texts), elapsed)
         except Exception as exc:
             logger.warning("Could not build embeddings via API: %s", exc)
             self._vectors = None
@@ -203,6 +232,7 @@ class EntityEmbeddings:
 
         Returns list of ``(fqn, score)`` tuples, deduplicated by FQN.
         """
+        self.ensure_built()
         vec_results = self._find_by_vector(query, top_k * 2)
         bm25_results = self._find_by_bm25(query, top_k * 2)
 
@@ -341,6 +371,15 @@ class EntityEmbeddings:
         except Exception:
             return False
 
+    def _embed_single_batch(self, texts, model, api_key):
+        """Embed a single batch of texts. Returns numpy array (n, dim)."""
+        import numpy as np
+        import litellm
+
+        response = litellm.embedding(model=model, input=texts, api_key=api_key)
+        batch_vecs = [item["embedding"] for item in response.data]
+        return np.array(batch_vecs, dtype=np.float32)
+
     def _embed_texts(self, texts: list[str]):
         """Call embeddings API. Uses Azure OpenAI when provider=azure, else litellm."""
         import numpy as np
@@ -359,23 +398,35 @@ class EntityEmbeddings:
         if not api_key:
             raise ValueError("No API key available for embeddings")
 
-        import litellm
-
         model = ai_cfg.get("embedding_model", _DEFAULT_EMBEDDING_MODEL)
 
-        all_vectors = []
-        for i in range(0, len(texts), _BATCH_SIZE):
-            batch = texts[i : i + _BATCH_SIZE]
-            response = litellm.embedding(
-                model=model,
-                input=batch,
-                api_key=api_key,
-            )
-            # litellm returns response.data = [{"embedding": [...], "index": i}, ...]
-            batch_vecs = [item["embedding"] for item in response.data]
-            all_vectors.extend(batch_vecs)
+        # Split into batches
+        batches = [(i, texts[i : i + _BATCH_SIZE]) for i in range(0, len(texts), _BATCH_SIZE)]
 
-        return np.array(all_vectors, dtype=np.float32)
+        if len(batches) <= 1:
+            # Single batch — no threading overhead
+            return self._embed_single_batch(batches[0][1], model, api_key)
+
+        # Concurrent execution
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        results = [None] * len(batches)  # preserve order
+
+        def _call_api(batch_idx, batch_texts):
+            vecs = self._embed_single_batch(batch_texts, model, api_key)
+            return batch_idx, vecs
+
+        max_workers = min(_MAX_CONCURRENT_BATCHES, len(batches))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_call_api, idx, batch): idx
+                for idx, (_, batch) in enumerate(batches)
+            }
+            for future in as_completed(futures):
+                batch_idx, vecs = future.result()
+                results[batch_idx] = vecs
+
+        return np.concatenate(results, axis=0)
 
     def _embed_texts_azure(self, texts: list[str]):
         """Call Azure OpenAI Embeddings via LangChain. Returns numpy array (n, dim)."""
@@ -384,13 +435,33 @@ class EntityEmbeddings:
 
         client = create_embeddings_client(self._config)
 
-        all_vectors = []
-        for i in range(0, len(texts), _BATCH_SIZE):
-            batch = texts[i : i + _BATCH_SIZE]
-            batch_vecs = client.embed_documents(batch)
-            all_vectors.extend(batch_vecs)
+        # Split into batches
+        batches = [(i, texts[i : i + _BATCH_SIZE]) for i in range(0, len(texts), _BATCH_SIZE)]
 
-        return np.array(all_vectors, dtype=np.float32)
+        if len(batches) <= 1:
+            vecs = client.embed_documents(batches[0][1])
+            return np.array(vecs, dtype=np.float32)
+
+        # Concurrent execution
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        results = [None] * len(batches)
+
+        def _call_api(batch_idx, batch_texts):
+            vecs = client.embed_documents(batch_texts)
+            return batch_idx, np.array(vecs, dtype=np.float32)
+
+        max_workers = min(_MAX_CONCURRENT_BATCHES, len(batches))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_call_api, idx, batch): idx
+                for idx, (_, batch) in enumerate(batches)
+            }
+            for future in as_completed(futures):
+                batch_idx, vecs = future.result()
+                results[batch_idx] = vecs
+
+        return np.concatenate(results, axis=0)
 
 
 def _extract_import_context(file_contents: dict[str, str]) -> dict[str, str]:
