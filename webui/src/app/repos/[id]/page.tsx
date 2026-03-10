@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { repos, type Repo } from '@/lib/api';
+import DependencyVisualizer from '@/components/DependencyVisualizer';
 
 function getBranchType(name: string): { label: string; color: string } {
   const n = name.toLowerCase();
@@ -253,6 +254,15 @@ export default function RepoDetailPage() {
             )}
           </>
         )}
+      </div>
+
+      {/* Dependency Visualizer */}
+      <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Dependencies</h2>
+        <p className="text-sm text-gray-500 mb-4">
+          Downstream services, data stores, messaging, and API endpoints detected via static analysis.
+        </p>
+        <DependencyVisualizer repoId={repoId} repoName={repo.url || repo.local_path || repoId} />
       </div>
 
       {/* SKILLS.md Editor */}
