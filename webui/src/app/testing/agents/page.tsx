@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import {
   testing, jira, repos, workflows as workflowsApi,
@@ -179,7 +179,15 @@ function isStageHeader(stage: string): boolean {
 // Page component
 // ---------------------------------------------------------------------------
 
-export default function AgentsPage() {
+export default function AgentsPageWrapper() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[60vh]"><div className="w-6 h-6 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" /></div>}>
+      <AgentsPage />
+    </Suspense>
+  );
+}
+
+function AgentsPage() {
   const searchParams = useSearchParams();
   const projectFilter = searchParams.get('project') || '';
 

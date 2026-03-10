@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 # Ensure project root is in path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.api.routes import ask, config, jira, repos, sessions, testing, traces, workflows
+from src.api.routes import ask, config, jira, migrations, repos, sessions, testing, traces, workflows
 from src.data.database import init_db
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,7 @@ app.include_router(ask.router, prefix="/api/ask")
 app.include_router(jira.router, prefix="/api/jira")
 app.include_router(testing.router, prefix="/api/testing")
 app.include_router(workflows.router, prefix="/api/workflows", tags=["Workflows"])
+app.include_router(migrations.router, prefix="/api/migrations", tags=["Migrations"])
 
 
 @app.get("/api/health")

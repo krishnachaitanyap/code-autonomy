@@ -59,6 +59,7 @@ class Repo(Base):
     jira_sessions = relationship("JiraSession", back_populates="repo", cascade="all, delete-orphan")
     jira_runs = relationship("JiraRun", back_populates="repo", cascade="all, delete-orphan")
     test_projects = relationship("TestProject", back_populates="repo", cascade="all, delete-orphan")
+    migration_projects = relationship("MigrationProject", back_populates="repo", cascade="all, delete-orphan")
 
     def __repr__(self) -> str:
         return f"<Repo id={self.id!r} url={self.url!r}>"
@@ -505,3 +506,76 @@ class ChatMessage(Base):
     content = Column(Text, nullable=False, default="")
     extra_data = Column(JSON, nullable=False, default=dict)  # tool calls, references, etc.
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+
+# ---------------------------------------------------------------------------
+# MigrationProject — migration from source repo to reference golden template
+# ---------------------------------------------------------------------------
+
+class MigrationProject(Base):
+    __tablename__ = "migration_projects"
+
+    id = Column(String(64), primary_key=True, default=_uuid)
+    repo_id = Column(String(64), ForeignKey("repos.id"), nullable=False, index=True)
+    name = Column(String(256), nullable=False)
+    migration_mode = Column(String(32), nullable=False, default="migration")
+    # migration — source repo migrated toward reference golden template
+    # improvement — existing dest repo assessed for quality, completeness, testing, performance
+    source_repo_url = Column(String(1024), nullable=False, default="")
+    source_local_path = Column(String(1024), nullable=False, default="")
+    source_branch = Column(String(256), nullable=False, default="main")
+    reference_repo_url = Column(String(1024), nullable=False, default="")
+    reference_local_path = Column(String(1024), nullable=False, default="")
+    reference_branch = Column(String(256), nullable=False, default="main")
+    reference_folders = Column(JSON, nullable=False, default=list)  # selected folders from reference
+    status = Column(String(32), nullable=False, default="pending")
+    # pending | analyzing | analyzed | executing | completed | failed
+    source_profile = Column(JSON, nullable=False, default=dict)
+    reference_profile = Column(JSON, nullable=False, default=dict)
+    gap_analysis = Column(JSON, nullable=False, default=dict)
+    improvement_analysis = Column(JSON, nullable=False, default=dict)
+    # Standalone quality assessment: test coverage, structure, performance, error handling, etc.
+    capacity_current = Column(JSON, nullable=False, default=dict)
+    capacity_target = Column(JSON, nullable=False, default=dict)
+    selected_recipes = Column(JSON, nullable=False, default=list)
+    config = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+    # Relationships
+    repo = relationship("Repo", back_populates="migration_projects")
+    migration_runs = relationship("MigrationRun", back_populates="project", cascade="all, delete-orphan")
+
+    def __repr__(self) -> str:
+        return f"<MigrationProject id={self.id!r} name={self.name!r} status={self.status!r}>"
+
+
+# ---------------------------------------------------------------------------
+# MigrationRun — tracked migration execution run
+# ---------------------------------------------------------------------------
+
+class MigrationRun(Base):
+    __tablename__ = "migration_runs"
+
+    id = Column(String(64), primary_key=True, default=_uuid)
+    project_id = Column(String(64), ForeignKey("migration_projects.id"), nullable=False, index=True)
+    status = Column(String(32), nullable=False, default="queued")
+    # queued | running | paused | completed | failed | cancelled
+    roadmap_steps = Column(JSON, nullable=False, default=list)
+    # Each step: {index, title, description, category, recipe_id, status, priority,
+    #             files_affected, result_summary, error, started_at, completed_at}
+    current_step = Column(Integer, nullable=False, default=0)
+    progress_pct = Column(Float, nullable=False, default=0.0)
+    log = Column(JSON, nullable=False, default=list)
+    result_summary = Column(Text, nullable=False, default="")
+    artifacts = Column(JSON, nullable=False, default=dict)
+    total_tokens_used = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    project = relationship("MigrationProject", back_populates="migration_runs")
+
+    def __repr__(self) -> str:
+        return f"<MigrationRun id={self.id!r} status={self.status!r}>"

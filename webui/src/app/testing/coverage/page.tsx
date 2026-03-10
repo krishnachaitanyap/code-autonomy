@@ -1,10 +1,18 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { testing, repos, type TestProject, type CoverageReport } from '@/lib/api';
 
-export default function CoveragePage() {
+export default function CoveragePageWrapper() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center min-h-[60vh]"><div className="w-6 h-6 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" /></div>}>
+      <CoveragePage />
+    </Suspense>
+  );
+}
+
+function CoveragePage() {
   const searchParams = useSearchParams();
   const projectFilter = searchParams.get('project') || '';
 

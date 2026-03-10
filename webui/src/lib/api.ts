@@ -554,3 +554,159 @@ export const testing = {
   // Stats
   stats: () => request<TestingStats>('/testing/stats'),
 };
+
+// ---------------------------------------------------------------------------
+// Migration Platform
+// ---------------------------------------------------------------------------
+
+export interface MigrationProject {
+  id: string;
+  repo_id: string;
+  name: string;
+  migration_mode: string; // "migration" | "improvement"
+  source_repo_url: string;
+  source_local_path: string;
+  source_branch: string;
+  reference_repo_url: string;
+  reference_local_path: string;
+  reference_branch: string;
+  reference_folders: string[];
+  status: string;
+  source_profile: Record<string, any>;
+  reference_profile: Record<string, any>;
+  gap_analysis: Record<string, any>;
+  improvement_analysis: Record<string, any>;
+  capacity_current: Record<string, any>;
+  capacity_target: Record<string, any>;
+  selected_recipes: string[];
+  config: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MigrationRecipe {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  priority: number;
+  tags: string[];
+  prerequisites: string[];
+  agent_instructions: string;
+}
+
+export interface MigrationRoadmapStep {
+  index: number;
+  title: string;
+  description: string;
+  category: string;
+  recipe_id: string;
+  status: string;
+  priority: number;
+  files_affected: string[];
+  result_summary: string;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface MigrationRun {
+  id: string;
+  project_id: string;
+  status: string;
+  roadmap_steps: MigrationRoadmapStep[];
+  current_step: number;
+  progress_pct: number;
+  log: Record<string, any>[];
+  result_summary: string;
+  artifacts: Record<string, any>;
+  total_tokens_used: number;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface MigrationStats {
+  total_projects: number;
+  analyzed_projects: number;
+  total_runs: number;
+  completed_runs: number;
+  running_runs: number;
+  failed_runs: number;
+}
+
+export const migrations = {
+  // Projects
+  listProjects: (params?: { status?: string; repo_id?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set('status', params.status);
+    if (params?.repo_id) qs.set('repo_id', params.repo_id);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const query = qs.toString() ? `?${qs}` : '';
+    return request<{ projects: MigrationProject[]; total: number }>(`/migrations/projects${query}`);
+  },
+  getProject: (id: string) => request<MigrationProject>(`/migrations/projects/${id}`),
+  createProject: (data: {
+    name: string;
+    migration_mode?: string;
+    source_repo_url?: string;
+    source_local_path?: string;
+    source_branch?: string;
+    reference_repo_url?: string;
+    reference_local_path?: string;
+    reference_branch?: string;
+    reference_folders?: string[];
+    config?: Record<string, any>;
+  }) =>
+    request<MigrationProject>('/migrations/projects', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  deleteProject: (id: string) =>
+    request<void>(`/migrations/projects/${id}`, { method: 'DELETE' }),
+  analyzeProject: (id: string) =>
+    request<MigrationProject>(`/migrations/projects/${id}/analyze`, { method: 'POST' }),
+
+  // Capacity
+  updateCapacityTarget: (id: string, capacity_target: Record<string, any>) =>
+    request<MigrationProject>(`/migrations/projects/${id}/capacity`, {
+      method: 'PUT',
+      body: JSON.stringify({ capacity_target }),
+    }),
+
+  // Recipes
+  listRecipes: () => request<MigrationRecipe[]>('/migrations/recipes'),
+  getRecommendedRecipes: (projectId: string) =>
+    request<MigrationRecipe[]>(`/migrations/projects/${projectId}/recipes`),
+  setSelectedRecipes: (projectId: string, recipe_ids: string[]) =>
+    request<MigrationProject>(`/migrations/projects/${projectId}/recipes`, {
+      method: 'PUT',
+      body: JSON.stringify({ recipe_ids }),
+    }),
+
+  // Roadmap
+  generateRoadmap: (projectId: string) =>
+    request<MigrationRun>(`/migrations/projects/${projectId}/roadmap`, { method: 'POST' }),
+
+  // Runs
+  listRuns: (params?: { project_id?: string; status?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.project_id) qs.set('project_id', params.project_id);
+    if (params?.status) qs.set('status', params.status);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const query = qs.toString() ? `?${qs}` : '';
+    return request<{ runs: MigrationRun[]; total: number }>(`/migrations/runs${query}`);
+  },
+  getRun: (id: string) => request<MigrationRun>(`/migrations/runs/${id}`),
+  executeRun: (id: string) =>
+    request<MigrationRun>(`/migrations/runs/${id}/execute`, { method: 'POST' }),
+  executeStep: (runId: string, stepIndex: number) =>
+    request<MigrationRun>(`/migrations/runs/${runId}/execute-step?step_index=${stepIndex}`, {
+      method: 'POST',
+    }),
+  cancelRun: (id: string) =>
+    request<{ status: string }>(`/migrations/runs/${id}/cancel`, { method: 'POST' }),
+
+  // Stats
+  stats: () => request<MigrationStats>('/migrations/stats'),
+};

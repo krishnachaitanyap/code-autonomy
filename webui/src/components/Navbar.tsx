@@ -48,6 +48,12 @@ const IconCoverage = () => (
   </svg>
 );
 
+const IconMigration = () => (
+  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" />
+  </svg>
+);
+
 const IconSessions = () => (
   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -79,6 +85,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: '/testing', label: 'Testing', icon: <IconTesting /> },
       { href: '/testing/coverage', label: 'Coverage', icon: <IconCoverage /> },
+      { href: '/migration', label: 'Migration', icon: <IconMigration /> },
     ],
   },
   {

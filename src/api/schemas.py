@@ -459,3 +459,105 @@ class WorkflowResponse(BaseModel):
 class WorkflowListResponse(BaseModel):
     workflows: list[WorkflowResponse]
     total: int
+
+
+# ---------------------------------------------------------------------------
+# Migration Platform
+# ---------------------------------------------------------------------------
+
+class MigrationProjectCreate(BaseModel):
+    name: str
+    migration_mode: str = "migration"  # migration | improvement
+    source_repo_url: str = ""
+    source_local_path: str = ""
+    source_branch: str = "main"
+    reference_repo_url: str = ""
+    reference_local_path: str = ""
+    reference_branch: str = "main"
+    reference_folders: list[str] = Field(default_factory=list)
+    config: dict = Field(default_factory=dict)
+
+
+class MigrationProjectResponse(BaseModel):
+    id: str
+    repo_id: str
+    name: str
+    migration_mode: str = "migration"
+    source_repo_url: str = ""
+    source_local_path: str = ""
+    source_branch: str = "main"
+    reference_repo_url: str = ""
+    reference_local_path: str = ""
+    reference_branch: str = "main"
+    reference_folders: list[str] = Field(default_factory=list)
+    status: str = "pending"
+    source_profile: dict = Field(default_factory=dict)
+    reference_profile: dict = Field(default_factory=dict)
+    gap_analysis: dict = Field(default_factory=dict)
+    improvement_analysis: dict = Field(default_factory=dict)
+    capacity_current: dict = Field(default_factory=dict)
+    capacity_target: dict = Field(default_factory=dict)
+    selected_recipes: list[str] = Field(default_factory=list)
+    config: dict = Field(default_factory=dict)
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class MigrationProjectListResponse(BaseModel):
+    projects: list[MigrationProjectResponse]
+    total: int
+
+
+class MigrationRecipeResponse(BaseModel):
+    id: str
+    name: str
+    category: str
+    description: str
+    priority: int
+    tags: list[str] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list)
+    agent_instructions: str = ""
+
+
+class MigrationRoadmapStep(BaseModel):
+    index: int
+    title: str
+    description: str
+    category: str
+    recipe_id: str
+    status: str = "pending"
+    priority: int = 0
+    files_affected: list[str] = Field(default_factory=list)
+    result_summary: str = ""
+    error: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+class MigrationRunResponse(BaseModel):
+    id: str
+    project_id: str
+    status: str = "queued"
+    roadmap_steps: list[dict] = Field(default_factory=list)
+    current_step: int = 0
+    progress_pct: float = 0.0
+    log: list[dict] = Field(default_factory=list)
+    result_summary: str = ""
+    artifacts: dict = Field(default_factory=dict)
+    total_tokens_used: int = 0
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+class MigrationRunListResponse(BaseModel):
+    runs: list[MigrationRunResponse]
+    total: int
+
+
+class CapacityTargetUpdate(BaseModel):
+    capacity_target: dict
+
+
+class RecipeSelectionRequest(BaseModel):
+    recipe_ids: list[str]
