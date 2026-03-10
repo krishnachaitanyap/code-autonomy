@@ -39,6 +39,59 @@ export interface Repo {
   updated_at: string;
 }
 
+export interface DownstreamService {
+  name: string;
+  client_type: string;
+  url: string;
+  files_referencing?: string[];
+  confidence?: string;
+  source_files?: string[];
+  source_classes?: string[];
+  invoking_endpoints?: ApiEndpointEntry[];
+}
+
+export interface DataStore {
+  type: string;
+  entities: string[];
+  url_pattern: string;
+  source_files?: string[];
+  source_classes?: string[];
+  invoking_endpoints?: ApiEndpointEntry[];
+}
+
+export interface MessagingEntry {
+  type: string;
+  topic: string;
+  group: string;
+  direction: string;
+  source_files?: string[];
+  source_classes?: string[];
+  invoking_endpoints?: ApiEndpointEntry[];
+}
+
+export interface ApiEndpointEntry {
+  class: string;
+  method: string;
+  path: string;
+  http_method: string;
+  impacted_services?: string[];
+  impacted_datastores?: string[];
+  impacted_messaging?: string[];
+}
+
+export interface RepoDependencies {
+  downstream_services: DownstreamService[];
+  data_stores: DataStore[];
+  messaging: MessagingEntry[];
+  api_endpoints: ApiEndpointEntry[];
+}
+
+export interface IdentifiedDependencies {
+  identified_services: DownstreamService[];
+  search_terms_used: string[];
+  prompt: string;
+}
+
 export const repos = {
   list: () => request<Repo[]>('/repos'),
   get: (id: string) => request<Repo>(`/repos/${id}`),
@@ -75,6 +128,13 @@ export const repos = {
     }),
   generateClaudeMd: (id: string) =>
     request<{ content: string }>(`/repos/${id}/claude-md/generate`, { method: 'POST' }),
+  getDependencies: (id: string) =>
+    request<RepoDependencies>(`/repos/${id}/dependencies`),
+  identifyDependencies: (id: string, prompt: string) =>
+    request<IdentifiedDependencies>(`/repos/${id}/dependencies/identify`, {
+      method: 'POST',
+      body: JSON.stringify({ prompt }),
+    }),
 };
 
 // ---------------------------------------------------------------------------
@@ -559,11 +619,21 @@ export const testing = {
 // Migration Platform
 // ---------------------------------------------------------------------------
 
+export interface DatabaseConnectionConfig {
+  engine: string;     // postgresql | mysql | oracle | sqlserver
+  host: string;
+  port: string;
+  database: string;
+  schema?: string;
+  jdbc_url?: string;
+  username?: string;
+}
+
 export interface MigrationProject {
   id: string;
   repo_id: string;
   name: string;
-  migration_mode: string; // "migration" | "improvement"
+  migration_mode: string; // "migration" | "improvement" | "database"
   source_repo_url: string;
   source_local_path: string;
   source_branch: string;
@@ -657,6 +727,8 @@ export const migrations = {
     reference_branch?: string;
     reference_folders?: string[];
     config?: Record<string, any>;
+    source_db?: DatabaseConnectionConfig;
+    destination_db?: DatabaseConnectionConfig;
   }) =>
     request<MigrationProject>('/migrations/projects', {
       method: 'POST',
@@ -666,6 +738,11 @@ export const migrations = {
     request<void>(`/migrations/projects/${id}`, { method: 'DELETE' }),
   analyzeProject: (id: string) =>
     request<MigrationProject>(`/migrations/projects/${id}/analyze`, { method: 'POST' }),
+  testConnection: (projectId: string, target: 'source' | 'destination') =>
+    request<{ status: string; target: string; message: string }>(
+      `/migrations/projects/${projectId}/test-connection?target=${target}`,
+      { method: 'POST' },
+    ),
 
   // Capacity
   updateCapacityTarget: (id: string, capacity_target: Record<string, any>) =>
