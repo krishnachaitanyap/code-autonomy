@@ -48,6 +48,7 @@ export interface DownstreamService {
   source_files?: string[];
   source_classes?: string[];
   invoking_endpoints?: ApiEndpointEntry[];
+  regions?: string[];
 }
 
 export interface DataStore {

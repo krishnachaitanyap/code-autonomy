@@ -369,7 +369,7 @@ _PATTERN_REST_CONTROLLER = re.compile(
     r"@(RestController|RequestMapping|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping)"
     r"(?:\(([^)]*)\))?"
 )
-_PATTERN_SOAP = re.compile(r"@(WebService|WebMethod|SOAPBinding)")
+_PATTERN_SOAP = re.compile(r"@(WebService|WebMethod|SOAPBinding)\s*(?:\(([^)]*)\))?")
 _PATTERN_KAFKA = re.compile(
     r"@(KafkaListener|SendTo)\s*\(([^)]*)\)|KafkaTemplate"
 )
@@ -383,10 +383,28 @@ _PATTERN_CONFIG = re.compile(r"@(RefreshScope|ConfigurationProperties)\s*(?:\(([
 _PATTERN_OBSERVABILITY = re.compile(r"@(Timed|Counted|Traced)\s*(?:\(([^)]*)\))?|MeterRegistry")
 _PATTERN_CIRCUIT_BREAKER = re.compile(r"@(CircuitBreaker|Retry|RateLimiter)\s*(?:\(([^)]*)\))?")
 
+# Enterprise REST proxy patterns (RESTProxy.getInstance / ChannelUtil.getChannelProperty)
+_PATTERN_REST_PROXY = re.compile(
+    r"RESTProxy\s*\.\s*getInstance\s*\(\s*(\w+)\s*\)",
+)
+_PATTERN_CHANNEL_PROPERTY = re.compile(
+    r"ChannelUtil\s*\.\s*getChannelProperty\s*\(\s*(\w+)\s*\)",
+)
+# Constant definitions that hold property key prefixes (e.g. static final String FOO = "gws.mms.qp.token.delete.svc.rest.url")
+_PATTERN_CONSTANT_DEF = re.compile(
+    r"""(?:static\s+final|final\s+static)\s+String\s+(\w+)\s*=\s*["']([^"']+)["']""",
+)
+
 # Python patterns
 _PATTERN_PY_ROUTE = re.compile(r"@\w+\.(route|get|post|put|delete|patch)\s*\(\s*['\"]([^'\"]+)['\"]")
 _PATTERN_PY_MODEL = re.compile(r"class\s+(\w+)\s*\(.*(?:Model|Base|db\.Model)\s*\)")
 _PATTERN_PY_CELERY_TASK = re.compile(r"@(?:shared_task|app\.task|celery\.task)")
+
+# JS/TS patterns for frontend API calls
+_PATTERN_JS_FETCH = re.compile(r"""fetch\s*\(\s*[`'"](/[^`'"]+)[`'"]""")
+_PATTERN_JS_AXIOS = re.compile(r"""axios\s*\.\s*(get|post|put|delete|patch)\s*\(\s*[`'"](/[^`'"]+)[`'"]""", re.IGNORECASE)
+_PATTERN_JS_HTTP_CLIENT = re.compile(r"""(?:this\s*\.\s*)?http\s*\.\s*(get|post|put|delete|patch)\s*(?:<[^>]+>)?\s*\(\s*[`'"](/[^`'"]+)[`'"]""", re.IGNORECASE)
+_PATTERN_JS_COMPONENT = re.compile(r"(?:export\s+(?:default\s+)?)?(?:function|class)\s+(\w+)")
 
 # Extract annotation parameter value
 _PARAM_VALUE_RE = re.compile(r"""(?:value|topics?|name)\s*=\s*["']([^"']+)["']""")
@@ -408,6 +426,29 @@ def _extract_param(annotation_args: str) -> str:
     if m:
         return m.group(1)
     return ""
+
+
+def _property_key_to_service_name(prop_key: str) -> str:
+    """Convert a property key like 'gws.mms.qp.token.delete.svc.rest.url' to a
+    readable service name like 'mms-qp-token-delete'.
+
+    Strips common prefixes (gws.) and suffixes (.svc.rest.url, .host, .baseurl, .protocol).
+    """
+    name = prop_key
+    # Strip common prefixes
+    for prefix in ("gws.", "app.", "service.", "com.", "org."):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    # Strip common suffixes
+    for suffix in (".svc.rest.url", ".rest.url", ".svc.url", ".url",
+                   ".host", ".baseurl", ".protocol", ".port", ".endpoint"):
+        if name.endswith(suffix):
+            name = name[:-len(suffix)]
+            break
+    # Convert dots to hyphens for readability
+    name = name.replace(".", "-")
+    return name or prop_key
 
 
 def _scan_java_patterns(content: str, rel_path: str, profile: StackProfile) -> None:
@@ -446,18 +487,21 @@ def _scan_java_patterns(content: str, rel_path: str, profile: StackProfile) -> N
             profile.messaging.append({
                 "type": "Kafka", "topic": topic, "group": group,
                 "direction": "consumer",
+                "source_file": rel_path, "source_class": class_name,
             })
         elif m.group(1) == "SendTo":
             topic = _extract_param(m.group(2))
             profile.messaging.append({
                 "type": "Kafka", "topic": topic, "group": "",
                 "direction": "producer",
+                "source_file": rel_path, "source_class": class_name,
             })
         else:
             # KafkaTemplate usage
             profile.messaging.append({
                 "type": "Kafka", "topic": "", "group": "",
                 "direction": "producer",
+                "source_file": rel_path, "source_class": class_name,
             })
 
     # Cache
@@ -472,7 +516,32 @@ def _scan_java_patterns(content: str, rel_path: str, profile: StackProfile) -> N
         profile.data_stores.append({
             "type": "entity", "entities": [class_name],
             "url_pattern": table_name,
+            "source_file": rel_path, "source_class": class_name,
         })
+
+    # Repository interfaces (extends *Repository<Entity, ...>)
+    if _PATTERN_REPOSITORY.search(content):
+        # Extract the entity type from generic parameter: Repository<EntityName, ...>
+        repo_generic = re.search(r"Repository\s*<\s*(\w+)", content)
+        if repo_generic:
+            entity_name = repo_generic.group(1)
+            profile.data_stores.append({
+                "type": "repository", "entities": [entity_name],
+                "url_pattern": "",
+                "source_file": rel_path, "source_class": class_name,
+            })
+
+    # Repository usage in controllers/services (field injection of FooRepository)
+    if not _PATTERN_REPOSITORY.search(content):
+        for repo_usage in re.finditer(r"(\w+)Repository\b", content):
+            entity_name = repo_usage.group(1)
+            if entity_name[0].isupper():
+                profile.data_stores.append({
+                    "type": "usage", "entities": [entity_name],
+                    "url_pattern": "",
+                    "source_file": rel_path, "source_class": class_name,
+                })
+                break  # one per file
 
     # Feign clients
     for m in _PATTERN_FEIGN.finditer(content):
@@ -481,7 +550,7 @@ def _scan_java_patterns(content: str, rel_path: str, profile: StackProfile) -> N
         url = url_match.group(1) if url_match else ""
         profile.downstream_services.append({
             "name": service_name or class_name, "client_type": "Feign",
-            "url": url,
+            "url": url, "source_file": rel_path, "source_class": class_name,
         })
 
     # Config
@@ -510,16 +579,112 @@ def _scan_java_patterns(content: str, rel_path: str, profile: StackProfile) -> N
             name = _extract_param(m.group(2)) if m.group(2) else ""
             profile.observability.append({"type": m.group(1), "detail": name})
 
+    # SOAP web services
+    for m in _PATTERN_SOAP.finditer(content):
+        annotation = m.group(1)
+        args = m.group(2) or ""
+        if annotation == "WebService":
+            service_name = _extract_param(args) or class_name
+            # Look for WSDL location in annotation args
+            wsdl_match = re.search(r"""(?:wsdlLocation|targetNamespace)\s*=\s*["']([^"']+)["']""", args)
+            wsdl_url = wsdl_match.group(1) if wsdl_match else ""
+            profile.downstream_services.append({
+                "name": service_name,
+                "client_type": "SOAP",
+                "url": wsdl_url,
+                "source_file": rel_path, "source_class": class_name,
+            })
+        elif annotation == "WebMethod":
+            method_name = _extract_param(args) or ""
+            # Find the Java method name if annotation param is empty
+            if not method_name:
+                # Look for the method following @WebMethod
+                method_after = re.search(
+                    r"@WebMethod[^}]*?(?:public|protected)\s+\S+\s+(\w+)\s*\(",
+                    content[m.start():],
+                )
+                method_name = method_after.group(1) if method_after else "unknown"
+            profile.api_endpoints.append({
+                "class": class_name, "method": method_name,
+                "path": f"SOAP:{method_name}",
+                "http_method": "SOAP",
+            })
+
+    # Enterprise REST proxy pattern: RESTProxy.getInstance(service).invoke(...)
+    # Build constant → value map from this file for resolving property key references
+    constants = {}
+    for m in _PATTERN_CONSTANT_DEF.finditer(content):
+        constants[m.group(1)] = m.group(2)
+
+    # Build local variable → constant map for ChannelUtil.getChannelProperty(CONST) assignments
+    # e.g. "String service = ChannelUtil.getChannelProperty(MMS_QP_DELETE_TOKEN_REST_SERVICE_URL);"
+    # maps local var "service" → constant name "MMS_QP_DELETE_TOKEN_REST_SERVICE_URL"
+    channel_prop_locals: dict[str, str] = {}
+    for m in re.finditer(
+        r"(?:String|var)\s+(\w+)\s*=\s*ChannelUtil\s*\.\s*getChannelProperty\s*\(\s*(\w+)\s*\)",
+        content,
+    ):
+        local_var = m.group(1)
+        const_name = m.group(2)
+        channel_prop_locals[local_var] = const_name
+
+    for m in _PATTERN_REST_PROXY.finditer(content):
+        service_var = m.group(1)
+        # Resolution chain: local var → ChannelProperty constant → string value
+        # 1. Check if it's a local var assigned from ChannelUtil.getChannelProperty()
+        if service_var in channel_prop_locals:
+            const_name = channel_prop_locals[service_var]
+            service_name = constants.get(const_name, const_name)
+        else:
+            # 2. Direct constant reference
+            service_name = constants.get(service_var, service_var)
+        # Clean up: extract a readable service name from property key
+        # e.g. "gws.mms.qp.token.delete.svc.rest.url" → "mms-qp-token-delete"
+        readable = _property_key_to_service_name(service_name)
+        profile.downstream_services.append({
+            "name": readable,
+            "client_type": "RESTProxy",
+            "url": service_name if service_name != service_var else "",
+            "source_file": rel_path, "source_class": class_name,
+        })
+
+    # ChannelUtil.getChannelProperty(CONSTANT) — additional downstream signal
+    # Capture both direct constant usage and local-var-assigned patterns
+    channel_prop_constants = set()
+    for m in _PATTERN_CHANNEL_PROPERTY.finditer(content):
+        prop_var = m.group(1)
+        prop_key = constants.get(prop_var, prop_var)
+        channel_prop_constants.add(prop_key)
+
+    # Also include constants resolved via local var assignments
+    for const_name in channel_prop_locals.values():
+        prop_key = constants.get(const_name, const_name)
+        channel_prop_constants.add(prop_key)
+
+    existing = {s["name"] for s in profile.downstream_services}
+    for prop_key in channel_prop_constants:
+        if prop_key != prop_key.upper() or "." in prop_key:  # resolved to actual property key (not just a raw constant name)
+            readable = _property_key_to_service_name(prop_key)
+            if readable not in existing:
+                existing.add(readable)
+                profile.downstream_services.append({
+                    "name": readable,
+                    "client_type": "ChannelProperty",
+                    "url": prop_key,
+                    "source_file": rel_path, "source_class": class_name,
+                })
+
 
 def _scan_python_patterns(content: str, rel_path: str, profile: StackProfile) -> None:
     """Scan a Python file for technology patterns."""
+    module_name = Path(rel_path).stem
+
     # Flask/FastAPI routes
     for m in _PATTERN_PY_ROUTE.finditer(content):
         http_method = m.group(1).upper()
         if http_method == "ROUTE":
             http_method = "GET"
         path = m.group(2)
-        module_name = Path(rel_path).stem
         profile.api_endpoints.append({
             "class": module_name, "method": "", "path": path,
             "http_method": http_method,
@@ -530,6 +695,7 @@ def _scan_python_patterns(content: str, rel_path: str, profile: StackProfile) ->
         model_name = m.group(1)
         profile.data_stores.append({
             "type": "model", "entities": [model_name], "url_pattern": "",
+            "source_file": rel_path, "source_class": module_name,
         })
 
     # Celery tasks
@@ -537,6 +703,31 @@ def _scan_python_patterns(content: str, rel_path: str, profile: StackProfile) ->
         profile.messaging.append({
             "type": "Celery", "topic": "", "group": "",
             "direction": "task",
+            "source_file": rel_path, "source_class": module_name,
+        })
+
+
+def _scan_js_ts_patterns(content: str, rel_path: str, profile: StackProfile) -> None:
+    """Scan a JS/TS file for frontend API call patterns (fetch, axios, HttpClient)."""
+    # Detect component/class name
+    comp_match = _PATTERN_JS_COMPONENT.search(content)
+    component_name = comp_match.group(1) if comp_match else Path(rel_path).stem
+
+    # Collect (method, path) tuples from all patterns
+    api_calls: set[tuple[str, str]] = set()
+    for m in _PATTERN_JS_FETCH.finditer(content):
+        api_calls.add(("FETCH", m.group(1)))
+    for m in _PATTERN_JS_AXIOS.finditer(content):
+        api_calls.add((m.group(1).upper(), m.group(2)))
+    for m in _PATTERN_JS_HTTP_CLIENT.finditer(content):
+        api_calls.add((m.group(1).upper(), m.group(2)))
+
+    for method, path in api_calls:
+        profile.downstream_services.append({
+            "name": f"API:{path}",
+            "client_type": "Frontend",
+            "url": path,
+            "source_file": rel_path, "source_class": component_name,
         })
 
 
@@ -552,6 +743,8 @@ def _scan_code_patterns(repo: Path, code_files: list, profile: StackProfile) -> 
             _scan_java_patterns(content, rel_path, profile)
         elif rel_path.endswith(".py"):
             _scan_python_patterns(content, rel_path, profile)
+        elif rel_path.endswith((".js", ".ts", ".jsx", ".tsx")):
+            _scan_js_ts_patterns(content, rel_path, profile)
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +932,172 @@ def _scan_config_files(repo: Path, profile: StackProfile) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 4: Enterprise Properties File Scanning
+# ---------------------------------------------------------------------------
+
+# Patterns for service URLs in .properties files
+_PROP_SVC_URL_RE = re.compile(r"^([\w.]+\.(?:svc\.rest\.url|rest\.url|svc\.url|endpoint\.url))\s*=\s*(.+)$", re.MULTILINE)
+_PROP_SOAP_URL_RE = re.compile(
+    r"^([\w.]+\.(?:wsdl\.url|soap\.url|ws\.url|webservice\.url|wsdl\.location))\s*=\s*(.+)$",
+    re.MULTILINE,
+)
+_PROP_HOST_RE = re.compile(r"^([\w.]+\.host(?:_\w+)?)\s*=\s*(.+)$", re.MULTILINE)
+_PROP_HOST_VAR_RE = re.compile(r"\$\{([\w.]+\.host(?:_\w+)?)\}")
+
+# Environment priority for property files (higher = preferred; production wins)
+_ENV_KEYWORDS: dict[str, int] = {
+    "prod": 10, "production": 10, "prd": 10, "preprod": 8, "pre-prod": 8,
+    "staging": 7, "stg": 7, "stage": 7, "uat": 7, "perf": 7,
+    "sit": 4, "int": 4,
+    "dev": 2, "development": 2,
+    "local": 1, "test": 1, "sandbox": 1,
+}
+
+# Region-specific host patterns (e.g. gws.mms.host.east=..., gws.mms.host_us-east-1=...)
+_REGION_HOST_RE = re.compile(
+    r"^([\w.]+\.host)[._-](us-east-?\d?|us-west-?\d?|eu-west-?\d?|eu-central-?\d?|"
+    r"ap-southeast-?\d?|ap-northeast-?\d?|ap-south-?\d?|"
+    r"east|west|central|na|emea|apac)\s*=\s*(.+)$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _env_priority(filepath: Path) -> int:
+    """Return environment priority for a config file (higher = preferred, prod = 10)."""
+    name = filepath.stem.lower()
+    parent = filepath.parent.name.lower()
+    for part in (name, parent):
+        for env, pri in sorted(_ENV_KEYWORDS.items(), key=lambda x: -x[1]):
+            if env in part:
+                return pri
+    return 5  # default/unspecified
+
+
+def _scan_enterprise_properties(repo: Path, profile: StackProfile) -> None:
+    """Phase 4: Scan .properties files for enterprise service URL patterns.
+
+    Prefers production environment values when the same property key appears
+    in multiple env-specific files.  Detects region-specific hosts.
+
+    Detects:
+    - *.svc.rest.url = ... patterns → downstream services
+    - *.host = ... patterns → downstream hosts
+    - ${...host} variable references in URL values → host dependencies
+    - Region-specific host variants (e.g. *.host.east, *.host_us-west-2)
+    """
+    existing_names = {s["name"] for s in profile.downstream_services}
+    prop_files: list[Path] = []
+
+    # Find .properties files in standard locations
+    for pattern in ("*.properties", "**/*.properties"):
+        for pf in repo.glob(pattern):
+            if any(skip in pf.parts for skip in SKIP_DIRS):
+                continue
+            prop_files.append(pf)
+            if len(prop_files) > 50:  # cap to avoid huge repos
+                break
+
+    # Sort ascending by env priority so production files are processed last (override)
+    prop_files.sort(key=_env_priority)
+
+    # Collect best (production-preferred) URL per property key
+    # key → (priority, value, rel_path)
+    svc_best: dict[str, tuple[int, str, str]] = {}
+    soap_best: dict[str, tuple[int, str, str]] = {}
+    hosts_seen: set[str] = set()
+    region_hosts: dict[str, set[str]] = {}  # base_host_name → {region names}
+
+    for pf in prop_files:
+        try:
+            content = pf.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        priority = _env_priority(pf)
+        prop_rel_path = str(pf.relative_to(repo)).replace("\\", "/")
+
+        # REST service URL entries
+        for m in _PROP_SVC_URL_RE.finditer(content):
+            prop_key = m.group(1)
+            prop_value = m.group(2).strip()
+            if prop_key not in svc_best or priority >= svc_best[prop_key][0]:
+                svc_best[prop_key] = (priority, prop_value, prop_rel_path)
+
+            # Extract host variable references from the URL value
+            for hm in _PROP_HOST_VAR_RE.finditer(prop_value):
+                host_key = hm.group(1)
+                host_name = _property_key_to_service_name(host_key)
+                hosts_seen.add(host_name)
+
+        # SOAP/WSDL URL entries
+        for m in _PROP_SOAP_URL_RE.finditer(content):
+            prop_key = m.group(1)
+            prop_value = m.group(2).strip()
+            if prop_key not in soap_best or priority >= soap_best[prop_key][0]:
+                soap_best[prop_key] = (priority, prop_value, prop_rel_path)
+
+        # Plain host definitions
+        for m in _PROP_HOST_RE.finditer(content):
+            host_key = m.group(1)
+            host_name = _property_key_to_service_name(host_key)
+            hosts_seen.add(host_name)
+
+        # Region-specific host entries (e.g. gws.mms.host.east=...)
+        for m in _REGION_HOST_RE.finditer(content):
+            base_key = m.group(1)
+            region = m.group(2).lower()
+            base_name = _property_key_to_service_name(base_key)
+            region_hosts.setdefault(base_name, set()).add(region)
+
+    # Store production-preferred property values for URL resolution
+    for prop_key, (_, value, _) in svc_best.items():
+        profile.config_properties[prop_key] = value
+    for prop_key, (_, value, _) in soap_best.items():
+        profile.config_properties[prop_key] = value
+
+    # Add REST service URLs (production-preferred values)
+    for prop_key, (_, value, source_file) in svc_best.items():
+        service_name = _property_key_to_service_name(prop_key)
+        if service_name not in existing_names:
+            existing_names.add(service_name)
+            svc: dict = {
+                "name": service_name,
+                "client_type": "REST (properties)",
+                "url": value,
+                "source_file": source_file,
+            }
+            if service_name in region_hosts:
+                svc["regions"] = sorted(region_hosts[service_name])
+            profile.downstream_services.append(svc)
+
+    # Add SOAP URLs (production-preferred values)
+    for prop_key, (_, value, source_file) in soap_best.items():
+        service_name = _property_key_to_service_name(prop_key)
+        if service_name not in existing_names:
+            existing_names.add(service_name)
+            profile.downstream_services.append({
+                "name": service_name,
+                "client_type": "SOAP (properties)",
+                "url": value,
+                "source_file": source_file,
+            })
+
+    # Add unique hosts as downstream services (if not already captured)
+    for host_name in sorted(hosts_seen):
+        if host_name not in existing_names:
+            existing_names.add(host_name)
+            svc = {
+                "name": host_name,
+                "client_type": "host (properties)",
+                "url": "",
+                "source_file": "",
+            }
+            if host_name in region_hosts:
+                svc["regions"] = sorted(region_hosts[host_name])
+            profile.downstream_services.append(svc)
+
+
+# ---------------------------------------------------------------------------
 # App Type Classification
 # ---------------------------------------------------------------------------
 
@@ -787,27 +1146,103 @@ def _dedup_endpoints(endpoints: list[dict]) -> list[dict]:
 
 
 def _dedup_messaging(messages: list[dict]) -> list[dict]:
-    """Remove duplicate messaging entries."""
-    seen = set()
-    deduped = []
+    """Merge duplicate messaging entries, aggregating source locations."""
+    merged: dict[tuple, dict] = {}
     for msg in messages:
         key = (msg.get("type", ""), msg.get("topic", ""), msg.get("direction", ""))
-        if key not in seen:
-            seen.add(key)
-            deduped.append(msg)
-    return deduped
+        if key not in merged:
+            merged[key] = {
+                "type": msg.get("type", ""),
+                "topic": msg.get("topic", ""),
+                "group": msg.get("group", ""),
+                "direction": msg.get("direction", ""),
+                "source_files": [],
+                "source_classes": [],
+            }
+        entry = merged[key]
+        sf = msg.get("source_file", "")
+        sc = msg.get("source_class", "")
+        if sf and sf not in entry["source_files"]:
+            entry["source_files"].append(sf)
+        if sc and sc not in entry["source_classes"]:
+            entry["source_classes"].append(sc)
+        # Keep first non-empty group
+        if not entry["group"] and msg.get("group"):
+            entry["group"] = msg["group"]
+    return list(merged.values())
 
 
 def _dedup_data_stores(stores: list[dict]) -> list[dict]:
-    """Merge data store entries by entity name."""
-    seen_entities = set()
-    deduped = []
+    """Merge data store entries by entity name, aggregating source locations."""
+    merged: dict[tuple, dict] = {}
+    # Priority: entity > repository > usage > model
+    type_priority = {"entity": 0, "repository": 1, "model": 2, "usage": 3}
     for store in stores:
         entities = tuple(store.get("entities", []))
-        if entities and entities not in seen_entities:
-            seen_entities.add(entities)
-            deduped.append(store)
-    return deduped
+        if not entities:
+            continue
+        if entities not in merged:
+            merged[entities] = {
+                "type": store.get("type", ""),
+                "entities": list(entities),
+                "url_pattern": store.get("url_pattern", ""),
+                "source_files": [],
+                "source_classes": [],
+            }
+        entry = merged[entities]
+        sf = store.get("source_file", "")
+        sc = store.get("source_class", "")
+        if sf and sf not in entry["source_files"]:
+            entry["source_files"].append(sf)
+        if sc and sc not in entry["source_classes"]:
+            entry["source_classes"].append(sc)
+        # Prefer higher-priority type
+        cur_pri = type_priority.get(entry["type"], 99)
+        new_pri = type_priority.get(store.get("type", ""), 99)
+        if new_pri < cur_pri:
+            entry["type"] = store["type"]
+        # Keep first non-empty url_pattern
+        if not entry["url_pattern"] and store.get("url_pattern"):
+            entry["url_pattern"] = store["url_pattern"]
+    return list(merged.values())
+
+
+def _dedup_downstream_services(services: list[dict]) -> list[dict]:
+    """Merge duplicate downstream service entries, aggregating source locations."""
+    merged: dict[str, dict] = {}
+    for svc in services:
+        key = svc.get("name", "")
+        if not key:
+            continue
+        if key not in merged:
+            merged[key] = {
+                "name": key,
+                "client_type": svc.get("client_type", ""),
+                "url": svc.get("url", ""),
+                "source_files": [],
+                "source_classes": [],
+            }
+        entry = merged[key]
+        sf = svc.get("source_file", "")
+        sc = svc.get("source_class", "")
+        if sf and sf not in entry["source_files"]:
+            entry["source_files"].append(sf)
+        if sc and sc not in entry["source_classes"]:
+            entry["source_classes"].append(sc)
+        # Keep the first non-empty url/client_type
+        if not entry["url"] and svc.get("url"):
+            entry["url"] = svc["url"]
+        if not entry["client_type"] and svc.get("client_type"):
+            entry["client_type"] = svc["client_type"]
+        # Preserve regions
+        if svc.get("regions"):
+            existing_regions = entry.get("regions", [])
+            for r in svc["regions"]:
+                if r not in existing_regions:
+                    existing_regions.append(r)
+            if existing_regions:
+                entry["regions"] = existing_regions
+    return list(merged.values())
 
 
 # ---------------------------------------------------------------------------
@@ -867,28 +1302,65 @@ def analyze_stack(repo_path: str, consciousness=None) -> StackProfile:
                 fpath = repo / path
                 if fpath.is_file():
                     code_files.append((path, fpath))
-    # Also scan src/ directories for more coverage
+    # Scan src/ directories for more coverage
     for src_dir in ("src", "app", "lib"):
         src_path = repo / src_dir
         if src_path.is_dir():
             for dirpath, dirnames, filenames in os.walk(src_path):
                 dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
                 for fname in filenames:
-                    if fname.endswith((".java", ".kt", ".py", ".js", ".ts")):
+                    if fname.endswith((".java", ".kt", ".py", ".js", ".ts", ".jsx", ".tsx")):
                         fpath = Path(dirpath) / fname
                         rel = os.path.relpath(str(fpath), str(repo)).replace("\\", "/")
                         if not any(r == rel for r, _ in code_files):
                             code_files.append((rel, fpath))
+
+    # Multi-module project support: also scan any nested src/main/java directories
+    # (e.g. core/module/src/main/java/ in Maven multi-module projects)
+    for smj in repo.rglob("src/main/java"):
+        if not smj.is_dir():
+            continue
+        if any(skip in smj.parts for skip in SKIP_DIRS):
+            continue
+        # Skip if already covered by the scan above (direct src/ at root)
+        if str(smj).startswith(str(repo / "src")):
+            continue
+        for dirpath, dirnames, filenames in os.walk(smj):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+            for fname in filenames:
+                if fname.endswith((".java", ".kt")):
+                    fpath = Path(dirpath) / fname
+                    rel = os.path.relpath(str(fpath), str(repo)).replace("\\", "/")
+                    if not any(r == rel for r, _ in code_files):
+                        code_files.append((rel, fpath))
+                    if len(code_files) > 2000:  # cap to avoid huge repos
+                        break
+            if len(code_files) > 2000:
+                break
 
     _scan_code_patterns(repo, code_files, profile)
 
     # Phase 3: Config files
     _scan_config_files(repo, profile)
 
+    # Phase 4: Enterprise properties (RESTProxy service URLs, host definitions)
+    _scan_enterprise_properties(repo, profile)
+
     # Deduplicate
     profile.api_endpoints = _dedup_endpoints(profile.api_endpoints)
     profile.messaging = _dedup_messaging(profile.messaging)
     profile.data_stores = _dedup_data_stores(profile.data_stores)
+    profile.downstream_services = _dedup_downstream_services(profile.downstream_services)
+
+    # Resolve property-key URLs to production values
+    # RESTProxy detection stores the property key as url (e.g. "gws.mms.qp.token.delete.svc.rest.url");
+    # Phase 4 stores the actual production value in config_properties — resolve here.
+    for svc in profile.downstream_services:
+        url = svc.get("url", "")
+        if url and "." in url and "://" not in url and "/" not in url:
+            resolved = profile.config_properties.get(url)
+            if resolved:
+                svc["url"] = resolved
 
     # Classify app type
     profile.app_type = _classify_app_type(profile)

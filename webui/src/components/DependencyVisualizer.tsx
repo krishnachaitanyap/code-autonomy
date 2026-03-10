@@ -30,6 +30,7 @@ interface DepNode {
   impacted_services?: string[];
   impacted_datastores?: string[];
   impacted_messaging?: string[];
+  regions?: string[];
 }
 
 const KIND_STYLES: Record<NodeKind, { bg: string; border: string; icon: string }> = {
@@ -55,6 +56,7 @@ function buildNodes(deps: RepoDependencies, identified: DownstreamService[]): De
       source_files: svc.source_files,
       source_classes: svc.source_classes,
       invoking_endpoints: svc.invoking_endpoints,
+      regions: svc.regions,
     });
   }
 
@@ -296,6 +298,17 @@ export default function DependencyVisualizer({ repoId, repoName }: DependencyVis
                 ✕
               </button>
             </div>
+
+            {node.regions && node.regions.length > 0 && (
+              <div>
+                <h5 className="text-xs font-medium text-gray-500 mb-1">Regions</h5>
+                <div className="flex flex-wrap gap-1.5">
+                  {node.regions.map((r, i) => (
+                    <span key={i} className="px-2 py-0.5 bg-violet-50 border border-violet-200 rounded text-[11px] text-violet-700 font-medium">{r}</span>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {node.source_files && node.source_files.length > 0 && (
               <div>
