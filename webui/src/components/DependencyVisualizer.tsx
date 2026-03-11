@@ -147,7 +147,7 @@ export default function DependencyVisualizer({ repoId, repoName }: DependencyVis
     setLoadingMessage('Analyzing dependencies (may clone repo on first run)...');
     repos.getDependencies(repoId)
       .then(data => { if (!cancelled) setDeps(data); })
-      .catch(() => { if (!cancelled) setDeps({ downstream_services: [], data_stores: [], messaging: [], api_endpoints: [] }); })
+      .catch(() => { if (!cancelled) setDeps(prev => prev ?? { downstream_services: [], data_stores: [], messaging: [], api_endpoints: [] }); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [repoId]);
