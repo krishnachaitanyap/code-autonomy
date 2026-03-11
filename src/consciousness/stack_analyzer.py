@@ -357,6 +357,14 @@ def _map_dependencies(deps: list[dict], lang: str) -> tuple[dict, list[dict]]:
                 break
         enriched.append({**dep, "category": category})
 
+    # GroupId-based detection: JISI framework
+    for dep in deps:
+        if dep.get("group") == "com.chase.wasgwsframework":
+            technologies.setdefault("framework", [])
+            if "JISI (WAS GWS)" not in technologies["framework"]:
+                technologies["framework"].append("JISI (WAS GWS)")
+            break
+
     return technologies, enriched
 
 
@@ -451,7 +459,8 @@ def _property_key_to_service_name(prop_key: str) -> str:
     return name or prop_key
 
 
-def _scan_java_patterns(content: str, rel_path: str, profile: StackProfile) -> None:
+def _scan_java_patterns(content: str, rel_path: str, profile: StackProfile,
+                        global_constants: dict[str, str] | None = None) -> None:
     """Scan a Java/Kotlin file for technology patterns."""
     # Detect class name for context
     class_match = _CLASS_NAME_RE.search(content)
@@ -611,10 +620,10 @@ def _scan_java_patterns(content: str, rel_path: str, profile: StackProfile) -> N
             })
 
     # Enterprise REST proxy pattern: RESTProxy.getInstance(service).invoke(...)
-    # Build constant → value map from this file for resolving property key references
-    constants = {}
+    # Build constant → value map: local file constants + global constants from all files
+    constants = dict(global_constants or {})  # start with global
     for m in _PATTERN_CONSTANT_DEF.finditer(content):
-        constants[m.group(1)] = m.group(2)
+        constants[m.group(1)] = m.group(2)  # local overrides global
 
     # Build local variable → constant map for ChannelUtil.getChannelProperty(CONST) assignments
     # e.g. "String service = ChannelUtil.getChannelProperty(MMS_QP_DELETE_TOKEN_REST_SERVICE_URL);"
@@ -731,8 +740,299 @@ def _scan_js_ts_patterns(content: str, rel_path: str, profile: StackProfile) -> 
         })
 
 
-def _scan_code_patterns(repo: Path, code_files: list, profile: StackProfile) -> None:
-    """Phase 2: Scan code files for technology patterns."""
+def _build_global_constants(code_files: list) -> dict[str, str]:
+    """First pass: collect all static final String constants across Java files.
+
+    Returns a map of constant_name → string_value, e.g.
+    {"MMS_QP_DELETE_TOKEN_REST_SERVICE_URL": "gws.mms.qp.token.delete.svc.rest.url"}
+    """
+    global_constants: dict[str, str] = {}
+    for rel_path, fpath in code_files:
+        if not rel_path.endswith((".java", ".kt")):
+            continue
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for m in _PATTERN_CONSTANT_DEF.finditer(content):
+            global_constants[m.group(1)] = m.group(2)
+    return global_constants
+
+
+def _scan_with_code_index(
+    repo_path: str, config: dict, profile: StackProfile
+) -> bool:
+    """Use CodeIndex call graph to detect downstream dependencies.
+
+    Leverages the cached dependency graph, symbol table, property index,
+    and class hierarchy to resolve cross-file call chains that regex cannot
+    follow (e.g. RESTProxy.getInstance(localVar) where localVar comes from
+    ChannelUtil.getChannelProperty(CONSTANT) defined in another file).
+
+    Returns True if successful, False to fall back to regex.
+    """
+    try:
+        from src.code_index.storage import build_or_load_code_index
+        code_index = build_or_load_code_index(repo_path, config)
+    except Exception:
+        return False
+
+    graph = code_index.dependency_graph
+    symbols = code_index.symbol_table
+    props = code_index.property_index
+    hierarchy = code_index.class_hierarchy
+
+    found_any = False
+
+    # --- 1. Downstream services via HTTP client patterns ---
+    # Search for methods on known HTTP client classes
+    http_client_classes = (
+        "RESTProxy", "RestTemplate", "WebClient", "FeignClient",
+        "HttpClient", "ChannelUtil",
+    )
+    http_method_names = (
+        "getInstance", "getForObject", "getForEntity", "postForObject",
+        "postForEntity", "exchange", "execute", "invoke", "send",
+        "getChannelProperty", "get", "post", "put", "delete",
+    )
+
+    for class_name in http_client_classes:
+        class_symbols = symbols.get_by_name(class_name)
+        for sym in class_symbols:
+            # Find all callers of this class's methods via reverse graph
+            callers = graph.get_callers(sym.fqn)
+            for caller_fqn in callers:
+                caller_sym = symbols.get_by_fqn(caller_fqn)
+                caller_file = caller_fqn.split("::")[0] if "::" in caller_fqn else ""
+                caller_class = ""
+                if caller_sym and caller_sym.parent_class:
+                    parent = symbols.get_by_fqn(caller_sym.parent_class)
+                    caller_class = parent.name if parent else ""
+                elif caller_sym:
+                    caller_class = caller_sym.name
+
+                profile.downstream_services.append({
+                    "name": f"{class_name} (via {caller_class or caller_file})",
+                    "client_type": class_name,
+                    "url": "",
+                    "source_file": caller_file,
+                    "source_class": caller_class,
+                })
+                found_any = True
+
+        # Also search for methods that might be on these classes
+        for method_name in http_method_names:
+            method_symbols = symbols.get_by_name(method_name)
+            for msym in method_symbols:
+                # Check if this method belongs to one of our HTTP client classes
+                if msym.parent_class:
+                    parent = symbols.get_by_fqn(msym.parent_class)
+                    if parent and parent.name == class_name:
+                        callers = graph.get_callers(msym.fqn)
+                        for caller_fqn in callers:
+                            caller_sym = symbols.get_by_fqn(caller_fqn)
+                            caller_file = caller_fqn.split("::")[0] if "::" in caller_fqn else ""
+                            caller_class = ""
+                            if caller_sym and caller_sym.parent_class:
+                                p = symbols.get_by_fqn(caller_sym.parent_class)
+                                caller_class = p.name if p else ""
+                            elif caller_sym:
+                                caller_class = caller_sym.name
+
+                            profile.downstream_services.append({
+                                "name": f"{class_name}.{method_name} (via {caller_class or caller_file})",
+                                "client_type": class_name,
+                                "url": "",
+                                "source_file": caller_file,
+                                "source_class": caller_class,
+                            })
+                            found_any = True
+
+    # Resolve RESTProxy chains via property index:
+    # RESTProxy.getInstance(var) → var = ChannelUtil.getChannelProperty(CONST) → props.lookup(CONST)
+    rest_proxy_props = props.lookup_fuzzy(r"\.svc\.rest\.url$|\.rest\.url$|\.svc\.url$")
+    for prop_key, entries in rest_proxy_props.items():
+        readable = _property_key_to_service_name(prop_key)
+        existing = {s["name"] for s in profile.downstream_services}
+        if readable not in existing:
+            source_file = entries[0][0] if entries else ""
+            profile.downstream_services.append({
+                "name": readable,
+                "client_type": "RESTProxy (code-index)",
+                "url": prop_key,
+                "source_file": source_file,
+                "source_class": "",
+            })
+            found_any = True
+
+    # --- 2. Data stores via Repository interfaces and @Entity ---
+    # Find classes extending *Repository via class hierarchy
+    class_entries = symbols.get_by_type("class")
+    for entry in class_entries:
+        if not entry.bases:
+            continue
+
+        # Check if any base class contains "Repository"
+        for base in entry.bases:
+            if "Repository" in base:
+                # This is a Repository interface — find the entity type from its name
+                entity_name = entry.name.replace("Repository", "")
+                if entity_name:
+                    # Find who uses this repository via reverse graph
+                    callers = graph.get_callers(entry.fqn)
+                    source_classes = []
+                    source_files = []
+                    for caller_fqn in callers:
+                        caller_file = caller_fqn.split("::")[0] if "::" in caller_fqn else ""
+                        caller_sym = symbols.get_by_fqn(caller_fqn)
+                        if caller_file and caller_file not in source_files:
+                            source_files.append(caller_file)
+                        if caller_sym:
+                            cname = caller_sym.name
+                            if caller_sym.parent_class:
+                                p = symbols.get_by_fqn(caller_sym.parent_class)
+                                cname = p.name if p else cname
+                            if cname not in source_classes:
+                                source_classes.append(cname)
+
+                    profile.data_stores.append({
+                        "type": "repository",
+                        "entities": [entity_name],
+                        "url_pattern": "",
+                        "source_file": entry.file_path,
+                        "source_class": entry.name,
+                    })
+                    found_any = True
+                break
+
+        # Check for @Entity / @Table annotations
+        if any(d in ("Entity", "Table") for d in entry.decorators):
+            profile.data_stores.append({
+                "type": "entity",
+                "entities": [entry.name],
+                "url_pattern": "",
+                "source_file": entry.file_path,
+                "source_class": entry.name,
+            })
+            found_any = True
+
+    # --- 3. Messaging via Kafka/JMS annotations ---
+    # Search property index for Kafka-related annotations
+    for annotation_name in ("KafkaListener", "SendTo", "JmsListener"):
+        annotation_entries = props.lookup(annotation_name)
+        for file_path, line, snippet in annotation_entries:
+            # Extract topic from snippet if possible
+            topic_match = re.search(r"""(?:topics?|value|destination)\s*=\s*["']([^"']+)["']""", snippet)
+            topic = topic_match.group(1) if topic_match else ""
+
+            direction = "consumer" if annotation_name in ("KafkaListener", "JmsListener") else "producer"
+            msg_type = "Kafka" if "Kafka" in annotation_name else "JMS"
+
+            # Find the class containing this annotation
+            file_symbols = symbols.get_by_file(file_path)
+            source_class = ""
+            for sym in file_symbols:
+                if annotation_name in sym.decorators:
+                    source_class = sym.name
+                    if sym.parent_class:
+                        p = symbols.get_by_fqn(sym.parent_class)
+                        source_class = p.name if p else source_class
+                    break
+
+            profile.messaging.append({
+                "type": msg_type,
+                "topic": topic,
+                "group": "",
+                "direction": direction,
+                "source_file": file_path,
+                "source_class": source_class,
+            })
+            found_any = True
+
+    # Search for KafkaTemplate usage in symbol table
+    kafka_template_symbols = symbols.get_by_name("KafkaTemplate")
+    for kt_sym in kafka_template_symbols:
+        callers = graph.get_callers(kt_sym.fqn)
+        for caller_fqn in callers:
+            caller_file = caller_fqn.split("::")[0] if "::" in caller_fqn else ""
+            caller_sym = symbols.get_by_fqn(caller_fqn)
+            caller_class = ""
+            if caller_sym and caller_sym.parent_class:
+                p = symbols.get_by_fqn(caller_sym.parent_class)
+                caller_class = p.name if p else ""
+            elif caller_sym:
+                caller_class = caller_sym.name
+
+            profile.messaging.append({
+                "type": "Kafka",
+                "topic": "",
+                "group": "",
+                "direction": "producer",
+                "source_file": caller_file,
+                "source_class": caller_class,
+            })
+            found_any = True
+
+    # --- 4. API endpoints via annotations ---
+    # Search for Spring mapping annotations in the symbol table
+    mapping_annotations = {
+        "GetMapping": "GET", "PostMapping": "POST",
+        "PutMapping": "PUT", "DeleteMapping": "DELETE",
+        "PatchMapping": "PATCH", "RequestMapping": "REQUEST",
+        "RestController": "CONTROLLER",
+    }
+
+    for entry in symbols.all_entries:
+        if not entry.decorators:
+            continue
+        for decorator in entry.decorators:
+            if decorator in mapping_annotations:
+                http_method = mapping_annotations[decorator]
+                # Extract path from the signature/snippet
+                path = ""
+                # Try property index for the annotation value
+                for prop_entry in props.lookup(decorator):
+                    if prop_entry[0] == entry.file_path:
+                        path_match = re.search(r"""["']([^"']+)["']""", prop_entry[2])
+                        if path_match:
+                            path = path_match.group(1)
+                        break
+
+                parent_class = ""
+                if entry.parent_class:
+                    p = symbols.get_by_fqn(entry.parent_class)
+                    parent_class = p.name if p else ""
+                else:
+                    parent_class = entry.name
+
+                profile.api_endpoints.append({
+                    "class": parent_class or entry.name,
+                    "method": entry.name if entry.symbol_type == "method" else "",
+                    "path": path,
+                    "http_method": http_method,
+                })
+                found_any = True
+
+    return found_any
+
+
+def _scan_code_patterns(repo: Path, code_files: list, profile: StackProfile,
+                        config: dict | None = None) -> None:
+    """Phase 2: Scan code files for technology patterns.
+
+    Tries CodeIndex-based analysis first (uses cached call graph for
+    cross-file resolution), then falls back to regex scanning.
+    """
+    # Try CodeIndex-based analysis first (uses cached call graph)
+    if config:
+        success = _scan_with_code_index(str(repo), config, profile)
+        if success:
+            return
+
+    # Fallback: existing regex scanning
+    # First pass: build global constant map across all Java files
+    global_constants = _build_global_constants(code_files)
+
     for rel_path, fpath in code_files:
         try:
             content = fpath.read_text(encoding="utf-8", errors="replace")
@@ -740,7 +1040,7 @@ def _scan_code_patterns(repo: Path, code_files: list, profile: StackProfile) -> 
             continue
 
         if rel_path.endswith((".java", ".kt")):
-            _scan_java_patterns(content, rel_path, profile)
+            _scan_java_patterns(content, rel_path, profile, global_constants)
         elif rel_path.endswith(".py"):
             _scan_python_patterns(content, rel_path, profile)
         elif rel_path.endswith((".js", ".ts", ".jsx", ".tsx")):
@@ -1246,15 +1546,104 @@ def _dedup_downstream_services(services: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Phase 2.5: JISI Servlet XML Scanning
+# ---------------------------------------------------------------------------
+
+def _scan_jisi_servlets(repo: Path, profile: StackProfile) -> None:
+    """Scan JISI servlet XML files for REST and SOAP endpoints.
+
+    Reuses the existing parsers from src.bdd.servlet_discovery to discover
+    endpoints declared in rest-servlet.xml (Spring beans) and cxf-servlet.xml
+    (CXF JAX-WS), then adds them to the profile as API endpoints and
+    downstream services.
+    """
+    from src.bdd.servlet_discovery import (
+        _find_servlet_xml_files,
+        _parse_rest_servlet_xml,
+        _parse_cxf_servlet_xml,
+        _derive_service_name,
+    )
+
+    rest_files, cxf_files = _find_servlet_xml_files(str(repo))
+    if not rest_files and not cxf_files:
+        return
+
+    existing_endpoints = {
+        (ep.get("class", ""), ep.get("path", ""), ep.get("http_method", ""))
+        for ep in profile.api_endpoints
+    }
+    existing_services = {s.get("name", "") for s in profile.downstream_services}
+
+    # REST servlet beans
+    for xml_path in rest_files:
+        try:
+            endpoints = _parse_rest_servlet_xml(xml_path)
+        except Exception:
+            continue
+        rel_xml = str(xml_path.relative_to(repo)).replace("\\", "/")
+        for ep in endpoints:
+            name = _derive_service_name(ep.bean_id, ep.fqcn, ep.protocol)
+            ep_key = (name, ep.fqcn, "JISI REST")
+            if ep_key not in existing_endpoints:
+                existing_endpoints.add(ep_key)
+                profile.api_endpoints.append({
+                    "class": name,
+                    "method": "",
+                    "path": ep.fqcn,
+                    "http_method": "JISI REST",
+                })
+            if name not in existing_services:
+                existing_services.add(name)
+                profile.downstream_services.append({
+                    "name": name,
+                    "client_type": "JISI REST",
+                    "url": ep.fqcn,
+                    "source_file": rel_xml,
+                    "source_class": ep.fqcn,
+                })
+
+    # CXF / SOAP endpoints
+    for xml_path in cxf_files:
+        try:
+            endpoints = _parse_cxf_servlet_xml(xml_path)
+        except Exception:
+            continue
+        rel_xml = str(xml_path.relative_to(repo)).replace("\\", "/")
+        for ep in endpoints:
+            name = _derive_service_name(ep.bean_id, ep.fqcn, ep.protocol)
+            ep_key = (name, ep.address or ep.fqcn, "JISI SOAP")
+            if ep_key not in existing_endpoints:
+                existing_endpoints.add(ep_key)
+                profile.api_endpoints.append({
+                    "class": name,
+                    "method": "",
+                    "path": ep.address or ep.fqcn,
+                    "http_method": "JISI SOAP",
+                })
+            if name not in existing_services:
+                existing_services.add(name)
+                profile.downstream_services.append({
+                    "name": name,
+                    "client_type": "JISI SOAP",
+                    "url": ep.address or ep.fqcn,
+                    "source_file": rel_xml,
+                    "source_class": ep.fqcn,
+                })
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def analyze_stack(repo_path: str, consciousness=None) -> StackProfile:
-    """Run all three analysis phases and return a StackProfile.
+def analyze_stack(repo_path: str, consciousness=None, config: dict | None = None) -> StackProfile:
+    """Run all analysis phases and return a StackProfile.
 
     Args:
         repo_path: Absolute path to repository root.
         consciousness: Optional ProjectConsciousness for code file access.
+        config: Optional config dict. When provided, enables CodeIndex-based
+            analysis (cached call graph) for cross-file dependency resolution.
+            Falls back to regex scanning if not provided or if CodeIndex fails.
     """
     repo = Path(repo_path)
     if not repo.is_dir():
@@ -1338,7 +1727,12 @@ def analyze_stack(repo_path: str, consciousness=None) -> StackProfile:
             if len(code_files) > 2000:
                 break
 
-    _scan_code_patterns(repo, code_files, profile)
+    _scan_code_patterns(repo, code_files, profile, config=config)
+
+    # Phase 2.5: JISI servlet XML scanning (if JISI framework detected)
+    is_jisi = "JISI (WAS GWS)" in (profile.technologies.get("framework") or [])
+    if is_jisi:
+        _scan_jisi_servlets(repo, profile)
 
     # Phase 3: Config files
     _scan_config_files(repo, profile)
