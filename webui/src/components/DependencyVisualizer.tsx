@@ -137,11 +137,13 @@ export default function DependencyVisualizer({ repoId, repoName }: DependencyVis
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     setLoadingMessage('Analyzing dependencies (may clone repo on first run)...');
     repos.getDependencies(repoId)
-      .then(setDeps)
-      .catch(() => setDeps({ downstream_services: [], data_stores: [], messaging: [], api_endpoints: [] }))
-      .finally(() => setLoading(false));
+      .then(data => { if (!cancelled) setDeps(data); })
+      .catch(() => { if (!cancelled) setDeps({ downstream_services: [], data_stores: [], messaging: [], api_endpoints: [] }); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [repoId]);
 
   async function handleIdentify() {

@@ -1732,7 +1732,10 @@ def analyze_stack(repo_path: str, consciousness=None, config: dict | None = None
     # Phase 2.5: JISI servlet XML scanning (if JISI framework detected)
     is_jisi = "JISI (WAS GWS)" in (profile.technologies.get("framework") or [])
     if is_jisi:
-        _scan_jisi_servlets(repo, profile)
+        try:
+            _scan_jisi_servlets(repo, profile)
+        except Exception:
+            pass  # non-fatal: JISI scan is additive
 
     # Phase 3: Config files
     _scan_config_files(repo, profile)
