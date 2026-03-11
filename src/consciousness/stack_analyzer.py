@@ -448,8 +448,12 @@ def _property_key_to_service_name(prop_key: str) -> str:
         if name.startswith(prefix):
             name = name[len(prefix):]
             break
-    # Strip common suffixes
+    # Strip common suffixes (longest match first within each category)
     for suffix in (".svc.rest.url", ".rest.url", ".svc.url", ".url",
+                   ".svc.rest.method", ".rest.method", ".svc.method", ".http.method", ".method",
+                   ".svc.rest.auth.type", ".auth.type", ".auth.method", ".authentication",
+                   ".security.type", ".oauth", ".ssl.enabled", ".mutual.auth",
+                   ".client.auth", ".cert.auth",
                    ".host", ".baseurl", ".protocol", ".port", ".endpoint"):
         if name.endswith(suffix):
             name = name[:-len(suffix)]
@@ -1241,6 +1245,15 @@ _PROP_SOAP_URL_RE = re.compile(
     r"^([\w.]+\.(?:wsdl\.url|soap\.url|ws\.url|webservice\.url|wsdl\.location))\s*=\s*(.+)$",
     re.MULTILINE,
 )
+_PROP_METHOD_RE = re.compile(
+    r"^([\w.]+\.(?:svc\.rest\.method|rest\.method|svc\.method|http\.method|method))\s*=\s*(.+)$",
+    re.MULTILINE,
+)
+_PROP_AUTH_RE = re.compile(
+    r"^([\w.]+\.(?:auth\.type|auth\.method|authentication|security\.type|oauth|ssl\.enabled|"
+    r"mutual\.auth|client\.auth|cert\.auth))\s*=\s*(.+)$",
+    re.MULTILINE,
+)
 _PROP_HOST_RE = re.compile(r"^([\w.]+\.host(?:_\w+)?)\s*=\s*(.+)$", re.MULTILINE)
 _PROP_HOST_VAR_RE = re.compile(r"\$\{([\w.]+\.host(?:_\w+)?)\}")
 
@@ -1304,6 +1317,8 @@ def _scan_enterprise_properties(repo: Path, profile: StackProfile) -> None:
     # key → (priority, value, rel_path)
     svc_best: dict[str, tuple[int, str, str]] = {}
     soap_best: dict[str, tuple[int, str, str]] = {}
+    method_best: dict[str, tuple[int, str, str]] = {}
+    auth_best: dict[str, tuple[int, str, str]] = {}
     hosts_seen: set[str] = set()
     region_hosts: dict[str, set[str]] = {}  # base_host_name → {region names}
 
@@ -1336,6 +1351,20 @@ def _scan_enterprise_properties(repo: Path, profile: StackProfile) -> None:
             if prop_key not in soap_best or priority >= soap_best[prop_key][0]:
                 soap_best[prop_key] = (priority, prop_value, prop_rel_path)
 
+        # HTTP method entries (e.g. gws.foo.svc.rest.method=POST)
+        for m in _PROP_METHOD_RE.finditer(content):
+            prop_key = m.group(1)
+            prop_value = m.group(2).strip()
+            if prop_key not in method_best or priority >= method_best[prop_key][0]:
+                method_best[prop_key] = (priority, prop_value, prop_rel_path)
+
+        # Auth type entries (e.g. gws.foo.svc.rest.auth.type=OAuth2)
+        for m in _PROP_AUTH_RE.finditer(content):
+            prop_key = m.group(1)
+            prop_value = m.group(2).strip()
+            if prop_key not in auth_best or priority >= auth_best[prop_key][0]:
+                auth_best[prop_key] = (priority, prop_value, prop_rel_path)
+
         # Plain host definitions
         for m in _PROP_HOST_RE.finditer(content):
             host_key = m.group(1)
@@ -1355,6 +1384,17 @@ def _scan_enterprise_properties(repo: Path, profile: StackProfile) -> None:
     for prop_key, (_, value, _) in soap_best.items():
         profile.config_properties[prop_key] = value
 
+    # Build service-name → method/auth lookup from method_best and auth_best
+    # Strip method/auth suffix to derive the same service name as the URL key
+    svc_method_map: dict[str, str] = {}
+    for prop_key, (_, value, _) in method_best.items():
+        svc_name = _property_key_to_service_name(prop_key)
+        svc_method_map[svc_name] = value.upper()
+    svc_auth_map: dict[str, str] = {}
+    for prop_key, (_, value, _) in auth_best.items():
+        svc_name = _property_key_to_service_name(prop_key)
+        svc_auth_map[svc_name] = value
+
     # Add REST service URLs (production-preferred values)
     for prop_key, (_, value, source_file) in svc_best.items():
         service_name = _property_key_to_service_name(prop_key)
@@ -1366,6 +1406,10 @@ def _scan_enterprise_properties(repo: Path, profile: StackProfile) -> None:
                 "url": value,
                 "source_file": source_file,
             }
+            if service_name in svc_method_map:
+                svc["http_method"] = svc_method_map[service_name]
+            if service_name in svc_auth_map:
+                svc["auth_type"] = svc_auth_map[service_name]
             if service_name in region_hosts:
                 svc["regions"] = sorted(region_hosts[service_name])
             profile.downstream_services.append(svc)
@@ -1375,12 +1419,17 @@ def _scan_enterprise_properties(repo: Path, profile: StackProfile) -> None:
         service_name = _property_key_to_service_name(prop_key)
         if service_name not in existing_names:
             existing_names.add(service_name)
-            profile.downstream_services.append({
+            svc_entry: dict = {
                 "name": service_name,
                 "client_type": "SOAP (properties)",
                 "url": value,
                 "source_file": source_file,
-            })
+            }
+            if service_name in svc_method_map:
+                svc_entry["http_method"] = svc_method_map[service_name]
+            if service_name in svc_auth_map:
+                svc_entry["auth_type"] = svc_auth_map[service_name]
+            profile.downstream_services.append(svc_entry)
 
     # Add unique hosts as downstream services (if not already captured)
     for host_name in sorted(hosts_seen):
@@ -1519,6 +1568,8 @@ def _dedup_downstream_services(services: list[dict]) -> list[dict]:
                 "name": key,
                 "client_type": svc.get("client_type", ""),
                 "url": svc.get("url", ""),
+                "http_method": svc.get("http_method", ""),
+                "auth_type": svc.get("auth_type", ""),
                 "source_files": [],
                 "source_classes": [],
             }
@@ -1529,11 +1580,15 @@ def _dedup_downstream_services(services: list[dict]) -> list[dict]:
             entry["source_files"].append(sf)
         if sc and sc not in entry["source_classes"]:
             entry["source_classes"].append(sc)
-        # Keep the first non-empty url/client_type
+        # Keep the first non-empty url/client_type/http_method/auth_type
         if not entry["url"] and svc.get("url"):
             entry["url"] = svc["url"]
         if not entry["client_type"] and svc.get("client_type"):
             entry["client_type"] = svc["client_type"]
+        if not entry["http_method"] and svc.get("http_method"):
+            entry["http_method"] = svc["http_method"]
+        if not entry["auth_type"] and svc.get("auth_type"):
+            entry["auth_type"] = svc["auth_type"]
         # Preserve regions
         if svc.get("regions"):
             existing_regions = entry.get("regions", [])
@@ -1758,6 +1813,17 @@ def analyze_stack(repo_path: str, consciousness=None, config: dict | None = None
             resolved = profile.config_properties.get(url)
             if resolved:
                 svc["url"] = resolved
+
+    # Infer http_method from client_type as fallback
+    _SOAP_TYPES = {"SOAP", "SOAP (properties)", "JISI SOAP"}
+    _REST_TYPES = {"REST (properties)", "JISI REST", "RESTProxy"}
+    for svc in profile.downstream_services:
+        if not svc.get("http_method"):
+            ct = svc.get("client_type", "")
+            if ct in _SOAP_TYPES:
+                svc["http_method"] = "POST"
+            elif ct in _REST_TYPES:
+                svc["http_method"] = "POST"
 
     # Classify app type
     profile.app_type = _classify_app_type(profile)

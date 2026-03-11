@@ -43,6 +43,8 @@ export interface DownstreamService {
   name: string;
   client_type: string;
   url: string;
+  http_method?: string;
+  auth_type?: string;
   files_referencing?: string[];
   confidence?: string;
   source_files?: string[];

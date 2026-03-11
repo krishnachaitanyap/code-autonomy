@@ -24,6 +24,9 @@ interface DepNode {
   detail: string;
   direction?: string;
   confidence?: string;
+  url?: string;
+  http_method?: string;
+  auth_type?: string;
   source_files?: string[];
   source_classes?: string[];
   invoking_endpoints?: ApiEndpointEntry[];
@@ -53,6 +56,9 @@ function buildNodes(deps: RepoDependencies, identified: DownstreamService[]): De
       label: svc.name,
       kind: 'service',
       detail: svc.client_type ? `${svc.client_type}${svc.url ? ` \u2192 ${svc.url}` : ''}` : svc.url || '',
+      url: svc.url,
+      http_method: svc.http_method,
+      auth_type: svc.auth_type,
       source_files: svc.source_files,
       source_classes: svc.source_classes,
       invoking_endpoints: svc.invoking_endpoints,
@@ -266,6 +272,29 @@ export default function DependencyVisualizer({ repoId, repoName }: DependencyVis
                           {node.detail && (
                             <div className="text-[10px] text-gray-500 mt-0.5 truncate">{node.detail}</div>
                           )}
+                          {node.url && node.url.includes('/') && (
+                            <div className="text-[10px] text-gray-400 mt-0.5 truncate font-mono">{node.url}</div>
+                          )}
+                          {(node.http_method || node.auth_type) && (
+                            <div className="flex items-center gap-1 mt-1 flex-wrap">
+                              {node.http_method && (
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                  node.http_method === 'GET' ? 'bg-green-100 text-green-700' :
+                                  node.http_method === 'POST' ? 'bg-blue-100 text-blue-700' :
+                                  node.http_method === 'PUT' ? 'bg-yellow-100 text-yellow-700' :
+                                  node.http_method === 'DELETE' ? 'bg-red-100 text-red-700' :
+                                  'bg-gray-100 text-gray-700'
+                                }`}>
+                                  {node.http_method}
+                                </span>
+                              )}
+                              {node.auth_type && (
+                                <span className="px-1.5 py-0.5 bg-violet-50 border border-violet-200 rounded text-[10px] text-violet-700 font-medium">
+                                  {node.auth_type}
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </div>
                         );
                       })}
@@ -300,6 +329,40 @@ export default function DependencyVisualizer({ repoId, repoName }: DependencyVis
                 ✕
               </button>
             </div>
+
+            {node.url && node.url.includes('/') && (
+              <div>
+                <h5 className="text-xs font-medium text-gray-500 mb-1">URL</h5>
+                <div className="text-xs text-gray-700 font-mono bg-gray-50 px-2 py-1 rounded break-all">{node.url}</div>
+              </div>
+            )}
+
+            {(node.http_method || node.auth_type) && (
+              <div className="flex items-center gap-2">
+                {node.http_method && (
+                  <div>
+                    <h5 className="text-xs font-medium text-gray-500 mb-1">HTTP Method</h5>
+                    <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+                      node.http_method === 'GET' ? 'bg-green-100 text-green-700' :
+                      node.http_method === 'POST' ? 'bg-blue-100 text-blue-700' :
+                      node.http_method === 'PUT' ? 'bg-yellow-100 text-yellow-700' :
+                      node.http_method === 'DELETE' ? 'bg-red-100 text-red-700' :
+                      'bg-gray-100 text-gray-700'
+                    }`}>
+                      {node.http_method}
+                    </span>
+                  </div>
+                )}
+                {node.auth_type && (
+                  <div>
+                    <h5 className="text-xs font-medium text-gray-500 mb-1">Auth Type</h5>
+                    <span className="px-2 py-0.5 bg-violet-50 border border-violet-200 rounded text-[11px] text-violet-700 font-medium">
+                      {node.auth_type}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
 
             {node.regions && node.regions.length > 0 && (
               <div>
