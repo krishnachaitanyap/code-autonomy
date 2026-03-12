@@ -92,15 +92,18 @@ class SessionService:
             result = SessionRepository(db).update_status(session_id, "failed", "Cancelled by user")
             return result is not None
 
-    def resume_session(self, session_id: str, config: dict) -> Optional["AgentResult"]:
+    def resume_session(self, session_id: str, config: dict) -> Optional[object]:
         """Resume a paused/failed session from its checkpoint.
+
+        Dispatches to the correct agent mode (agent/plan/ask) based on the
+        original session mode, injecting prior checkpoint context.
 
         Args:
             session_id: Session to resume.
             config: Full config dict.
 
         Returns:
-            AgentResult or None if session not found or not resumable.
+            AgentResult / PlanResult or None if session not found or not resumable.
         """
         from src.data.database import get_session as get_db_session
         from src.data.repositories import CheckpointRepository, SessionRepository
@@ -118,6 +121,7 @@ class SessionService:
 
             checkpoint = CheckpointRepository(db).get_latest_by_session(session_id)
             repo_id = session.repo_id
+            session_mode = session.mode  # "agent" | "plan" | "ask"
 
         # Get repo path from database
         from src.data.database import get_session as get_db_session2
@@ -132,10 +136,29 @@ class SessionService:
             repo_url = repo.url
 
         agent_service = AgentService()
-        return agent_service.run_agent(
-            repo_path=repo_path,
-            requirements=session.requirements,
-            config=config,
-            repo_url=repo_url,
-            resume=True,
-        )
+
+        if session_mode == "plan":
+            return agent_service.run_plan(
+                repo_path=repo_path,
+                requirements=session.requirements,
+                config=config,
+                repo_url=repo_url,
+                resume=True,
+            )
+        elif session_mode == "ask":
+            return agent_service.run_ask(
+                repo_path=repo_path,
+                question=session.requirements,
+                config=config,
+                repo_url=repo_url,
+                resume=True,
+            )
+        else:
+            # agent mode
+            return agent_service.run_agent(
+                repo_path=repo_path,
+                requirements=session.requirements,
+                config=config,
+                repo_url=repo_url,
+                resume=True,
+            )

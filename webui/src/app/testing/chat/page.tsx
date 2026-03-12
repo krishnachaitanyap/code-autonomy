@@ -1002,6 +1002,44 @@ export default function ChatPage() {
                         Session: {msg.sessionId}
                       </div>
                     )}
+                    {/* Explore More — shown on failed/partial assistant messages */}
+                    {msg.role === 'assistant' && msg.status === 'failed' && msg.sessionId && (
+                      <div className="mt-2 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 flex items-center justify-between gap-3">
+                        <p className="text-xs text-amber-800">
+                          This result is partial — the agent ran out of turns.
+                        </p>
+                        <button
+                          onClick={async () => {
+                            try {
+                              setSending(true);
+                              setActivityLog([{
+                                timestamp: new Date().toISOString(),
+                                type: 'status',
+                                detail: 'Resuming session...',
+                              }]);
+                              const s = await sessions.resume(msg.sessionId!);
+                              setCurrentSession(s);
+                              setWsSessionId(s.id);
+                              startPolling(s.id);
+                            } catch (err: any) {
+                              setSending(false);
+                              setMessages(prev => [...prev, {
+                                id: `error-${Date.now()}`,
+                                role: 'assistant',
+                                content: `Resume failed: ${err.message}`,
+                                mode,
+                                status: 'failed',
+                                timestamp: new Date().toISOString(),
+                              }]);
+                            }
+                          }}
+                          disabled={sending}
+                          className="shrink-0 px-3 py-1.5 bg-amber-600 text-white rounded-md text-xs font-medium hover:bg-amber-700 disabled:opacity-50"
+                        >
+                          {sending ? 'Exploring...' : 'Explore More'}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}

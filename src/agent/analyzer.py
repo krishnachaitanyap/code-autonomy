@@ -1355,12 +1355,18 @@ def generate_changes_with_agent(
         except Exception:
             pass  # reflection is best-effort
 
-        detailed_summary = (
-            f"Agent did not call task_complete within {max_turns} turns.\n"
-            f"{activity_report}"
-        )
+        # Build user-facing summary: lead with reflection (the useful content),
+        # append diagnostic activity report at the end.
         if reflection_summary:
-            detailed_summary += f"\n\nReflection:\n{reflection_summary}"
+            detailed_summary = reflection_summary
+            if changes_tracker:
+                detailed_summary += f"\n\nFiles modified ({len(changes_tracker)}): {', '.join(sorted(changes_tracker))}"
+            detailed_summary += f"\n\n---\nTool calls ({max_turns} turns): {activity_report}"
+        else:
+            detailed_summary = (
+                f"Partial results after {max_turns} turns.\n"
+                f"{activity_report}"
+            )
 
         print(f"\n  [agent] End-of-run report:")
         print(f"  Files read ({len(reads_tracker)}): {sorted(reads_tracker) if reads_tracker else 'none'}")
@@ -1380,7 +1386,7 @@ def generate_changes_with_agent(
             sorted(changes_tracker), working_memory,
             turns_used=max_turns, max_turns=max_turns,
             summary=detailed_summary[:500],
-            pending_work=reflection_summary or "Agent ran out of turns before calling task_complete.",
+            pending_work=reflection_summary or working_memory.read_all()[:500] or "No specific pending work identified.",
             summarization_calls_used=usage_stats.calls_by_category("summarization") if usage_stats else 0,
             testing_turns_used=testing_turns_used,
         )
@@ -1446,6 +1452,7 @@ def generate_plan_with_agent(
     repo_url: str = "",
     repo_knowledge: str = "",
     code_index: "CodeIndex | None" = None,
+    resume: bool = False,
     conversation_context: Optional[list[dict]] = None,
 ) -> "PlanResult":
     """Run the agent in plan mode: explore → propose changes → complete.
@@ -1533,6 +1540,33 @@ def generate_plan_with_agent(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
     ]
+
+    # ------------------------------------------------------------------ #
+    # Resume from checkpoint (if requested)
+    # ------------------------------------------------------------------ #
+    if resume:
+        existing_checkpoint = load_checkpoint(config, repo_path, repo_url)
+        if existing_checkpoint:
+            req_hash = compute_requirement_hash(requirements)
+            if existing_checkpoint.requirement_hash == req_hash:
+                checkpoint_context = existing_checkpoint.to_context_string()
+                # Restore working memory
+                for k, v in existing_checkpoint.working_memory.items():
+                    working_memory.update(k, v)
+                # Inject checkpoint context into user message
+                messages[1]["content"] = user_msg + f"\n\n{checkpoint_context}\n"
+                # Inject restored working memory into system prompt
+                if not working_memory.is_empty():
+                    messages[0]["content"] = system_prompt + "\n" + working_memory.to_message_block()
+                print(f"  [plan-resume] Restored checkpoint: {existing_checkpoint.turns_used}/{existing_checkpoint.max_turns} turns")
+            else:
+                print("  [plan-resume] Checkpoint found but requirement differs — starting fresh")
+        else:
+            print("  [plan-resume] No checkpoint found — starting fresh")
+
+    # Inject pre-populated working memory into system prompt
+    if not working_memory.is_empty() and "<working_memory>" not in messages[0]["content"]:
+        messages[0]["content"] = system_prompt + "\n" + working_memory.to_message_block()
 
     task_complete_data: Optional[dict] = None
     consecutive_empty = 0
@@ -1770,12 +1804,57 @@ def generate_plan_with_agent(
     else:
         _tb_lines = _format_tool_breakdown(tool_call_counts, tool_errors)
         _tb_str = "\n".join(_tb_lines)
-        plan_summary = f"Agent did not call task_complete within {max_turns} turns"
+        print(f"\n  [plan] End-of-run report:")
+        for _tb_line in _tb_lines:
+            print(f"  {_tb_line}")
+
+        # Build user-facing summary from proposed changes + working memory
+        files_proposed = change_plan.files_affected if change_plan else []
+        if files_proposed:
+            change_lines = []
+            for ch in change_plan.changes:
+                desc = ch.description or ch.action.value
+                change_lines.append(f"- **{ch.path}**: {desc}")
+            plan_summary = (
+                f"Partial plan — proposed changes for {len(files_proposed)} file(s):\n\n"
+                + "\n".join(change_lines)
+            )
+        elif not working_memory.is_empty():
+            plan_summary = (
+                f"Partial exploration after {max_turns} turns.\n\n"
+                f"{working_memory.read_all()}"
+            )
+        else:
+            plan_summary = f"Partial exploration after {max_turns} turns."
         if _tb_str:
-            plan_summary += f"\n{_tb_str}"
-            print(f"\n  [plan] End-of-run report:")
-            for _tb_line in _tb_lines:
-                print(f"  {_tb_line}")
+            plan_summary += f"\n\n---\nTool calls ({max_turns} turns): {_tb_str}"
+
+        # Build pending_work from what was learned but not yet proposed
+        plan_pending_parts: list[str] = []
+        if not working_memory.is_empty():
+            plan_pending_parts.append(working_memory.read_all()[:400])
+        if files_proposed:
+            remaining_hint = (
+                f"Already proposed changes for: {', '.join(files_proposed)}. "
+                "Continue proposing changes for remaining files, then call task_complete."
+            )
+            plan_pending_parts.append(remaining_hint)
+        else:
+            plan_pending_parts.append(
+                "No changes proposed yet. Use the exploration notes above to "
+                "propose_change for each affected file, then call task_complete."
+            )
+        plan_pending = "\n".join(plan_pending_parts) if plan_pending_parts else "Continue exploration and propose changes."
+
+        # Save checkpoint so plan can be resumed
+        save_checkpoint(
+            config, repo_path, repo_url, requirements,
+            files_proposed, working_memory,
+            turns_used=max_turns, max_turns=max_turns,
+            summary=plan_summary[:500],
+            pending_work=plan_pending,
+        )
+
         plan_result = PlanResult(
             success=not change_plan.is_empty,
             plan=change_plan,
@@ -1961,6 +2040,7 @@ def generate_answer_with_agent(
     repo_url: str = "",
     repo_knowledge: str = "",
     code_index: "CodeIndex | None" = None,
+    resume: bool = False,
     conversation_context: Optional[list[dict]] = None,
 ) -> "AskResult":
     """Run the agent in ask mode: explore → answer question → complete.
@@ -2141,6 +2221,36 @@ def generate_answer_with_agent(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
     ]
+
+    # ------------------------------------------------------------------ #
+    # Resume from checkpoint (if requested)
+    # ------------------------------------------------------------------ #
+    if resume:
+        existing_checkpoint = load_checkpoint(config, repo_path, repo_url)
+        if existing_checkpoint:
+            req_hash = compute_requirement_hash(question)
+            if existing_checkpoint.requirement_hash == req_hash:
+                checkpoint_context = existing_checkpoint.to_context_string()
+                # Restore working memory
+                for k, v in existing_checkpoint.working_memory.items():
+                    working_memory.update(k, v)
+                # Restore source files from checkpoint
+                for f in existing_checkpoint.files_changed:
+                    sources_consulted.add(f)
+                # Inject checkpoint context into user message
+                messages[1]["content"] = user_msg + f"\n\n{checkpoint_context}\n"
+                # Inject restored working memory into system prompt
+                if not working_memory.is_empty():
+                    messages[0]["content"] = system_prompt + "\n" + working_memory.to_message_block()
+                print(f"  [ask-resume] Restored checkpoint: {existing_checkpoint.turns_used}/{existing_checkpoint.max_turns} turns, {len(existing_checkpoint.files_changed)} source(s)")
+            else:
+                print("  [ask-resume] Checkpoint found but question differs — starting fresh")
+        else:
+            print("  [ask-resume] No checkpoint found — starting fresh")
+
+    # Inject pre-populated working memory into system prompt
+    if not working_memory.is_empty() and "<working_memory>" not in messages[0]["content"]:
+        messages[0]["content"] = system_prompt + "\n" + working_memory.to_message_block()
 
     task_complete_data: Optional[dict] = None
     consecutive_empty = 0
@@ -2432,12 +2542,9 @@ def generate_answer_with_agent(
     else:
         _tb_lines = _format_tool_breakdown(tool_call_counts, tool_errors)
         _tb_str = "\n".join(_tb_lines)
-        ask_summary = f"Agent did not call task_complete within {max_turns} turns"
-        if _tb_str:
-            ask_summary += f"\n{_tb_str}"
-            print(f"\n  [ask] End-of-run report:")
-            for _tb_line in _tb_lines:
-                print(f"  {_tb_line}")
+        print(f"\n  [ask] End-of-run report:")
+        for _tb_line in _tb_lines:
+            print(f"  {_tb_line}")
 
         # --- Recovery: synthesize partial answer from what the agent explored ---
         partial_answer = ""
@@ -2481,6 +2588,51 @@ def generate_answer_with_agent(
                 )
             except Exception:
                 pass  # Non-fatal
+
+        # Build user-facing summary: use partial answer if available,
+        # otherwise fall back to sources consulted + tool breakdown.
+        if partial_answer:
+            ask_summary = partial_answer
+            if sources_consulted:
+                ask_summary += f"\n\n---\nSources consulted: {', '.join(sorted(sources_consulted))}"
+        elif sources_consulted:
+            ask_summary = (
+                f"Partial exploration after {max_turns} turns.\n\n"
+                f"Sources consulted ({len(sources_consulted)}): {', '.join(sorted(sources_consulted))}"
+            )
+        else:
+            ask_summary = f"Partial exploration after {max_turns} turns."
+        if _tb_str:
+            ask_summary += f"\n\n---\nTool calls ({max_turns} turns): {_tb_str}"
+
+        # Build pending_work: what was found + what still needs investigation
+        ask_pending_parts: list[str] = []
+        if partial_answer:
+            ask_pending_parts.append(
+                "Partial answer so far:\n" + partial_answer[:300]
+            )
+        if not working_memory.is_empty():
+            ask_pending_parts.append(working_memory.read_all()[:300])
+        if sources_consulted:
+            ask_pending_parts.append(
+                f"Already explored: {', '.join(sorted(sources_consulted))}. "
+                "Build on these findings — don't re-read these files. "
+                "Focus on filling gaps and completing the answer."
+            )
+        else:
+            ask_pending_parts.append(
+                "No files explored yet. Start exploring to answer the question."
+            )
+        ask_pending = "\n".join(ask_pending_parts) if ask_pending_parts else "Continue exploring to answer the question."
+
+        # Save checkpoint so ask session can be resumed with working memory
+        save_checkpoint(
+            config, repo_path, repo_url, question,
+            sorted(sources_consulted), working_memory,
+            turns_used=max_turns, max_turns=max_turns,
+            summary=partial_answer[:500] if partial_answer else ask_summary[:500],
+            pending_work=ask_pending,
+        )
 
         ask_result = AskResult(
             success=False,

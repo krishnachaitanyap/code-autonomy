@@ -362,6 +362,43 @@ export interface CoverageReport {
   created_at: string;
 }
 
+export interface StrategyBreakdown {
+  strategy: string;
+  display_name: string;
+  test_file_count: number;
+  test_files: string[];
+  run_count: number;
+  total_tests: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  pass_rate: number;
+  latest_run_status: string | null;
+  latest_run_at: string | null;
+  covered_endpoints: string[];
+  covered_services: string[];
+  coverage_pct: number;
+}
+
+export interface TestRunSummary {
+  total_runs: number;
+  total_tests_executed: number;
+  overall_pass_rate: number;
+  strategies_executed: string[];
+  strategies_missing: string[];
+}
+
+export interface CoverageDetails {
+  total_endpoints: number;
+  total_services: number;
+  total_test_files: number;
+  total_specifications: number;
+  frameworks: string[];
+  strategy_breakdown?: Record<string, StrategyBreakdown>;
+  test_run_summary?: TestRunSummary;
+  sonarqube?: Record<string, any>;
+}
+
 export interface DataInjectionConfig {
   id: string;
   project_id: string;

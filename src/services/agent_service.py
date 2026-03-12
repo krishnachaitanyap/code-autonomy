@@ -256,6 +256,7 @@ class AgentService:
         requirements: str,
         config: dict,
         repo_url: str = "",
+        resume: bool = False,
         branch: str = "",
         progress_callback: ProgressCallback = None,
         conversation_context: Optional[list[dict]] = None,
@@ -304,6 +305,7 @@ class AgentService:
                 repo_knowledge=repo_knowledge,
                 code_index=code_index,
                 build_tool=build_tool,
+                resume=resume,
                 conversation_context=conversation_context,
             )
         except Exception as exc:
@@ -334,6 +336,7 @@ class AgentService:
         question: str,
         config: dict,
         repo_url: str = "",
+        resume: bool = False,
         branch: str = "",
         progress_callback: ProgressCallback = None,
         conversation_context: Optional[list[dict]] = None,
@@ -396,6 +399,7 @@ class AgentService:
                 repo_url=repo_url,
                 repo_knowledge=repo_knowledge,
                 code_index=code_index,
+                resume=resume,
                 conversation_context=conversation_context,
             )
         except Exception as exc:

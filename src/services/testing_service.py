@@ -189,12 +189,67 @@ class TestingService:
             db.expunge(project)
         return project
 
+    # Strategy display names and guidance for gap suggestions
+    STRATEGY_GUIDANCE = {
+        "unit": {"name": "Unit Tests", "suggestion": "Add unit tests with mocks for isolated class testing"},
+        "integration": {"name": "Integration Tests", "suggestion": "Add integration tests with real dependencies"},
+        "bdd": {"name": "BDD / Cucumber", "suggestion": "Add Gherkin feature files with step definitions"},
+        "contract": {"name": "Contract Tests", "suggestion": "Add Pact/contract tests for API consumers"},
+        "e2e": {"name": "End-to-End Tests", "suggestion": "Add E2E tests with Selenium/Playwright"},
+        "soap": {"name": "SOAP Tests", "suggestion": "Add MockWebServiceServer tests for SOAP endpoints"},
+        "jisi_bdd": {"name": "JISI BDD", "suggestion": "Add JISI-framework BDD features with ServiceBase steps"},
+        "security_bdd": {"name": "Security BDD", "suggestion": "Add security-focused BDD scenarios"},
+        "unknown": {"name": "Other Tests", "suggestion": "Classify and organise test files by strategy"},
+    }
+
     @staticmethod
     def _normalize_test_stem(stem: str) -> str:
         """Strip common test suffixes/prefixes to get the source class name."""
         name = re.sub(r'^test_', '', stem)
         name = re.sub(r'(Tests?|IT|IntegrationTest|IntegrationTests|Spec|TestCase)$', '', name)
         return name
+
+    def _classify_test_file(self, file_path: str, content: str, language: str) -> str:
+        """Classify a test file into a testing strategy based on heuristics."""
+        path_lower = file_path.lower()
+
+        # .feature files
+        if path_lower.endswith(".feature"):
+            if "/security/" in path_lower or "@Security" in content:
+                return "security_bdd"
+            if any(kw in content for kw in ("ServiceBase", "CommonSteps", "GenericSteps")):
+                return "jisi_bdd"
+            return "bdd"
+
+        # E2E
+        if any(kw in content for kw in ("WebDriver", "Playwright", "selenium")) or "/e2e/" in path_lower:
+            return "e2e"
+
+        # Contract
+        if any(seg in path_lower for seg in ("/contract/", "/pact/")) or any(
+            kw in content for kw in ("@PactVerification", "ContractVerifier")
+        ):
+            return "contract"
+
+        # Integration (Java)
+        if language == "java":
+            stem = Path(file_path).stem
+            if stem.endswith("IT") or stem.endswith("IntegrationTest"):
+                return "integration"
+            if any(kw in content for kw in ("@SpringBootTest", "@DataJpaTest", "TestContainers")):
+                return "integration"
+            if "MockWebServiceServer" in content or "SOAPMessage" in content:
+                return "soap"
+            if "@Test" in content or "@Mock" in content:
+                return "unit"
+
+        # Integration (Python)
+        if language == "python":
+            if "TestClient" in content or "/integration/" in path_lower:
+                return "integration"
+            return "unit"
+
+        return "unknown"
 
     def _discover_from_path(self, repo_path: Path, language: str = "auto") -> dict:
         """Perform auto-discovery on a repository path."""
@@ -244,7 +299,8 @@ class TestingService:
                     discovery["dto_classes"].append({"file": rel})
 
                 if "Test" in java_file.stem or "test" in str(java_file.parent):
-                    discovery["test_files"].append({"file": rel, "language": "java"})
+                    strategy = self._classify_test_file(rel, content, "java")
+                    discovery["test_files"].append({"file": rel, "language": "java", "strategy": strategy})
             except Exception:
                 continue
 
@@ -254,7 +310,24 @@ class TestingService:
                 continue
             rel = str(py_file.relative_to(repo_path))
             if py_file.stem.startswith("test_") or py_file.stem.endswith("_test"):
-                discovery["test_files"].append({"file": rel, "language": "python"})
+                try:
+                    py_content = py_file.read_text(errors="ignore")[:2000]
+                except Exception:
+                    py_content = ""
+                strategy = self._classify_test_file(rel, py_content, "python")
+                discovery["test_files"].append({"file": rel, "language": "python", "strategy": strategy})
+
+        # Scan for Gherkin feature files
+        for feature_file in repo_path.rglob("*.feature"):
+            if any(skip in feature_file.parts for skip in skip_dirs):
+                continue
+            rel = str(feature_file.relative_to(repo_path))
+            try:
+                feat_content = feature_file.read_text(errors="ignore")[:2000]
+            except Exception:
+                feat_content = ""
+            strategy = self._classify_test_file(rel, feat_content, "gherkin")
+            discovery["test_files"].append({"file": rel, "language": "gherkin", "strategy": strategy})
 
         # Check for servlet XML files (JISI) — classify as specifications
         for xml_file in repo_path.rglob("*servlet*.xml"):
@@ -1321,15 +1394,133 @@ class TestingService:
                 endpoints, test_files, repo_path, overall_pct
             ) if repo_path and os.path.isdir(repo_path) else overall_pct
 
+            # --- Suggest best strategy for each uncovered item ---
+            def _suggest_strategy(item: dict) -> str:
+                ep_type = item.get("endpoint_type", "").lower()
+                if ep_type in ("soap", "wsdl", "soap-servlet"):
+                    return "soap"
+                if ep_type == "rest":
+                    return "integration"
+                if item["type"] == "specification":
+                    return "contract"
+                return "unit"
+
+            for item in uncovered:
+                item["suggested_strategy"] = _suggest_strategy(item)
+
             # Generate gap suggestions
             gaps = []
             for item in uncovered[:10]:  # Top 10 gaps
+                strat = item.get("suggested_strategy", "unit")
+                guidance = self.STRATEGY_GUIDANCE.get(strat, self.STRATEGY_GUIDANCE["unit"])
                 gaps.append({
                     "area": item["file"],
                     "gap_type": f"No tests for {item['type']}",
-                    "suggestion": f"Generate {item.get('endpoint_type', 'unit')} tests for {item['file']}",
+                    "suggestion": guidance["suggestion"] + f" for {item['file']}",
                     "priority": item.get("priority", "medium"),
+                    "suggested_strategy": strat,
                 })
+
+            # --- Per-strategy breakdown from discovered files + TestRun data ---
+            # Group test files by strategy
+            files_by_strategy: dict[str, list[str]] = {}
+            for tf in test_files:
+                strat = tf.get("strategy", "unknown")
+                files_by_strategy.setdefault(strat, []).append(tf["file"])
+
+            # Query completed TestRun records for this project
+            completed_runs = (
+                db.query(TestRun)
+                .filter(
+                    TestRun.project_id == project_id,
+                    TestRun.status.in_(["passed", "failed"]),
+                )
+                .order_by(TestRun.completed_at.desc())
+                .all()
+            )
+
+            # Group runs by strategy
+            runs_by_strategy: dict[str, list[TestRun]] = {}
+            for run in completed_runs:
+                s = run.strategy or "unknown"
+                if s == "auto":
+                    s = "unknown"
+                runs_by_strategy.setdefault(s, []).append(run)
+
+            # All strategies from both sources
+            all_strategies = set(files_by_strategy.keys()) | set(runs_by_strategy.keys())
+            all_strategies.discard("unknown")  # only include if explicitly present
+
+            # Build the tested_stems per strategy for coverage calc
+            all_source_stems = {Path(ep["file"]).stem for ep in endpoints} | {
+                Path(svc["file"]).stem for svc in services
+            }
+
+            strategy_breakdown = {}
+            for strat in sorted(all_strategies | ({"unknown"} if "unknown" in files_by_strategy or "unknown" in runs_by_strategy else set())):
+                strat_files = files_by_strategy.get(strat, [])
+                strat_runs = runs_by_strategy.get(strat, [])
+
+                total_tests = sum(r.total_tests for r in strat_runs)
+                passed = sum(r.passed_tests for r in strat_runs)
+                failed = sum(r.failed_tests for r in strat_runs)
+                skipped = sum(r.skipped_tests for r in strat_runs)
+                pass_rate = round((passed / max(total_tests, 1)) * 100, 1)
+
+                latest = strat_runs[0] if strat_runs else None
+
+                # Which source files does this strategy cover?
+                strat_tested_stems = {
+                    self._normalize_test_stem(Path(f).stem) for f in strat_files
+                }
+                covered_items = [
+                    s for s in all_source_stems if s in strat_tested_stems
+                ]
+                strat_coverage = round(
+                    (len(covered_items) / max(total_items, 1)) * 100, 1
+                )
+
+                # Derive covered endpoints/services lists
+                covered_ep_files = [
+                    ep["file"] for ep in endpoints if Path(ep["file"]).stem in strat_tested_stems
+                ]
+                covered_svc_files = [
+                    svc["file"] for svc in services if Path(svc["file"]).stem in strat_tested_stems
+                ]
+
+                strategy_breakdown[strat] = {
+                    "strategy": strat,
+                    "display_name": self.STRATEGY_GUIDANCE.get(strat, {}).get("name", strat.title()),
+                    "test_file_count": len(strat_files),
+                    "test_files": strat_files,
+                    "run_count": len(strat_runs),
+                    "total_tests": total_tests,
+                    "passed": passed,
+                    "failed": failed,
+                    "skipped": skipped,
+                    "pass_rate": pass_rate,
+                    "latest_run_status": latest.status if latest else None,
+                    "latest_run_at": latest.completed_at.isoformat() if latest and latest.completed_at else None,
+                    "covered_endpoints": covered_ep_files,
+                    "covered_services": covered_svc_files,
+                    "coverage_pct": strat_coverage,
+                }
+
+            # --- Test run summary ---
+            total_runs = len(completed_runs)
+            all_tests_executed = sum(r.total_tests for r in completed_runs)
+            all_passed = sum(r.passed_tests for r in completed_runs)
+            strategies_executed = sorted(s for s in runs_by_strategy if s != "unknown")
+            expected_strategies = {"unit", "integration", "bdd", "contract", "e2e"}
+            strategies_missing = sorted(expected_strategies - set(strategies_executed))
+
+            test_run_summary = {
+                "total_runs": total_runs,
+                "total_tests_executed": all_tests_executed,
+                "overall_pass_rate": round((all_passed / max(all_tests_executed, 1)) * 100, 1),
+                "strategies_executed": strategies_executed,
+                "strategies_missing": strategies_missing,
+            }
 
             line_coverage = 0.0
             branch_coverage = 0.0
@@ -1339,6 +1530,8 @@ class TestingService:
                 "total_test_files": len(test_files),
                 "total_specifications": len(discovery.get("specifications", [])),
                 "frameworks": discovery.get("frameworks_detected", []),
+                "strategy_breakdown": strategy_breakdown,
+                "test_run_summary": test_run_summary,
             }
 
             # --- SonarQube overlay ---

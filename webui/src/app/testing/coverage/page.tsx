@@ -2,7 +2,10 @@
 
 import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { testing, repos, type TestProject, type CoverageReport } from '@/lib/api';
+import { testing, repos, type TestProject, type CoverageReport, type StrategyBreakdown, type TestRunSummary } from '@/lib/api';
+import StrategyCard from '@/components/testing/StrategyCard';
+import StrategySummaryBar from '@/components/testing/StrategySummaryBar';
+import MissingStrategiesBanner from '@/components/testing/MissingStrategiesBanner';
 
 export default function CoveragePageWrapper() {
   return (
@@ -106,6 +109,10 @@ function CoveragePage() {
   }
 
   const latestReport = reports[0] || null;
+  const strategyBreakdown: Record<string, StrategyBreakdown> | undefined =
+    latestReport?.details?.strategy_breakdown;
+  const testRunSummary: TestRunSummary | undefined =
+    latestReport?.details?.test_run_summary;
 
   return (
     <div className="space-y-6">
@@ -161,13 +168,18 @@ function CoveragePage() {
         </div>
       ) : latestReport ? (
         <>
-          {/* Coverage overview */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {/* Overall metrics row — 4 existing + pass rate from test run summary */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
             {[
               { label: 'Overall Coverage', value: latestReport.overall_pct, color: getCoverageColor(latestReport.overall_pct) },
               { label: 'Function Coverage', value: latestReport.function_coverage, color: getCoverageColor(latestReport.function_coverage) },
               { label: 'Line Coverage', value: latestReport.line_coverage, color: getCoverageColor(latestReport.line_coverage) },
               { label: 'Branch Coverage', value: latestReport.branch_coverage, color: getCoverageColor(latestReport.branch_coverage) },
+              ...(testRunSummary ? [{
+                label: 'Pass Rate',
+                value: testRunSummary.overall_pass_rate,
+                color: getCoverageColor(testRunSummary.overall_pass_rate),
+              }] : []),
             ].map((item) => (
               <div key={item.label} className="bg-white rounded-lg border border-gray-200 p-5">
                 <p className="text-sm text-gray-500">{item.label}</p>
@@ -184,7 +196,29 @@ function CoveragePage() {
             ))}
           </div>
 
-          {/* Coverage details */}
+          {/* Strategy Summary Bar */}
+          {strategyBreakdown && Object.keys(strategyBreakdown).length > 0 && (
+            <StrategySummaryBar breakdown={strategyBreakdown} />
+          )}
+
+          {/* Missing Strategies Banner */}
+          {testRunSummary && testRunSummary.strategies_missing.length > 0 && (
+            <MissingStrategiesBanner missing={testRunSummary.strategies_missing} />
+          )}
+
+          {/* Per-Strategy Grid */}
+          {strategyBreakdown && Object.keys(strategyBreakdown).length > 0 && (
+            <div>
+              <h3 className="font-medium text-gray-900 mb-3">Per-Strategy Breakdown</h3>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {Object.values(strategyBreakdown).map((sb) => (
+                  <StrategyCard key={sb.strategy} data={sb} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Uncovered areas + Gap suggestions */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* Uncovered areas */}
             <div className="bg-white rounded-lg border border-gray-200 p-5">
@@ -201,11 +235,18 @@ function CoveragePage() {
                         <p className="text-sm font-medium text-gray-700">{area.file}</p>
                         <p className="text-xs text-gray-400">{area.type} - {area.endpoint_type || area.type}</p>
                       </div>
-                      <span className={`text-xs px-2 py-0.5 rounded ${
-                        area.priority === 'high' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'
-                      }`}>
-                        {area.priority}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        {area.suggested_strategy && (
+                          <span className="text-xs px-2 py-0.5 rounded bg-indigo-100 text-indigo-700">
+                            {area.suggested_strategy}
+                          </span>
+                        )}
+                        <span className={`text-xs px-2 py-0.5 rounded ${
+                          area.priority === 'high' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'
+                        }`}>
+                          {area.priority}
+                        </span>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -230,6 +271,11 @@ function CoveragePage() {
                           {gap.priority}
                         </span>
                         <span className="text-xs text-gray-500">{gap.gap_type}</span>
+                        {gap.suggested_strategy && (
+                          <span className="text-xs px-2 py-0.5 rounded bg-indigo-100 text-indigo-700">
+                            {gap.suggested_strategy}
+                          </span>
+                        )}
                       </div>
                       <p className="text-sm text-gray-700">{gap.suggestion}</p>
                       <p className="text-xs text-gray-400 mt-1">{gap.area}</p>
@@ -240,13 +286,13 @@ function CoveragePage() {
             </div>
           </div>
 
-          {/* Report details */}
+          {/* Report details / Summary */}
           {latestReport.details && Object.keys(latestReport.details).length > 0 && (
             <div className="bg-white rounded-lg border border-gray-200 p-5">
               <h3 className="font-medium text-gray-900 mb-3">Summary</h3>
               <dl className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
                 {Object.entries(latestReport.details)
-                  .filter(([key]) => key !== 'sonarqube')
+                  .filter(([key]) => !['sonarqube', 'strategy_breakdown', 'test_run_summary'].includes(key))
                   .map(([key, val]) => (
                   <div key={key}>
                     <dt className="text-gray-500">{key.replace(/_/g, ' ')}</dt>
