@@ -7,6 +7,7 @@ interface QA {
   question: string;
   answer: string;
   sources: string[];
+  success: boolean;
 }
 
 export default function AskPage() {
@@ -21,16 +22,15 @@ export default function AskPage() {
     repos.list().then(setRepoList).catch(console.error);
   }, []);
 
-  async function handleAsk(e: React.FormEvent) {
-    e.preventDefault();
-    if (!selectedRepo || !question.trim()) return;
+  async function submitQuestion(q: string) {
+    if (!selectedRepo || !q.trim()) return;
 
     setLoading(true);
     setError('');
     try {
-      const result = await ask.question(selectedRepo, question);
+      const result = await ask.question(selectedRepo, q);
       setHistory((prev) => [
-        { question, answer: result.answer, sources: result.sources },
+        { question: q, answer: result.answer, sources: result.sources, success: result.success },
         ...prev,
       ]);
       setQuestion('');
@@ -39,6 +39,11 @@ export default function AskPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleAsk(e: React.FormEvent) {
+    e.preventDefault();
+    submitQuestion(question);
   }
 
   return (
@@ -94,6 +99,20 @@ export default function AskPage() {
             key={i}
             className="bg-white rounded-lg border border-gray-200 p-5 space-y-3"
           >
+            {!qa.success && qa.answer && (
+              <div className="bg-amber-50 border border-amber-200 rounded-md px-3 py-2 flex items-center justify-between gap-3">
+                <p className="text-sm text-amber-800">
+                  This answer is partial — the agent ran out of exploration time.
+                </p>
+                <button
+                  onClick={() => submitQuestion(qa.question)}
+                  disabled={loading}
+                  className="shrink-0 px-3 py-1.5 bg-amber-600 text-white rounded-md text-xs font-medium hover:bg-amber-700 disabled:opacity-50"
+                >
+                  {loading ? 'Exploring...' : 'Explore More'}
+                </button>
+              </div>
+            )}
             <div>
               <p className="text-xs text-gray-500 uppercase mb-1">Question</p>
               <p className="text-sm font-medium text-gray-900">{qa.question}</p>

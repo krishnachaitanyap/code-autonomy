@@ -69,7 +69,7 @@ async def ask_question(body: AskRequest):
 
     return AskResponse(
         success=result.success,
-        answer=result.answer if result.success else result.summary,
-        sources=result.sources if result.success else [],
+        answer=result.answer if result.answer else result.summary,
+        sources=result.sources,
         turns_used=result.turns_used,
     )

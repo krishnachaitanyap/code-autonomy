@@ -2104,6 +2104,23 @@ def generate_answer_with_agent(
         f"{search_guidance}"
     )
 
+    # Check for prior exploration notes on this question
+    try:
+        from src.agent.knowledge import load_ask_notes
+        prior_notes = load_ask_notes(repo_path, question)
+    except Exception:
+        prior_notes = None
+
+    if prior_notes:
+        user_msg += (
+            f"\n\n## Prior Exploration Notes\n"
+            f"A previous session explored this question but ran out of time. "
+            f"Here is what was found:\n{prior_notes['partial_answer']}\n\n"
+            f"Sources consulted: {', '.join(prior_notes.get('sources', []))}\n\n"
+            f"Build on this — don't re-explore what was already found. "
+            f"Focus on filling gaps and completing the answer."
+        )
+
     system_prompt = _ASK_SYSTEM_PROMPT
     if gcc_controller:
         system_prompt += _GCC_ASK_PROMPT_SECTION
@@ -2421,9 +2438,53 @@ def generate_answer_with_agent(
             print(f"\n  [ask] End-of-run report:")
             for _tb_line in _tb_lines:
                 print(f"  {_tb_line}")
+
+        # --- Recovery: synthesize partial answer from what the agent explored ---
+        partial_answer = ""
+        try:
+            recovery_messages = [messages[0]] + messages[-12:]
+            recovery_messages.append({
+                "role": "user",
+                "content": (
+                    "You ran out of turns before completing your answer. "
+                    "Based on everything you explored and learned so far, provide your "
+                    "BEST PARTIAL ANSWER to the original question. Include what you found, "
+                    "what you were still investigating, and any open questions. "
+                    "Format as a clear, helpful response — this is what the user will see."
+                ),
+            })
+            recovery_content, _ = chat_completion(
+                messages=recovery_messages,
+                config=llm_config,
+                tools=[],
+                full_config=config,
+                usage_stats=usage_stats,
+            )
+            if recovery_content and len(recovery_content.strip()) > 20:
+                partial_answer = recovery_content.strip()
+                if verbose:
+                    print(f"  [ask] Recovery call produced {len(partial_answer)} chars")
+        except Exception as _recovery_err:
+            if verbose:
+                print(f"  [ask] Recovery call failed: {_recovery_err}")
+
+        # --- Save exploration notes for future sessions ---
+        if partial_answer or sources_consulted:
+            try:
+                from src.agent.knowledge import save_ask_notes
+                save_ask_notes(
+                    repo_path=repo_path,
+                    repo_url=repo_url,
+                    question=question,
+                    partial_answer=partial_answer,
+                    sources=sorted(sources_consulted),
+                )
+            except Exception:
+                pass  # Non-fatal
+
         ask_result = AskResult(
             success=False,
-            answer="",
+            answer=partial_answer,
             sources=sorted(sources_consulted),
             summary=ask_summary,
             turns_used=max_turns,

@@ -491,6 +491,10 @@ def save_knowledge_with_outcome(
         logger.warning("Could not save knowledge with outcome (non-fatal): %s", exc)
 
 
+_fix_cache: dict[str, tuple[float, "KnowledgeEntry"]] = {}
+_FIX_CACHE_TTL = 60.0  # seconds
+
+
 def get_fix_suggestions(
     config: Optional[dict],
     repo_path: str,
@@ -498,11 +502,21 @@ def get_fix_suggestions(
     error_text: str,
 ) -> list[dict[str, Any]]:
     """Look up known error→fix patterns for the given error text."""
+    import time
+
     try:
         repo_id = compute_repo_id(repo_path, repo_url)
+
+        # Check in-session cache first
+        if repo_id in _fix_cache:
+            cached_time, cached_entry = _fix_cache[repo_id]
+            if time.monotonic() - cached_time < _FIX_CACHE_TTL:
+                return cached_entry.get_fix_suggestions(error_text)
+
         store = get_knowledge_store(config)
         entry = store.load(repo_id)
         if entry:
+            _fix_cache[repo_id] = (time.monotonic(), entry)
             return entry.get_fix_suggestions(error_text)
     except Exception as exc:
         logger.warning("Could not look up fix suggestions: %s", exc)
@@ -510,7 +524,65 @@ def get_fix_suggestions(
 
 
 # ===================================================================
-# 1f. Repo Knowledge Files (.code-autonomy.md / AGENT.md)
+# 1f. Ask Notes (partial exploration notes for timed-out ask sessions)
+# ===================================================================
+
+_ASK_NOTES_FILE = "ask_notes.json"
+_MAX_ASK_NOTES = 20
+
+
+def save_ask_notes(
+    repo_path: str,
+    repo_url: str,
+    question: str,
+    partial_answer: str,
+    sources: list[str],
+) -> None:
+    """Save partial exploration notes for a question that timed out."""
+    notes_dir = Path(repo_path) / _REPO_KNOWLEDGE_DIR
+    notes_dir.mkdir(exist_ok=True)
+    notes_file = notes_dir / _ASK_NOTES_FILE
+
+    existing: dict = {}
+    if notes_file.exists():
+        try:
+            existing = json.loads(notes_file.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+
+    q_key = hashlib.md5(question.encode()).hexdigest()[:12]
+    existing[q_key] = {
+        "question": question,
+        "partial_answer": partial_answer,
+        "sources": sources,
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+    # Keep only last N notes
+    if len(existing) > _MAX_ASK_NOTES:
+        sorted_keys = sorted(existing, key=lambda k: existing[k].get("timestamp", ""))
+        for old_key in sorted_keys[:-_MAX_ASK_NOTES]:
+            del existing[old_key]
+
+    notes_file.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    logger.info("Ask notes saved to %s (key=%s)", notes_file, q_key)
+
+
+def load_ask_notes(repo_path: str, question: str) -> Optional[dict]:
+    """Load prior notes for a question (exact match by hash)."""
+    notes_file = Path(repo_path) / _REPO_KNOWLEDGE_DIR / _ASK_NOTES_FILE
+    if not notes_file.exists():
+        return None
+    try:
+        existing = json.loads(notes_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    q_key = hashlib.md5(question.encode()).hexdigest()[:12]
+    return existing.get(q_key)
+
+
+# ===================================================================
+# 1g. Repo Knowledge Files (.code-autonomy.md / AGENT.md)
 # ===================================================================
 
 def load_repo_knowledge(repo_path: str) -> str:
