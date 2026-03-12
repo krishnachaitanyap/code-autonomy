@@ -246,7 +246,10 @@ class AgentService:
         )
 
         if progress_callback:
-            progress_callback({"type": "complete", "data": {"summary": result.summary, "success": result.success}})
+            progress_callback({"type": "complete", "data": {
+                "summary": result.summary, "success": result.success,
+                "partial": result.partial, "can_explore_deeper": result.can_explore_deeper,
+            }})
 
         return result
 
@@ -326,7 +329,10 @@ class AgentService:
         )
 
         if progress_callback:
-            progress_callback({"type": "complete", "data": {"summary": result.summary, "success": result.success}})
+            progress_callback({"type": "complete", "data": {
+                "summary": result.summary, "success": result.success,
+                "partial": result.partial, "can_explore_deeper": result.can_explore_deeper,
+            }})
 
         return result
 
@@ -420,6 +426,10 @@ class AgentService:
         )
 
         if progress_callback:
-            progress_callback({"type": "complete", "data": {"summary": result.answer if result.success else result.summary, "success": result.success}})
+            progress_callback({"type": "complete", "data": {
+                "summary": result.answer if result.success else result.summary,
+                "success": result.success,
+                "partial": result.partial, "can_explore_deeper": result.can_explore_deeper,
+            }})
 
         return result

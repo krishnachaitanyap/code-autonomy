@@ -61,6 +61,10 @@ class AgentResult:
     checkpoint: "Checkpoint | None" = None
     # Working memory accumulated during the run (file notes, patterns, etc.)
     working_memory: dict[str, str] = field(default_factory=dict)
+    # True when the run ended before task_complete — summary has partial results
+    partial: bool = False
+    # True when a checkpoint was saved and further exploration would yield more
+    can_explore_deeper: bool = False
 
 
 @dataclass
@@ -73,6 +77,8 @@ class PlanResult:
     turns_used: int = 0
     trace_id: str = ""
     usage_stats: "LLMUsageStats | None" = None
+    partial: bool = False
+    can_explore_deeper: bool = False
 
 
 @dataclass
@@ -86,6 +92,8 @@ class AskResult:
     turns_used: int = 0
     trace_id: str = ""
     usage_stats: "LLMUsageStats | None" = None
+    partial: bool = False
+    can_explore_deeper: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1411,6 +1419,8 @@ def generate_changes_with_agent(
             usage_stats=usage_stats,
             checkpoint=checkpoint,
             working_memory=working_memory.to_dict(),
+            partial=True,
+            can_explore_deeper=True,
         )
 
     # --- Save execution trace ---
@@ -1861,6 +1871,8 @@ def generate_plan_with_agent(
             summary=plan_summary,
             turns_used=max_turns,
             usage_stats=usage_stats,
+            partial=True,
+            can_explore_deeper=True,
         )
 
     # --- Save trace ---
@@ -2641,6 +2653,8 @@ def generate_answer_with_agent(
             summary=ask_summary,
             turns_used=max_turns,
             usage_stats=usage_stats,
+            partial=True,
+            can_explore_deeper=True,
         )
 
     # --- Save trace ---

@@ -16,6 +16,8 @@ interface ChatMessage {
   mode: 'ask' | 'plan' | 'agent';
   sessionId?: string;
   status?: string;
+  partial?: boolean;
+  canExploreDeeper?: boolean;
   timestamp: string;
 }
 
@@ -363,6 +365,8 @@ export default function ChatPage() {
           mode,
           sessionId: wsSessionId || undefined,
           status: latest.data.success ? 'completed' : 'failed',
+          partial: !!latest.data.partial,
+          canExploreDeeper: !!latest.data.can_explore_deeper,
           timestamp: new Date().toISOString(),
         },
       ]);
@@ -576,6 +580,7 @@ export default function ChatPage() {
           }]);
 
           // Add assistant message
+          const isPartial = s.status === 'failed' && !!s.result_summary;
           setMessages((prev) => [
             ...prev,
             {
@@ -585,6 +590,8 @@ export default function ChatPage() {
               mode: s.mode as Mode,
               sessionId: s.id,
               status: s.status,
+              partial: isPartial,
+              canExploreDeeper: isPartial,
               timestamp: new Date().toISOString(),
             },
           ]);
@@ -986,9 +993,11 @@ export default function ChatPage() {
                       <span className={`text-xs ${msg.role === 'user' ? 'text-indigo-300' : 'text-gray-300'}`}>
                         {new Date(msg.timestamp).toLocaleTimeString()}
                       </span>
-                      {msg.status === 'failed' && (
+                      {msg.partial ? (
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">partial</span>
+                      ) : msg.status === 'failed' ? (
                         <span className="text-xs text-red-400">failed</span>
-                      )}
+                      ) : null}
                     </div>
                     {/* Content */}
                     <div className={`text-sm whitespace-pre-wrap break-words ${
@@ -1002,11 +1011,11 @@ export default function ChatPage() {
                         Session: {msg.sessionId}
                       </div>
                     )}
-                    {/* Explore More — shown on failed/partial assistant messages */}
-                    {msg.role === 'assistant' && msg.status === 'failed' && msg.sessionId && (
+                    {/* Explore Deeper — shown on partial results that can be explored further */}
+                    {msg.role === 'assistant' && msg.canExploreDeeper && msg.sessionId && (
                       <div className="mt-2 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 flex items-center justify-between gap-3">
                         <p className="text-xs text-amber-800">
-                          This result is partial — the agent ran out of turns.
+                          Partial results — can dig deeper for a more complete answer.
                         </p>
                         <button
                           onClick={async () => {
@@ -1015,7 +1024,7 @@ export default function ChatPage() {
                               setActivityLog([{
                                 timestamp: new Date().toISOString(),
                                 type: 'status',
-                                detail: 'Resuming session...',
+                                detail: 'Resuming from checkpoint...',
                               }]);
                               const s = await sessions.resume(msg.sessionId!);
                               setCurrentSession(s);
@@ -1036,7 +1045,7 @@ export default function ChatPage() {
                           disabled={sending}
                           className="shrink-0 px-3 py-1.5 bg-amber-600 text-white rounded-md text-xs font-medium hover:bg-amber-700 disabled:opacity-50"
                         >
-                          {sending ? 'Exploring...' : 'Explore More'}
+                          {sending ? 'Exploring...' : 'Explore Deeper'}
                         </button>
                       </div>
                     )}
