@@ -367,6 +367,7 @@ export interface StrategyBreakdown {
   display_name: string;
   test_file_count: number;
   test_files: string[];
+  estimated_tests: number;
   run_count: number;
   total_tests: number;
   passed: number;
@@ -382,6 +383,7 @@ export interface StrategyBreakdown {
 
 export interface TestRunSummary {
   total_runs: number;
+  total_estimated_tests: number;
   total_tests_executed: number;
   overall_pass_rate: number;
   strategies_executed: string[];

@@ -44,15 +44,17 @@ export default function StrategyCard({ data }: { data: StrategyBreakdown }) {
 
       <div className="grid grid-cols-3 gap-3 text-center mb-3">
         <div>
-          <p className="text-xs text-gray-500">Pass Rate</p>
-          <p className="text-lg font-bold text-gray-900">{data.pass_rate}%</p>
+          <p className="text-xs text-gray-500">{data.run_count > 0 ? 'Pass Rate' : 'Est. Tests'}</p>
+          <p className="text-lg font-bold text-gray-900">
+            {data.run_count > 0 ? `${data.pass_rate}%` : `~${data.estimated_tests || 0}`}
+          </p>
         </div>
         <div>
           <p className="text-xs text-gray-500">Test Files</p>
           <p className="text-lg font-bold text-gray-900">{data.test_file_count}</p>
         </div>
         <div>
-          <p className="text-xs text-gray-500">Tests Run</p>
+          <p className="text-xs text-gray-500">{data.run_count > 0 ? 'Tests Run' : 'Tests Run'}</p>
           <p className="text-lg font-bold text-gray-900">{data.total_tests}</p>
         </div>
       </div>
@@ -71,12 +73,20 @@ export default function StrategyCard({ data }: { data: StrategyBreakdown }) {
         </div>
       </div>
 
-      {/* Pass / Fail / Skip row */}
-      <div className="flex items-center gap-3 text-xs text-gray-500 mb-2">
-        <span className="text-green-600">{data.passed} passed</span>
-        <span className="text-red-600">{data.failed} failed</span>
-        <span>{data.skipped} skipped</span>
-      </div>
+      {/* Pass / Fail / Skip row — or estimated tests when no runs */}
+      {data.run_count > 0 ? (
+        <div className="flex items-center gap-3 text-xs text-gray-500 mb-2">
+          <span className="text-green-600">{data.passed} passed</span>
+          <span className="text-red-600">{data.failed} failed</span>
+          <span>{data.skipped} skipped</span>
+        </div>
+      ) : (
+        <div className="text-xs text-gray-400 mb-2">
+          {(data.estimated_tests || 0) > 0
+            ? `~${data.estimated_tests} test methods detected (not yet executed)`
+            : 'No test methods detected'}
+        </div>
+      )}
 
       {data.latest_run_at && (
         <p className="text-xs text-gray-400 mb-2">

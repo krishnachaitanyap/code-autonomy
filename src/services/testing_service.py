@@ -210,6 +210,17 @@ class TestingService:
         name = re.sub(r'(Tests?|IT|IntegrationTest|IntegrationTests|Spec|TestCase)$', '', name)
         return name
 
+    @staticmethod
+    def _count_test_methods(content: str, language: str) -> int:
+        """Count test methods/scenarios in a file by language."""
+        if language == "java":
+            return len(re.findall(r'@Test\b', content))
+        elif language == "python":
+            return len(re.findall(r'def test_\w+', content))
+        elif language == "gherkin":
+            return len(re.findall(r'^\s*Scenario(?:\s+Outline)?:', content, re.MULTILINE))
+        return 0
+
     def _classify_test_file(self, file_path: str, content: str, language: str) -> str:
         """Classify a test file into a testing strategy based on heuristics."""
         path_lower = file_path.lower()
@@ -332,7 +343,8 @@ class TestingService:
 
                 if "Test" in java_file.stem or "test" in str(java_file.parent):
                     strategy = self._classify_test_file(rel, content, "java")
-                    discovery["test_files"].append({"file": rel, "language": "java", "strategy": strategy})
+                    method_count = self._count_test_methods(content, "java")
+                    discovery["test_files"].append({"file": rel, "language": "java", "strategy": strategy, "test_method_count": method_count})
             except Exception:
                 continue
 
@@ -343,11 +355,12 @@ class TestingService:
             rel = str(py_file.relative_to(repo_path))
             if py_file.stem.startswith("test_") or py_file.stem.endswith("_test"):
                 try:
-                    py_content = py_file.read_text(errors="ignore")[:2000]
+                    py_content = py_file.read_text(errors="ignore")
                 except Exception:
                     py_content = ""
-                strategy = self._classify_test_file(rel, py_content, "python")
-                discovery["test_files"].append({"file": rel, "language": "python", "strategy": strategy})
+                strategy = self._classify_test_file(rel, py_content[:2000], "python")
+                method_count = self._count_test_methods(py_content, "python")
+                discovery["test_files"].append({"file": rel, "language": "python", "strategy": strategy, "test_method_count": method_count})
 
         # Scan for Gherkin feature files
         for feature_file in repo_path.rglob("*.feature"):
@@ -355,11 +368,12 @@ class TestingService:
                 continue
             rel = str(feature_file.relative_to(repo_path))
             try:
-                feat_content = feature_file.read_text(errors="ignore")[:2000]
+                feat_content = feature_file.read_text(errors="ignore")
             except Exception:
                 feat_content = ""
-            strategy = self._classify_test_file(rel, feat_content, "gherkin")
-            discovery["test_files"].append({"file": rel, "language": "gherkin", "strategy": strategy})
+            strategy = self._classify_test_file(rel, feat_content[:2000], "gherkin")
+            method_count = self._count_test_methods(feat_content, "gherkin")
+            discovery["test_files"].append({"file": rel, "language": "gherkin", "strategy": strategy, "test_method_count": method_count})
 
         # Scan for Drools rule files (.drl) — classify as services (business logic)
         try:
@@ -1527,11 +1541,13 @@ class TestingService:
                 "strategies_missing": [],
             }
             try:
-                # Group test files by strategy
+                # Group test files by strategy (track file paths and method counts)
                 files_by_strategy: dict[str, list[str]] = {}
+                methods_by_strategy: dict[str, int] = {}
                 for tf in test_files:
                     strat = tf.get("strategy", "unknown")
                     files_by_strategy.setdefault(strat, []).append(tf["file"])
+                    methods_by_strategy[strat] = methods_by_strategy.get(strat, 0) + tf.get("test_method_count", 0)
 
                 # Query completed TestRun records for this project
                 completed_runs = (
@@ -1597,11 +1613,14 @@ class TestingService:
                         f for f in messaging_files_seen if Path(f).stem in strat_tested_stems
                     ]
 
+                    estimated = methods_by_strategy.get(strat, 0)
+
                     strategy_breakdown[strat] = {
                         "strategy": strat,
                         "display_name": self.STRATEGY_GUIDANCE.get(strat, {}).get("name", strat.title()),
                         "test_file_count": len(strat_files),
                         "test_files": strat_files,
+                        "estimated_tests": estimated,
                         "run_count": len(strat_runs),
                         "total_tests": total_tests,
                         "passed": passed,
@@ -1618,6 +1637,7 @@ class TestingService:
 
                 # --- Test run summary ---
                 total_runs = len(completed_runs)
+                total_estimated = sum(methods_by_strategy.values())
                 all_tests_executed = sum(r.total_tests or 0 for r in completed_runs)
                 all_passed = sum(r.passed_tests or 0 for r in completed_runs)
                 strategies_executed = sorted(s for s in runs_by_strategy if s != "unknown")
@@ -1628,6 +1648,7 @@ class TestingService:
 
                 test_run_summary = {
                     "total_runs": total_runs,
+                    "total_estimated_tests": total_estimated,
                     "total_tests_executed": all_tests_executed,
                     "overall_pass_rate": round((all_passed / max(all_tests_executed, 1)) * 100, 1),
                     "strategies_executed": strategies_executed,
