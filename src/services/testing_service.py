@@ -304,6 +304,12 @@ class TestingService:
 
                 if "@Service" in content:
                     discovery["services"].append({"file": rel, "type": "service"})
+                elif "@Component" in content:
+                    discovery["services"].append({"file": rel, "type": "component"})
+                elif "@Repository" in content:
+                    discovery["services"].append({"file": rel, "type": "repository"})
+                elif "@Configuration" in content:
+                    discovery["services"].append({"file": rel, "type": "configuration"})
 
                 # Kafka / messaging producers and consumers
                 if "@KafkaListener" in content:
@@ -354,6 +360,31 @@ class TestingService:
                 feat_content = ""
             strategy = self._classify_test_file(rel, feat_content, "gherkin")
             discovery["test_files"].append({"file": rel, "language": "gherkin", "strategy": strategy})
+
+        # Scan for Drools rule files (.drl) — classify as services (business logic)
+        for drl_file in repo_path.rglob("*.drl"):
+            if any(skip in drl_file.parts for skip in skip_dirs):
+                continue
+            rel = str(drl_file.relative_to(repo_path))
+            discovery["services"].append({"file": rel, "type": "drools-rule"})
+
+        # Fallback: if no endpoints/services/messaging found, detect all non-test
+        # Java source files under src/main as coverable source classes
+        if not discovery["endpoints"] and not discovery["services"] and not discovery["messaging"]:
+            source_stems_seen: set[str] = set()
+            for java_file in repo_path.rglob("*.java"):
+                if any(skip in java_file.parts for skip in skip_dirs):
+                    continue
+                rel = str(java_file.relative_to(repo_path))
+                # Skip test files
+                if "Test" in java_file.stem or "/test/" in rel.replace("\\", "/"):
+                    continue
+                # Only source files under src/main (or any non-test path)
+                rel_posix = rel.replace("\\", "/")
+                if "src/main" in rel_posix or "/test/" not in rel_posix:
+                    if java_file.stem not in source_stems_seen:
+                        source_stems_seen.add(java_file.stem)
+                        discovery["services"].append({"file": rel, "type": "source"})
 
         # Check for servlet XML files (JISI) — classify as specifications
         for xml_file in repo_path.rglob("*servlet*.xml"):
