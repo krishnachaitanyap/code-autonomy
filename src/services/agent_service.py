@@ -51,7 +51,8 @@ class AgentService:
             code_index = build_or_load_code_index(
                 repo_path, config, repo_url=repo_url, consciousness=consciousness
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to build/load code index for %s: %s", repo_id, exc)
             code_index = None
         if code_index is not None:
             repo_cache.put(repo_id, "code_index", code_index)

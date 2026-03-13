@@ -236,7 +236,7 @@ def _save_code_index(code_index: CodeIndex, cache_path: Path) -> None:
     # Atomic write: temp file + rename to prevent corrupt cache on crash
     fd, tmp = tempfile.mkstemp(dir=cache_path, suffix=".json.tmp")
     try:
-        with open(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
         Path(tmp).replace(json_path)
     except Exception:
