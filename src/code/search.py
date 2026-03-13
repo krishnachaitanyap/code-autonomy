@@ -39,20 +39,19 @@ def grep(
 
     results: list[dict] = []
 
-    for f in repo.rglob("*"):
-        if not f.is_file():
-            continue
-        if f.suffix not in ext_filter:
-            continue
-        if any(p in SKIP_DIRS for p in f.relative_to(repo).parts):
-            continue
+    # Use session cache for file listing and reading
+    from src.code.file_cache import get_session_cache
+    cache = get_session_cache()
+    all_files = cache.list_directory(repo, SKIP_DIRS, ext_filter)
+
+    for f in all_files:
         if file_pattern and not re.search(file_pattern, str(f), re.I):
             continue
 
-        try:
-            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
-        except Exception:
+        content = cache.read_file(f)
+        if content is None:
             continue
+        lines = content.splitlines()
 
         for i, line in enumerate(lines):
             if regex.search(line):

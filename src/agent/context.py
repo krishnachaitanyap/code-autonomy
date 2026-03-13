@@ -35,8 +35,8 @@ _DEFAULT_CONTEXT_LIMIT = 100_000  # safe fallback
 
 
 def estimate_tokens(text: str) -> int:
-    """Estimate token count (~4 chars per token for English/code)."""
-    return len(text) // 4
+    """Estimate token count (~3.5 chars per token for English/code)."""
+    return int(len(text) / 3.5)
 
 
 def get_context_limit(model: str, margin: float = 0.80) -> int:
@@ -142,7 +142,7 @@ def summarize_large_output(
 # ---------------------------------------------------------------------------
 
 _PROTECTED_HEAD = 2   # system + initial user message
-_PROTECTED_TAIL = 12  # most recent messages
+_PROTECTED_TAIL = 8   # most recent messages
 
 
 def manage_conversation_context(
@@ -180,6 +180,10 @@ def manage_conversation_context(
     # Phase 1: compress large tool results in the middle
     compressed_middle: list[dict] = []
     for msg in middle:
+        # Skip messages that were already summarized in a prior compression pass
+        if msg.get("_summarized"):
+            compressed_middle.append(msg)
+            continue
         content = msg.get("content", "") or ""
         if msg.get("role") == "tool" and len(content) > 2000:
             if smart_summarization:
@@ -190,7 +194,7 @@ def manage_conversation_context(
                 )
             else:
                 summarized = content[:500] + f"\n...(compressed, was {len(content)} chars)"
-            compressed_middle.append({**msg, "content": summarized})
+            compressed_middle.append({**msg, "content": summarized, "_summarized": True})
         else:
             compressed_middle.append(msg)
 
@@ -259,6 +263,31 @@ def build_smart_initial_context(
         lines.append("")
         lines.append("## Project Structure")
         lines.append(_format_structure(consciousness.structure))
+
+    # Build metadata (pre-parsed from pom.xml, package.json, etc.)
+    try:
+        from src.agent.direct_lookup import parse_structured_file
+        _build_files = ["pom.xml", "package.json", "build.gradle", "pyproject.toml", "Cargo.toml"]
+        for bf in _build_files:
+            bf_path = Path(repo_path) / bf
+            if bf_path.is_file():
+                parsed = parse_structured_file(str(bf_path))
+                if parsed:
+                    important = {
+                        k: v for k, v in parsed.items()
+                        if any(t in k.lower() for t in [
+                            "name", "version", "group", "artifact", "description",
+                            "packaging", "java.version",
+                        ])
+                    }
+                    if important:
+                        lines.append("")
+                        lines.append(f"## Build Metadata ({bf})")
+                        for k, v in list(important.items())[:8]:
+                            lines.append(f"  {k}: {v}")
+                break  # Only include first found build file
+    except Exception:
+        pass
 
     # Relevant files
     if relevant_files:

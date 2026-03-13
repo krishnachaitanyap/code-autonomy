@@ -109,16 +109,16 @@ def run_find_files(
     target = Path(repo_root)
     if not target.exists():
         return "Error: Repo path not found"
+
+    # Use session cache for directory listing
+    from src.code.file_cache import get_session_cache
+    cache = get_session_cache()
+
+    ext_set = {extension} if extension else SEARCH_EXTENSIONS
+    all_files = cache.list_directory(target, SKIP_DIRS, ext_set)
+
     found = []
-    for f in target.rglob("*"):
-        if not f.is_file():
-            continue
-        if any(p in SKIP_DIRS for p in f.relative_to(target).parts):
-            continue
-        if extension and f.suffix != extension:
-            continue
-        if not extension and f.suffix not in SEARCH_EXTENSIONS:
-            continue
+    for f in all_files:
         rel = str(f.relative_to(target))
         if pattern:
             import fnmatch
@@ -143,6 +143,9 @@ def run_write_file(repo_root: Path, path: str, content: str) -> str:
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+        # Invalidate cache after write
+        from src.code.file_cache import get_session_cache
+        get_session_cache().invalidate_file(target)
         return f"Wrote {len(content)} chars to {path}"
     except Exception as e:
         return f"Error writing file: {e}"
@@ -206,6 +209,9 @@ def run_edit_file(
     new_content = content.replace(old_string, new_string, 1)
     try:
         target.write_text(new_content, encoding="utf-8")
+        # Invalidate cache after edit
+        from src.code.file_cache import get_session_cache
+        get_session_cache().invalidate_file(target)
     except Exception as e:
         return f"Error writing file: {e}"
     return f"Edited {path}: replaced {len(old_string)} chars with {len(new_string)} chars"
@@ -222,6 +228,9 @@ def run_delete_file(repo_root: Path, path: str) -> str:
         return f"Error: Not a file: {path}"
     try:
         target.unlink()
+        # Invalidate cache after delete
+        from src.code.file_cache import get_session_cache
+        get_session_cache().invalidate_file(target)
         return f"Deleted {path}"
     except Exception as e:
         return f"Error deleting file: {e}"

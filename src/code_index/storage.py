@@ -177,15 +177,16 @@ def build_code_index(
     class_hierarchy = build_class_hierarchy(symbol_table, import_map)
     print(f"[code-index]   Step 4/6: Done — {len(class_hierarchy.parents)} classes with parents")
 
-    # 5. Entity embeddings (best-effort — no failure if API key missing)
-    print("[code-index]   Step 5/6: Building entity embeddings...")
+    # 5. Entity embeddings (deferred — built lazily on first use)
+    print("[code-index]   Step 5/6: Deferring entity embeddings (lazy build on first use)...")
     embeddings = EntityEmbeddings()
-    try:
-        embeddings.build(repo_path, symbol_table, config=config, file_contents=file_contents)
-        print(f"[code-index]   Step 5/6: Done — {len(embeddings)} embeddings built")
-    except Exception as exc:
-        print(f"[code-index]   Step 5/6: Skipped — {exc}")
-        logger.warning("Could not build entity embeddings: %s", exc)
+    embeddings._deferred_build_args = {
+        "repo_path": repo_path,
+        "symbol_table": symbol_table,
+        "config": config,
+        "file_contents": file_contents,
+    }
+    print("[code-index]   Step 5/6: Done — embeddings deferred")
 
     # 6. Property index
     print("[code-index]   Step 6/6: Building property index...")
