@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _service = TestingService()
-_executor = ThreadPoolExecutor(max_workers=2)
+_executor = ThreadPoolExecutor(max_workers=4)
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +304,6 @@ async def analyze_coverage(
     sonarqube_project_key: str = "",
 ):
     """Trigger a coverage analysis for a project."""
-    import asyncio
     loop = asyncio.get_running_loop()
     try:
         report = await loop.run_in_executor(

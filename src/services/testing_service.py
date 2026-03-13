@@ -1367,47 +1367,61 @@ class TestingService:
                     except Exception as exc:
                         logger.warning("Could not resolve local path for project %s: %s", project_id, exc)
 
-            # --- Checkout the selected branch ---
+            # --- Checkout the selected branch (skip if already on it) ---
             effective_branch = branch or project.branch or ""
             if effective_branch and repo_path and os.path.isdir(repo_path):
                 try:
-                    # Unshallow if this is a shallow clone so all branches are reachable
-                    subprocess.run(
-                        ["git", "fetch", "--unshallow"],
-                        cwd=repo_path, capture_output=True, text=True, timeout=300,
+                    # Check current branch — skip checkout if already on the right one
+                    current = subprocess.run(
+                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        cwd=repo_path, capture_output=True, text=True, timeout=30,
                     )
-                    # Fetch the specific branch from origin
-                    subprocess.run(
-                        ["git", "fetch", "origin", effective_branch],
-                        cwd=repo_path, capture_output=True, text=True, timeout=300,
-                    )
-                    # Try local checkout first
-                    result = subprocess.run(
-                        ["git", "checkout", effective_branch],
-                        cwd=repo_path, capture_output=True, text=True, timeout=60,
-                    )
-                    if result.returncode != 0:
-                        # Branch doesn't exist locally — create tracking branch from remote
+                    current_branch = current.stdout.strip() if current.returncode == 0 else ""
+
+                    if current_branch == effective_branch:
+                        logger.info("Already on branch %s, skipping checkout", effective_branch)
+                    else:
+                        # Unshallow if this is a shallow clone so all branches are reachable
+                        subprocess.run(
+                            ["git", "fetch", "--unshallow"],
+                            cwd=repo_path, capture_output=True, text=True, timeout=300,
+                        )
+                        # Fetch the specific branch from origin
+                        subprocess.run(
+                            ["git", "fetch", "origin", effective_branch],
+                            cwd=repo_path, capture_output=True, text=True, timeout=300,
+                        )
+                        # Try local checkout first
                         result = subprocess.run(
-                            ["git", "checkout", "-b", effective_branch, f"origin/{effective_branch}"],
+                            ["git", "checkout", effective_branch],
                             cwd=repo_path, capture_output=True, text=True, timeout=60,
                         )
-                    if result.returncode == 0:
-                        logger.info("Checked out branch %s for coverage analysis", effective_branch)
-                    else:
-                        logger.warning(
-                            "Git checkout result: %d, stdout: %s, stderr: %s",
-                            result.returncode, result.stdout.strip(), result.stderr.strip(),
-                        )
+                        if result.returncode != 0:
+                            # Branch doesn't exist locally — create tracking branch from remote
+                            result = subprocess.run(
+                                ["git", "checkout", "-b", effective_branch, f"origin/{effective_branch}"],
+                                cwd=repo_path, capture_output=True, text=True, timeout=60,
+                            )
+                        if result.returncode == 0:
+                            logger.info("Checked out branch %s for coverage analysis", effective_branch)
+                        else:
+                            logger.warning(
+                                "Git checkout result: %d, stdout: %s, stderr: %s",
+                                result.returncode, result.stdout.strip(), result.stderr.strip(),
+                            )
                 except Exception as exc:
                     logger.warning("Could not checkout branch %s: %s", effective_branch, exc)
 
             # --- Re-run discovery on the current branch ---
             if repo_path and os.path.isdir(repo_path):
-                discovery = self._discover_from_path(Path(repo_path), project.language or "auto")
-                # Persist fresh discovery results
-                project.discovery_result = discovery
-                db.flush()
+                try:
+                    discovery = self._discover_from_path(Path(repo_path), project.language or "auto")
+                    # Persist fresh discovery results
+                    project.discovery_result = discovery
+                    db.flush()
+                except Exception as exc:
+                    logger.exception("Discovery failed for project %s: %s", project_id, exc)
+                    discovery = project.discovery_result or {}
             else:
                 discovery = project.discovery_result or {}
 
@@ -1468,9 +1482,13 @@ class TestingService:
             overall_pct = (covered / max(total_items, 1)) * 100
 
             # Compute real function coverage
-            function_coverage = self._compute_function_coverage(
-                endpoints, test_files, repo_path, overall_pct
-            ) if repo_path and os.path.isdir(repo_path) else overall_pct
+            try:
+                function_coverage = self._compute_function_coverage(
+                    endpoints, test_files, repo_path, overall_pct
+                ) if repo_path and os.path.isdir(repo_path) else overall_pct
+            except Exception as exc:
+                logger.warning("Function coverage computation failed: %s", exc)
+                function_coverage = overall_pct
 
             # --- Suggest best strategy for each uncovered item ---
             def _suggest_strategy(item: dict) -> str:
@@ -1502,113 +1520,121 @@ class TestingService:
                 })
 
             # --- Per-strategy breakdown from discovered files + TestRun data ---
-            # Group test files by strategy
-            files_by_strategy: dict[str, list[str]] = {}
-            for tf in test_files:
-                strat = tf.get("strategy", "unknown")
-                files_by_strategy.setdefault(strat, []).append(tf["file"])
-
-            # Query completed TestRun records for this project
-            completed_runs = (
-                db.query(TestRun)
-                .filter(
-                    TestRun.project_id == project_id,
-                    TestRun.status.in_(["passed", "failed"]),
-                )
-                .order_by(TestRun.completed_at.desc())
-                .all()
-            )
-
-            # Group runs by strategy
-            runs_by_strategy: dict[str, list[TestRun]] = {}
-            for run in completed_runs:
-                s = run.strategy or "unknown"
-                if s == "auto":
-                    s = "unknown"
-                runs_by_strategy.setdefault(s, []).append(run)
-
-            # All strategies from both sources
-            all_strategies = set(files_by_strategy.keys()) | set(runs_by_strategy.keys())
-            all_strategies.discard("unknown")  # only include if explicitly present
-
-            # Build the tested_stems per strategy for coverage calc
-            all_source_stems = (
-                {Path(ep["file"]).stem for ep in endpoints}
-                | {Path(svc["file"]).stem for svc in services}
-                | {Path(f).stem for f in messaging_files_seen}
-            )
-
             strategy_breakdown = {}
-            for strat in sorted(all_strategies | ({"unknown"} if "unknown" in files_by_strategy or "unknown" in runs_by_strategy else set())):
-                strat_files = files_by_strategy.get(strat, [])
-                strat_runs = runs_by_strategy.get(strat, [])
+            test_run_summary = {
+                "total_runs": 0, "total_tests_executed": 0,
+                "overall_pass_rate": 0.0, "strategies_executed": [],
+                "strategies_missing": [],
+            }
+            try:
+                # Group test files by strategy
+                files_by_strategy: dict[str, list[str]] = {}
+                for tf in test_files:
+                    strat = tf.get("strategy", "unknown")
+                    files_by_strategy.setdefault(strat, []).append(tf["file"])
 
-                total_tests = sum(r.total_tests for r in strat_runs)
-                passed = sum(r.passed_tests for r in strat_runs)
-                failed = sum(r.failed_tests for r in strat_runs)
-                skipped = sum(r.skipped_tests for r in strat_runs)
-                pass_rate = round((passed / max(total_tests, 1)) * 100, 1)
-
-                latest = strat_runs[0] if strat_runs else None
-
-                # Which source files does this strategy cover?
-                strat_tested_stems = {
-                    self._normalize_test_stem(Path(f).stem) for f in strat_files
-                }
-                covered_items = [
-                    s for s in all_source_stems if s in strat_tested_stems
-                ]
-                strat_coverage = round(
-                    (len(covered_items) / max(total_items, 1)) * 100, 1
+                # Query completed TestRun records for this project
+                completed_runs = (
+                    db.query(TestRun)
+                    .filter(
+                        TestRun.project_id == project_id,
+                        TestRun.status.in_(["passed", "failed"]),
+                    )
+                    .order_by(TestRun.completed_at.desc())
+                    .all()
                 )
 
-                # Derive covered endpoints/services lists
-                covered_ep_files = [
-                    ep["file"] for ep in endpoints if Path(ep["file"]).stem in strat_tested_stems
-                ]
-                covered_svc_files = [
-                    svc["file"] for svc in services if Path(svc["file"]).stem in strat_tested_stems
-                ]
-                covered_msg_files = [
-                    f for f in messaging_files_seen if Path(f).stem in strat_tested_stems
-                ]
+                # Group runs by strategy
+                runs_by_strategy: dict[str, list[TestRun]] = {}
+                for run in completed_runs:
+                    s = run.strategy or "unknown"
+                    if s == "auto":
+                        s = "unknown"
+                    runs_by_strategy.setdefault(s, []).append(run)
 
-                strategy_breakdown[strat] = {
-                    "strategy": strat,
-                    "display_name": self.STRATEGY_GUIDANCE.get(strat, {}).get("name", strat.title()),
-                    "test_file_count": len(strat_files),
-                    "test_files": strat_files,
-                    "run_count": len(strat_runs),
-                    "total_tests": total_tests,
-                    "passed": passed,
-                    "failed": failed,
-                    "skipped": skipped,
-                    "pass_rate": pass_rate,
-                    "latest_run_status": latest.status if latest else None,
-                    "latest_run_at": latest.completed_at.isoformat() if latest and latest.completed_at else None,
-                    "covered_endpoints": covered_ep_files,
-                    "covered_services": covered_svc_files,
-                    "covered_messaging": covered_msg_files,
-                    "coverage_pct": strat_coverage,
+                # All strategies from both sources
+                all_strategies = set(files_by_strategy.keys()) | set(runs_by_strategy.keys())
+                all_strategies.discard("unknown")  # only include if explicitly present
+
+                # Build the tested_stems per strategy for coverage calc
+                all_source_stems = (
+                    {Path(ep["file"]).stem for ep in endpoints}
+                    | {Path(svc["file"]).stem for svc in services}
+                    | {Path(f).stem for f in messaging_files_seen}
+                )
+
+                for strat in sorted(all_strategies | ({"unknown"} if "unknown" in files_by_strategy or "unknown" in runs_by_strategy else set())):
+                    strat_files = files_by_strategy.get(strat, [])
+                    strat_runs = runs_by_strategy.get(strat, [])
+
+                    total_tests = sum(r.total_tests or 0 for r in strat_runs)
+                    passed = sum(r.passed_tests or 0 for r in strat_runs)
+                    failed = sum(r.failed_tests or 0 for r in strat_runs)
+                    skipped = sum(r.skipped_tests or 0 for r in strat_runs)
+                    pass_rate = round((passed / max(total_tests, 1)) * 100, 1)
+
+                    latest = strat_runs[0] if strat_runs else None
+
+                    # Which source files does this strategy cover?
+                    strat_tested_stems = {
+                        self._normalize_test_stem(Path(f).stem) for f in strat_files
+                    }
+                    covered_items = [
+                        s for s in all_source_stems if s in strat_tested_stems
+                    ]
+                    strat_coverage = round(
+                        (len(covered_items) / max(total_items, 1)) * 100, 1
+                    )
+
+                    # Derive covered endpoints/services lists
+                    covered_ep_files = [
+                        ep["file"] for ep in endpoints if Path(ep["file"]).stem in strat_tested_stems
+                    ]
+                    covered_svc_files = [
+                        svc["file"] for svc in services if Path(svc["file"]).stem in strat_tested_stems
+                    ]
+                    covered_msg_files = [
+                        f for f in messaging_files_seen if Path(f).stem in strat_tested_stems
+                    ]
+
+                    strategy_breakdown[strat] = {
+                        "strategy": strat,
+                        "display_name": self.STRATEGY_GUIDANCE.get(strat, {}).get("name", strat.title()),
+                        "test_file_count": len(strat_files),
+                        "test_files": strat_files,
+                        "run_count": len(strat_runs),
+                        "total_tests": total_tests,
+                        "passed": passed,
+                        "failed": failed,
+                        "skipped": skipped,
+                        "pass_rate": pass_rate,
+                        "latest_run_status": latest.status if latest else None,
+                        "latest_run_at": latest.completed_at.isoformat() if latest and latest.completed_at else None,
+                        "covered_endpoints": covered_ep_files,
+                        "covered_services": covered_svc_files,
+                        "covered_messaging": covered_msg_files,
+                        "coverage_pct": strat_coverage,
+                    }
+
+                # --- Test run summary ---
+                total_runs = len(completed_runs)
+                all_tests_executed = sum(r.total_tests or 0 for r in completed_runs)
+                all_passed = sum(r.passed_tests or 0 for r in completed_runs)
+                strategies_executed = sorted(s for s in runs_by_strategy if s != "unknown")
+                expected_strategies = {"unit", "integration", "bdd", "contract", "e2e"}
+                if messaging_files_seen:
+                    expected_strategies.add("messaging")
+                strategies_missing = sorted(expected_strategies - set(strategies_executed))
+
+                test_run_summary = {
+                    "total_runs": total_runs,
+                    "total_tests_executed": all_tests_executed,
+                    "overall_pass_rate": round((all_passed / max(all_tests_executed, 1)) * 100, 1),
+                    "strategies_executed": strategies_executed,
+                    "strategies_missing": strategies_missing,
                 }
-
-            # --- Test run summary ---
-            total_runs = len(completed_runs)
-            all_tests_executed = sum(r.total_tests for r in completed_runs)
-            all_passed = sum(r.passed_tests for r in completed_runs)
-            strategies_executed = sorted(s for s in runs_by_strategy if s != "unknown")
-            expected_strategies = {"unit", "integration", "bdd", "contract", "e2e"}
-            if messaging_files_seen:
-                expected_strategies.add("messaging")
-            strategies_missing = sorted(expected_strategies - set(strategies_executed))
-
-            test_run_summary = {
-                "total_runs": total_runs,
-                "total_tests_executed": all_tests_executed,
-                "overall_pass_rate": round((all_passed / max(all_tests_executed, 1)) * 100, 1),
-                "strategies_executed": strategies_executed,
-                "strategies_missing": strategies_missing,
-            }
+            except Exception as exc:
+                logger.exception("Strategy breakdown failed for project %s: %s", project_id, exc)
 
             line_coverage = 0.0
             branch_coverage = 0.0
