@@ -38,6 +38,26 @@ from src.agent.tracing import (
 
 
 # ---------------------------------------------------------------------------
+# Trace save helper — fire-and-forget to avoid blocking the result
+# ---------------------------------------------------------------------------
+
+def _save_trace_async(trace, config):
+    """Save trace in a daemon thread so it never blocks the agent result."""
+    import threading
+
+    def _do_save():
+        try:
+            store = get_trace_store(config)
+            trace_path = store.save(trace)
+            print(f"  [trace] Saved: {trace_path} ({trace.metrics.get('total_spans', 0)} spans)")
+        except Exception as exc:
+            print(f"  [trace] Failed to save trace: {exc}")
+
+    t = threading.Thread(target=_do_save, daemon=True)
+    t.start()
+
+
+# ---------------------------------------------------------------------------
 # Return type
 # ---------------------------------------------------------------------------
 
@@ -1425,7 +1445,7 @@ def generate_changes_with_agent(
             can_explore_deeper=True,
         )
 
-    # --- Save execution trace ---
+    # --- Save execution trace (non-blocking) ---
     if collector:
         try:
             trace = collector.finalize(
@@ -1435,11 +1455,9 @@ def generate_changes_with_agent(
                 summary=result_obj.summary,
             )
             result_obj.trace_id = trace.trace_id
-            store = get_trace_store(config)
-            trace_path = store.save(trace)
-            print(f"  [trace] Saved: {trace_path} ({trace.metrics.get('total_spans', 0)} spans)")
+            _save_trace_async(trace, config)
         except Exception as _trace_err:
-            print(f"  [trace] Failed to save trace: {_trace_err}")
+            print(f"  [trace] Failed to finalize trace: {_trace_err}")
 
     return result_obj
 
@@ -1872,7 +1890,7 @@ def generate_plan_with_agent(
             can_explore_deeper=True,
         )
 
-    # --- Save trace ---
+    # --- Save trace (non-blocking — don't let trace save hang the result) ---
     if collector:
         try:
             trace = collector.finalize(
@@ -1882,11 +1900,9 @@ def generate_plan_with_agent(
                 summary=plan_result.summary,
             )
             plan_result.trace_id = trace.trace_id
-            store = get_trace_store(config)
-            trace_path = store.save(trace)
-            print(f"  [trace] Saved: {trace_path} ({trace.metrics.get('total_spans', 0)} spans)")
+            _save_trace_async(trace, config)
         except Exception as _trace_err:
-            print(f"  [trace] Failed to save trace: {_trace_err}")
+            print(f"  [trace] Failed to finalize trace: {_trace_err}")
 
     return plan_result
 
@@ -2656,7 +2672,7 @@ def generate_answer_with_agent(
             can_explore_deeper=True,
         )
 
-    # --- Save trace ---
+    # --- Save trace (non-blocking) ---
     if collector:
         try:
             trace = collector.finalize(
@@ -2666,10 +2682,8 @@ def generate_answer_with_agent(
                 summary=ask_result.summary,
             )
             ask_result.trace_id = trace.trace_id
-            store = get_trace_store(config)
-            trace_path = store.save(trace)
-            print(f"  [trace] Saved: {trace_path} ({trace.metrics.get('total_spans', 0)} spans)")
+            _save_trace_async(trace, config)
         except Exception as _trace_err:
-            print(f"  [trace] Failed to save trace: {_trace_err}")
+            print(f"  [trace] Failed to finalize trace: {_trace_err}")
 
     return ask_result
