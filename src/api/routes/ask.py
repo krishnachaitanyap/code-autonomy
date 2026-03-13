@@ -1,7 +1,9 @@
 """API route for quick ask (no session tracking overhead)."""
 
+import asyncio
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, HTTPException
 
@@ -13,6 +15,8 @@ router = APIRouter(tags=["ask"])
 agent_service = AgentService()
 repo_service = RepoService()
 logger = logging.getLogger(__name__)
+
+_executor = ThreadPoolExecutor(max_workers=4)
 
 
 @router.post("", response_model=AskResponse)
@@ -56,13 +60,17 @@ async def ask_question(body: AskRequest):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
-    try:
-        result = agent_service.run_ask(
+    def _run():
+        return agent_service.run_ask(
             repo_path=repo_path,
             question=body.question,
             config=config,
             repo_url=repo_url,
         )
+
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(_executor, _run)
     except Exception as exc:
         logger.exception("Ask failed for repo %s", body.repo_id)
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}")

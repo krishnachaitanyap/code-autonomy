@@ -105,21 +105,23 @@ class FileIOCache:
 
 
 # ---------------------------------------------------------------------------
-# Module-level singleton
+# Thread-local session cache — each concurrent session gets its own instance
 # ---------------------------------------------------------------------------
 
-_session_cache: Optional[FileIOCache] = None
+import threading
+
+_thread_local = threading.local()
 
 
 def get_session_cache() -> FileIOCache:
-    """Return the session-level file cache (lazy singleton)."""
-    global _session_cache
-    if _session_cache is None:
-        _session_cache = FileIOCache()
-    return _session_cache
+    """Return the session-level file cache (per-thread, lazy)."""
+    cache = getattr(_thread_local, "file_cache", None)
+    if cache is None:
+        cache = FileIOCache()
+        _thread_local.file_cache = cache
+    return cache
 
 
 def reset_session_cache() -> None:
-    """Create a fresh cache instance (called at session start)."""
-    global _session_cache
-    _session_cache = FileIOCache()
+    """Create a fresh cache instance for this thread (called at session start)."""
+    _thread_local.file_cache = FileIOCache()
