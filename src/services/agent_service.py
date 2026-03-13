@@ -185,6 +185,7 @@ class AgentService:
         branch: str = "",
         progress_callback: ProgressCallback = None,
         conversation_context: Optional[list[dict]] = None,
+        session_id: Optional[str] = None,
     ) -> "AgentResult":
         """Run agent mode — full agentic loop with exploration, editing, and testing."""
         from src.agent.analyzer import generate_changes_with_agent
@@ -194,8 +195,9 @@ class AgentService:
         ai_cfg = config["ai"]
         agent_config = self._build_agent_config(config)
 
-        # Create session record
-        session_id = self._create_session(repo_id, "agent", requirements)
+        # Create session record only if caller didn't provide one
+        if not session_id:
+            session_id = self._create_session(repo_id, "agent", requirements)
 
         # Build consciousness and code index (cached)
         consciousness = self._get_cached_consciousness(repo_id, repo_path, config, repo_url)
@@ -263,6 +265,7 @@ class AgentService:
         branch: str = "",
         progress_callback: ProgressCallback = None,
         conversation_context: Optional[list[dict]] = None,
+        session_id: Optional[str] = None,
     ) -> "PlanResult":
         """Run plan mode — read-only exploration + proposed changes."""
         from src.agent.analyzer import generate_plan_with_agent
@@ -279,7 +282,8 @@ class AgentService:
             "certs_enabled": agent_cfg.get("certs_enabled", True),
         }
 
-        session_id = self._create_session(repo_id, "plan", requirements)
+        if not session_id:
+            session_id = self._create_session(repo_id, "plan", requirements)
 
         # Build consciousness (cached); only use code_index if already cached (skip eager build)
         consciousness = self._get_cached_consciousness(repo_id, repo_path, config, repo_url)
@@ -346,6 +350,7 @@ class AgentService:
         branch: str = "",
         progress_callback: ProgressCallback = None,
         conversation_context: Optional[list[dict]] = None,
+        session_id: Optional[str] = None,
     ) -> "AskResult":
         """Run ask mode — answer a question about the codebase."""
         from src.agent.analyzer import generate_answer_with_agent
@@ -375,7 +380,8 @@ class AgentService:
             agent_config["opensearch_config"] = opensearch_cfg
             agent_config["ai_config"] = config.get("ai", {})
 
-        session_id = self._create_session(repo_id, "ask", question)
+        if not session_id:
+            session_id = self._create_session(repo_id, "ask", question)
 
         # Build consciousness (cached); skip eager code_index in ask mode
         consciousness = self._get_cached_consciousness(repo_id, repo_path, config, repo_url)

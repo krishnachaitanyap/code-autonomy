@@ -1363,18 +1363,20 @@ def generate_changes_with_agent(
         except Exception:
             pass  # reflection is best-effort
 
-        # Build user-facing summary: lead with reflection (the useful content),
-        # append diagnostic activity report at the end.
+        # Build user-facing summary: lead with reflection (the useful content).
+        # Tool breakdown is internal-only — don't show it to users.
         if reflection_summary:
             detailed_summary = reflection_summary
             if changes_tracker:
                 detailed_summary += f"\n\nFiles modified ({len(changes_tracker)}): {', '.join(sorted(changes_tracker))}"
-            detailed_summary += f"\n\n---\nTool calls ({max_turns} turns): {activity_report}"
+        elif not working_memory.is_empty():
+            detailed_summary = working_memory.read_all()[:2000]
+            if changes_tracker:
+                detailed_summary += f"\n\nFiles modified ({len(changes_tracker)}): {', '.join(sorted(changes_tracker))}"
+        elif changes_tracker:
+            detailed_summary = f"Modified {len(changes_tracker)} file(s): {', '.join(sorted(changes_tracker))}. The agent ran out of turns before completing all tasks."
         else:
-            detailed_summary = (
-                f"Partial results after {max_turns} turns.\n"
-                f"{activity_report}"
-            )
+            detailed_summary = "The agent could not complete the task within the turn limit. Try a more specific request or increasing the turn budget."
 
         print(f"\n  [agent] End-of-run report:")
         print(f"  Files read ({len(reads_tracker)}): {sorted(reads_tracker) if reads_tracker else 'none'}")
@@ -1830,14 +1832,9 @@ def generate_plan_with_agent(
                 + "\n".join(change_lines)
             )
         elif not working_memory.is_empty():
-            plan_summary = (
-                f"Partial exploration after {max_turns} turns.\n\n"
-                f"{working_memory.read_all()}"
-            )
+            plan_summary = working_memory.read_all()[:2000]
         else:
-            plan_summary = f"Partial exploration after {max_turns} turns."
-        if _tb_str:
-            plan_summary += f"\n\n---\nTool calls ({max_turns} turns): {_tb_str}"
+            plan_summary = "The agent could not complete the plan within the turn limit. Try a more specific request or increasing the plan turn budget."
 
         # Build pending_work from what was learned but not yet proposed
         plan_pending_parts: list[str] = []
@@ -2602,20 +2599,22 @@ def generate_answer_with_agent(
                 pass  # Non-fatal
 
         # Build user-facing summary: use partial answer if available,
-        # otherwise fall back to sources consulted + tool breakdown.
+        # then working memory, then sources — tool breakdown is internal-only.
         if partial_answer:
             ask_summary = partial_answer
             if sources_consulted:
                 ask_summary += f"\n\n---\nSources consulted: {', '.join(sorted(sources_consulted))}"
+        elif not working_memory.is_empty():
+            ask_summary = working_memory.read_all()[:2000]
+            if sources_consulted:
+                ask_summary += f"\n\n---\nSources consulted: {', '.join(sorted(sources_consulted))}"
         elif sources_consulted:
             ask_summary = (
-                f"Partial exploration after {max_turns} turns.\n\n"
-                f"Sources consulted ({len(sources_consulted)}): {', '.join(sorted(sources_consulted))}"
+                f"Explored {len(sources_consulted)} source file(s) but ran out of turns before synthesising an answer.\n\n"
+                f"Sources consulted: {', '.join(sorted(sources_consulted))}"
             )
         else:
-            ask_summary = f"Partial exploration after {max_turns} turns."
-        if _tb_str:
-            ask_summary += f"\n\n---\nTool calls ({max_turns} turns): {_tb_str}"
+            ask_summary = "The agent could not find relevant information within the turn limit. Try rephrasing the question or increasing the ask turn budget."
 
         # Build pending_work: what was found + what still needs investigation
         ask_pending_parts: list[str] = []

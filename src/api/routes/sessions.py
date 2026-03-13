@@ -130,6 +130,7 @@ async def create_session(body: SessionCreate):
                     config=config, repo_url=repo_url, branch=body.branch,
                     progress_callback=progress_callback,
                     conversation_context=body.context or None,
+                    session_id=session_id,
                 )
             elif body.mode == "plan":
                 agent_service.run_plan(
@@ -137,6 +138,7 @@ async def create_session(body: SessionCreate):
                     config=config, repo_url=repo_url, branch=body.branch,
                     progress_callback=progress_callback,
                     conversation_context=body.context or None,
+                    session_id=session_id,
                 )
             elif body.mode == "ask":
                 agent_service.run_ask(
@@ -144,6 +146,7 @@ async def create_session(body: SessionCreate):
                     config=config, repo_url=repo_url, branch=body.branch,
                     progress_callback=progress_callback,
                     conversation_context=body.context or None,
+                    session_id=session_id,
                 )
         except Exception as exc:
             logger.exception("Session %s failed: %s", session_id, exc)
@@ -185,12 +188,24 @@ async def resume_session(session_id: str):
     except Exception:
         raise HTTPException(status_code=500, detail="Could not load config")
 
-    result = session_service.resume_session(session_id, config)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Session not found or not resumable")
+    # Mark session as running before dispatching to background thread
+    from src.data.database import get_session as get_db_session
+    from src.data.repositories import SessionRepository
+    with get_db_session() as db:
+        s = SessionRepository(db).get_by_id(session_id)
+        if s is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if s.status not in ("paused", "failed"):
+            raise HTTPException(status_code=400, detail=f"Session not resumable (status={s.status})")
 
-    session = session_service.get_session(session_id)
-    return SessionResponse(**(session or {"id": session_id, "repo_id": "", "mode": "", "status": "running"}))
+    # Run resume in background thread so we don't block the event loop
+    def _run():
+        session_service.resume_session(session_id, config)
+
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(_executor, _run)
+
+    return SessionResponse(id=session_id, repo_id=s.repo_id, mode=s.mode, status="running", requirements=(s.requirements or "")[:200])
 
 
 @router.websocket("/{session_id}/stream")

@@ -144,6 +144,7 @@ class SessionService:
                 config=config,
                 repo_url=repo_url,
                 resume=True,
+                session_id=session_id,
             )
         elif session_mode == "ask":
             return agent_service.run_ask(
@@ -152,6 +153,7 @@ class SessionService:
                 config=config,
                 repo_url=repo_url,
                 resume=True,
+                session_id=session_id,
             )
         else:
             # agent mode
@@ -161,4 +163,5 @@ class SessionService:
                 config=config,
                 repo_url=repo_url,
                 resume=True,
+                session_id=session_id,
             )
