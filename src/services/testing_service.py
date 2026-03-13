@@ -199,6 +199,7 @@ class TestingService:
         "soap": {"name": "SOAP Tests", "suggestion": "Add MockWebServiceServer tests for SOAP endpoints"},
         "jisi_bdd": {"name": "JISI BDD", "suggestion": "Add JISI-framework BDD features with ServiceBase steps"},
         "security_bdd": {"name": "Security BDD", "suggestion": "Add security-focused BDD scenarios"},
+        "messaging": {"name": "Messaging Tests", "suggestion": "Add integration tests for Kafka consumers/producers with EmbeddedKafka or Testcontainers"},
         "unknown": {"name": "Other Tests", "suggestion": "Classify and organise test files by strategy"},
     }
 
@@ -231,6 +232,14 @@ class TestingService:
         ):
             return "contract"
 
+        # Messaging / Kafka tests (any language)
+        if any(kw in content for kw in (
+            "EmbeddedKafka", "@EmbeddedKafka", "KafkaTemplate",
+            "@KafkaListener", "kafka", "KafkaConsumer", "KafkaProducer",
+            "TopicBuilder", "ConsumerRecord", "ProducerRecord",
+        )) or any(seg in path_lower for seg in ("/kafka/", "/messaging/")):
+            return "messaging"
+
         # Integration (Java)
         if language == "java":
             stem = Path(file_path).stem
@@ -257,6 +266,7 @@ class TestingService:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "endpoints": [],
             "services": [],
+            "messaging": [],
             "dto_classes": [],
             "test_files": [],
             "specifications": [],
@@ -294,6 +304,22 @@ class TestingService:
 
                 if "@Service" in content:
                     discovery["services"].append({"file": rel, "type": "service"})
+
+                # Kafka / messaging producers and consumers
+                if "@KafkaListener" in content:
+                    discovery["messaging"].append({"file": rel, "type": "kafka", "direction": "consumer"})
+                if "KafkaTemplate" in content or "@SendTo" in content:
+                    discovery["messaging"].append({"file": rel, "type": "kafka", "direction": "producer"})
+                if "@JmsListener" in content:
+                    discovery["messaging"].append({"file": rel, "type": "jms", "direction": "consumer"})
+                if "JmsTemplate" in content:
+                    discovery["messaging"].append({"file": rel, "type": "jms", "direction": "producer"})
+                if "@RabbitListener" in content:
+                    discovery["messaging"].append({"file": rel, "type": "rabbitmq", "direction": "consumer"})
+                if "RabbitTemplate" in content or "AmqpTemplate" in content:
+                    discovery["messaging"].append({"file": rel, "type": "rabbitmq", "direction": "producer"})
+                if "@StreamListener" in content:
+                    discovery["messaging"].append({"file": rel, "type": "spring-cloud-stream", "direction": "consumer"})
 
                 if "Request" in java_file.stem or "Response" in java_file.stem or "Dto" in java_file.stem.lower():
                     discovery["dto_classes"].append({"file": rel})
@@ -1351,6 +1377,7 @@ class TestingService:
             endpoints = discovery.get("endpoints", [])
             test_files = discovery.get("test_files", [])
             services = discovery.get("services", [])
+            messaging = discovery.get("messaging", [])
 
             # Normalise test file stems for matching
             tested_file_stems = {self._normalize_test_stem(Path(t["file"]).stem) for t in test_files}
@@ -1374,6 +1401,20 @@ class TestingService:
                         "priority": "medium",
                     })
 
+            # Deduplicate messaging by file (a file may have both consumer + producer)
+            messaging_files_seen: set[str] = set()
+            for msg in messaging:
+                if msg["file"] not in messaging_files_seen:
+                    messaging_files_seen.add(msg["file"])
+                    if Path(msg["file"]).stem not in tested_file_stems:
+                        uncovered.append({
+                            "type": "messaging",
+                            "file": msg["file"],
+                            "endpoint_type": msg.get("type", "kafka"),
+                            "direction": msg.get("direction", ""),
+                            "priority": "high",
+                        })
+
             # Specs listed separately, not in main coverage calc
             for spec in discovery.get("specifications", []):
                 uncovered.append({
@@ -1384,7 +1425,7 @@ class TestingService:
                 })
 
             # Derive percentage from match results
-            total_items = len(endpoints) + len(services)
+            total_items = len(endpoints) + len(services) + len(messaging_files_seen)
             uncovered_code = [u for u in uncovered if u["type"] != "specification"]
             covered = total_items - len(uncovered_code)
             overall_pct = (covered / max(total_items, 1)) * 100
@@ -1396,6 +1437,8 @@ class TestingService:
 
             # --- Suggest best strategy for each uncovered item ---
             def _suggest_strategy(item: dict) -> str:
+                if item["type"] == "messaging":
+                    return "messaging"
                 ep_type = item.get("endpoint_type", "").lower()
                 if ep_type in ("soap", "wsdl", "soap-servlet"):
                     return "soap"
@@ -1452,9 +1495,11 @@ class TestingService:
             all_strategies.discard("unknown")  # only include if explicitly present
 
             # Build the tested_stems per strategy for coverage calc
-            all_source_stems = {Path(ep["file"]).stem for ep in endpoints} | {
-                Path(svc["file"]).stem for svc in services
-            }
+            all_source_stems = (
+                {Path(ep["file"]).stem for ep in endpoints}
+                | {Path(svc["file"]).stem for svc in services}
+                | {Path(f).stem for f in messaging_files_seen}
+            )
 
             strategy_breakdown = {}
             for strat in sorted(all_strategies | ({"unknown"} if "unknown" in files_by_strategy or "unknown" in runs_by_strategy else set())):
@@ -1487,6 +1532,9 @@ class TestingService:
                 covered_svc_files = [
                     svc["file"] for svc in services if Path(svc["file"]).stem in strat_tested_stems
                 ]
+                covered_msg_files = [
+                    f for f in messaging_files_seen if Path(f).stem in strat_tested_stems
+                ]
 
                 strategy_breakdown[strat] = {
                     "strategy": strat,
@@ -1503,6 +1551,7 @@ class TestingService:
                     "latest_run_at": latest.completed_at.isoformat() if latest and latest.completed_at else None,
                     "covered_endpoints": covered_ep_files,
                     "covered_services": covered_svc_files,
+                    "covered_messaging": covered_msg_files,
                     "coverage_pct": strat_coverage,
                 }
 
@@ -1512,6 +1561,8 @@ class TestingService:
             all_passed = sum(r.passed_tests for r in completed_runs)
             strategies_executed = sorted(s for s in runs_by_strategy if s != "unknown")
             expected_strategies = {"unit", "integration", "bdd", "contract", "e2e"}
+            if messaging_files_seen:
+                expected_strategies.add("messaging")
             strategies_missing = sorted(expected_strategies - set(strategies_executed))
 
             test_run_summary = {
@@ -1527,6 +1578,7 @@ class TestingService:
             details = {
                 "total_endpoints": len(endpoints),
                 "total_services": len(services),
+                "total_messaging": len(messaging_files_seen),
                 "total_test_files": len(test_files),
                 "total_specifications": len(discovery.get("specifications", [])),
                 "frameworks": discovery.get("frameworks_detected", []),

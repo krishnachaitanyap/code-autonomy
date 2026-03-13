@@ -11,6 +11,7 @@ const STRATEGY_BAR_COLORS: Record<string, string> = {
   soap: 'bg-amber-500',
   jisi_bdd: 'bg-teal-500',
   security_bdd: 'bg-red-500',
+  messaging: 'bg-indigo-500',
   unknown: 'bg-gray-400',
 };
 
@@ -23,6 +24,7 @@ const STRATEGY_DOT_COLORS: Record<string, string> = {
   soap: 'bg-amber-500',
   jisi_bdd: 'bg-teal-500',
   security_bdd: 'bg-red-500',
+  messaging: 'bg-indigo-500',
   unknown: 'bg-gray-400',
 };
 

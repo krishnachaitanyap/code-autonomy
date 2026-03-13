@@ -9,6 +9,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   soap: 'SOAP Tests',
   jisi_bdd: 'JISI BDD',
   security_bdd: 'Security BDD',
+  messaging: 'Messaging Tests',
 };
 
 export default function MissingStrategiesBanner({

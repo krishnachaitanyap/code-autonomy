@@ -12,6 +12,7 @@ const STRATEGY_COLORS: Record<string, { bg: string; text: string; bar: string }>
   soap: { bg: 'bg-amber-100', text: 'text-amber-700', bar: 'bg-amber-500' },
   jisi_bdd: { bg: 'bg-teal-100', text: 'text-teal-700', bar: 'bg-teal-500' },
   security_bdd: { bg: 'bg-red-100', text: 'text-red-700', bar: 'bg-red-500' },
+  messaging: { bg: 'bg-indigo-100', text: 'text-indigo-700', bar: 'bg-indigo-500' },
   unknown: { bg: 'bg-gray-100', text: 'text-gray-700', bar: 'bg-gray-400' },
 };
 
