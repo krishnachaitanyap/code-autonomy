@@ -304,9 +304,18 @@ async def analyze_coverage(
     sonarqube_project_key: str = "",
 ):
     """Trigger a coverage analysis for a project."""
-    report = _service.analyze_coverage(
-        project_id, branch=branch, sonarqube_project_key=sonarqube_project_key
-    )
+    import asyncio
+    loop = asyncio.get_running_loop()
+    try:
+        report = await loop.run_in_executor(
+            _executor,
+            lambda: _service.analyze_coverage(
+                project_id, branch=branch, sonarqube_project_key=sonarqube_project_key
+            ),
+        )
+    except Exception as exc:
+        logger.exception("Coverage analysis failed for project %s: %s", project_id, exc)
+        raise HTTPException(status_code=500, detail=f"Coverage analysis failed: {exc}")
     if not report:
         raise HTTPException(status_code=404, detail="Project not found")
     return CoverageReportResponse(
