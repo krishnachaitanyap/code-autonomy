@@ -197,7 +197,7 @@ export default function MigrationProjectDetail() {
   const latestRun = runs[0] || null;
 
   const TABS: { key: Tab; label: string; count?: number }[] = [
-    { key: 'gaps', label: project.migration_mode === 'improvement' ? 'Analysis' : 'Gap Analysis' },
+    { key: 'gaps', label: project.migration_mode === 'database' ? 'Schema Analysis' : project.migration_mode === 'improvement' ? 'Analysis' : 'Gap Analysis' },
     { key: 'recipes', label: 'Recipe Builder' },
     { key: 'capacity', label: 'Capacity' },
     { key: 'roadmap', label: 'Roadmap', count: latestRun?.roadmap_steps?.length },
@@ -218,10 +218,28 @@ export default function MigrationProjectDetail() {
                 improvement
               </span>
             )}
+            {project.migration_mode === 'database' && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-cyan-100 text-cyan-700">
+                database
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-4 text-xs text-gray-500">
-            {project.source_repo_url && <span>Source: {project.source_repo_url}</span>}
-            {project.reference_repo_url && <span>Ref: {project.reference_repo_url}</span>}
+            {project.migration_mode === 'database' ? (
+              <>
+                {project.config?.source_db && (
+                  <span>Source: {project.config.source_db.engine}://{project.config.source_db.host}/{project.config.source_db.database}</span>
+                )}
+                {project.config?.destination_db && (
+                  <span>Dest: {project.config.destination_db.engine}://{project.config.destination_db.host}/{project.config.destination_db.database}</span>
+                )}
+              </>
+            ) : (
+              <>
+                {project.source_repo_url && <span>Source: {project.source_repo_url}</span>}
+                {project.reference_repo_url && <span>Ref: {project.reference_repo_url}</span>}
+              </>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -254,9 +272,11 @@ export default function MigrationProjectDetail() {
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4 flex items-center gap-3">
           <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
           <span className="text-sm text-blue-700">
-            {project.migration_mode === 'improvement'
-              ? 'Running improvement analysis on repository...'
-              : 'Analyzing source and reference repositories...'}
+            {project.migration_mode === 'database'
+              ? 'Introspecting database schema...'
+              : project.migration_mode === 'improvement'
+                ? 'Running improvement analysis on repository...'
+                : 'Analyzing source and reference repositories...'}
           </span>
         </div>
       )}

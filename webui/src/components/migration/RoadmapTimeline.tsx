@@ -14,6 +14,7 @@ const CATEGORY_ICONS: Record<string, string> = {
   security: '\ud83d\udd12',
   testing: '\ud83e\uddea',
   quality: '\u2728',
+  database: '\ud83d\uddc4\ufe0f',
 };
 
 interface RoadmapTimelineProps {

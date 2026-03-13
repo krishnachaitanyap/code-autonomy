@@ -70,6 +70,8 @@ class MigrationService:
         reference_branch: str = "main",
         reference_folders: list[str] | None = None,
         config: dict | None = None,
+        source_db: dict | None = None,
+        destination_db: dict | None = None,
     ) -> MigrationProject:
         """Create a new migration project, registering the source repo.
 
@@ -77,10 +79,28 @@ class MigrationService:
             "migration"   — source repo migrated toward a reference golden template
             "improvement" — existing dest repo assessed for quality, completeness,
                             testing gaps, performance, structure, etc.
+            "database"    — compare source and destination database schemas,
+                            generate DDL/DML migration scripts
         """
-        from src.agent.knowledge import compute_repo_id
+        import hashlib
 
-        repo_id = compute_repo_id(source_local_path, source_repo_url)
+        merged_config = config or {}
+        if source_db:
+            merged_config["source_db"] = source_db
+        if destination_db:
+            merged_config["destination_db"] = destination_db
+
+        if migration_mode == "database":
+            # Compute repo_id from DB connection info instead of repo URL
+            db_identifier = ""
+            if source_db:
+                db_identifier = f"{source_db.get('engine', '')}://{source_db.get('host', '')}:{source_db.get('port', '')}/{source_db.get('database', '')}"
+                if source_db.get("jdbc_url"):
+                    db_identifier = source_db["jdbc_url"]
+            repo_id = hashlib.sha256(db_identifier.encode()).hexdigest()[:16]
+        else:
+            from src.agent.knowledge import compute_repo_id
+            repo_id = compute_repo_id(source_local_path, source_repo_url)
 
         with get_session() as db:
             # Ensure source repo is registered
@@ -88,9 +108,9 @@ class MigrationService:
             if repo is None:
                 repo = Repo(
                     id=repo_id,
-                    url=source_repo_url,
+                    url=source_repo_url or (source_db.get("jdbc_url", "") if source_db else ""),
                     local_path=source_local_path,
-                    platform=self._detect_platform(source_repo_url),
+                    platform="database" if migration_mode == "database" else self._detect_platform(source_repo_url),
                 )
                 db.add(repo)
                 db.flush()
@@ -108,7 +128,7 @@ class MigrationService:
                 reference_branch=reference_branch,
                 reference_folders=reference_folders or [],
                 status="pending",
-                config=config or {},
+                config=merged_config,
             )
             db.add(project)
             db.flush()
@@ -173,6 +193,10 @@ class MigrationService:
 
         try:
             _log("analyze", f"Starting analysis (mode: {migration_mode})")
+
+            # --- Database mode branch ---
+            if migration_mode == "database":
+                return self._analyze_database_project(project, _log)
 
             # 1. Resolve source path
             source_path = self._resolve_repo_path(
@@ -411,6 +435,791 @@ class MigrationService:
         }
 
         return gaps
+
+    # ------------------------------------------------------------------
+    # Database Analysis
+    # ------------------------------------------------------------------
+
+    def _analyze_database_project(self, project, _log) -> MigrationProject:
+        """Analyze a database migration project by introspecting schemas."""
+        project_id = project.id
+        project_config = project.config or {}
+        source_db_config = project_config.get("source_db", {})
+        dest_db_config = project_config.get("destination_db", {})
+
+        # 1. Introspect source database schema
+        _log("analyze", "Introspecting source database schema...")
+        source_schema = self._introspect_database_schema(source_db_config)
+
+        # 2. Optionally introspect destination and compute gaps
+        dest_schema: dict = {}
+        gap: dict = {"categories_with_gaps": []}
+
+        if dest_db_config and dest_db_config.get("engine"):
+            _log("analyze", "Introspecting destination database schema...")
+            dest_schema = self._introspect_database_schema(dest_db_config)
+
+            _log("analyze", "Computing database gap analysis...")
+            gap = self._compute_database_gap_analysis(source_schema, dest_schema)
+
+        # 3. Run database improvement analysis
+        _log("analyze", "Running database improvement analysis...")
+        improvement = self._compute_database_improvement_analysis(source_schema)
+
+        # Merge improvement findings into gap categories
+        if improvement.get("areas_needing_improvement"):
+            gap.setdefault("categories_with_gaps", [])
+            for area in improvement["areas_needing_improvement"]:
+                if area not in gap["categories_with_gaps"]:
+                    gap["categories_with_gaps"].append(area)
+
+        # 4. Persist
+        with get_session() as db:
+            proj = db.get(MigrationProject, project_id)
+            if proj:
+                proj.source_profile = source_schema
+                proj.reference_profile = dest_schema
+                proj.gap_analysis = gap
+                proj.improvement_analysis = improvement
+                is_nosql = source_schema.get("db_type") == "nosql"
+                proj.capacity_current = {
+                    "tables": len(source_schema.get("tables", [])),
+                    "collections": len(source_schema.get("collections", [])),
+                    "views": len(source_schema.get("views", [])),
+                    "indexes": len(source_schema.get("indexes", [])),
+                    "db_type": "nosql" if is_nosql else "sql",
+                }
+                proj.status = "analyzed"
+                db.flush()
+                db.expunge(proj)
+
+        _log("complete", "Database analysis complete")
+        return proj
+
+    # NoSQL engine identifiers
+    _NOSQL_ENGINES = frozenset({
+        "mongodb", "mongo",
+        "cassandra",
+        "dynamodb",
+        "redis",
+        "elasticsearch", "elastic",
+        "couchbase",
+        "neo4j",
+    })
+
+    @staticmethod
+    def _is_nosql(engine: str) -> bool:
+        """Check if an engine string refers to a NoSQL database."""
+        return engine.lower() in MigrationService._NOSQL_ENGINES
+
+    def _build_connection_url(self, db_config: dict) -> str:
+        """Convert db_config dict to a SQLAlchemy connection URL.
+
+        Accepts {engine, host, port, database, username, password} or {jdbc_url}.
+        Supports postgresql, mysql, oracle, sqlserver.
+        For NoSQL engines, returns a native connection string (not SQLAlchemy).
+        """
+        engine_name = db_config.get("engine", "postgresql").lower()
+
+        # NoSQL engines — return native connection string
+        if self._is_nosql(engine_name):
+            return self._build_nosql_connection_url(db_config)
+
+        jdbc_url = db_config.get("jdbc_url", "")
+        if jdbc_url:
+            # Convert JDBC URL to SQLAlchemy format
+            jdbc_url = jdbc_url.replace("jdbc:", "")
+            if "sqlserver" in jdbc_url:
+                jdbc_url = jdbc_url.replace("sqlserver", "mssql+pyodbc")
+            return jdbc_url
+
+        host = db_config.get("host", "localhost")
+        port = db_config.get("port", "")
+        database = db_config.get("database", "")
+        username = db_config.get("username", "")
+        password = db_config.get("password", "")
+
+        engine_map = {
+            "postgresql": "postgresql",
+            "postgres": "postgresql",
+            "mysql": "mysql+pymysql",
+            "oracle": "oracle+oracledb",
+            "sqlserver": "mssql+pyodbc",
+            "mssql": "mssql+pyodbc",
+        }
+        dialect = engine_map.get(engine_name, engine_name)
+
+        auth = ""
+        if username:
+            auth = f"{username}:{password}@" if password else f"{username}@"
+
+        port_str = f":{port}" if port else ""
+        return f"{dialect}://{auth}{host}{port_str}/{database}"
+
+    def _build_nosql_connection_url(self, db_config: dict) -> str:
+        """Build a native connection URL for NoSQL engines."""
+        engine = db_config.get("engine", "").lower()
+        host = db_config.get("host", "localhost")
+        port = db_config.get("port", "")
+        database = db_config.get("database", "")
+        username = db_config.get("username", "")
+        password = db_config.get("password", "")
+
+        auth = ""
+        if username:
+            auth = f"{username}:{password}@" if password else f"{username}@"
+        port_str = f":{port}" if port else ""
+
+        if engine in ("mongodb", "mongo"):
+            return f"mongodb://{auth}{host}{port_str}/{database}"
+        if engine == "redis":
+            return f"redis://{auth}{host}{port_str}/{database or '0'}"
+        if engine in ("elasticsearch", "elastic"):
+            scheme = "https" if port == "9243" else "http"
+            return f"{scheme}://{auth}{host}{port_str}"
+        if engine == "cassandra":
+            return f"{host}{port_str}"
+        if engine == "couchbase":
+            return f"couchbase://{host}{port_str}"
+        if engine == "neo4j":
+            return f"bolt://{auth}{host}{port_str}"
+        if engine == "dynamodb":
+            return f"dynamodb://{host}{port_str}"
+        return f"{engine}://{auth}{host}{port_str}/{database}"
+
+    def _introspect_database_schema(self, db_config: dict) -> dict:
+        """Introspect a database schema.
+
+        For SQL engines uses SQLAlchemy inspect().
+        For NoSQL engines delegates to _introspect_nosql_schema().
+
+        Returns a dict with engine, database, tables/collections, views,
+        indexes, constraints, and introspection_mode.
+        Falls back to static mode if the database is unreachable.
+        """
+        engine_name = db_config.get("engine", "unknown").lower()
+
+        # Route NoSQL engines to dedicated introspection
+        if self._is_nosql(engine_name):
+            return self._introspect_nosql_schema(db_config)
+
+        schema_result: dict = {
+            "engine": db_config.get("engine", "unknown"),
+            "database": db_config.get("database", ""),
+            "schema": db_config.get("schema", ""),
+            "db_type": "sql",
+            "tables": [],
+            "views": [],
+            "indexes": [],
+            "constraints": [],
+            "introspection_mode": "static",
+        }
+
+        try:
+            from sqlalchemy import create_engine, inspect as sa_inspect
+
+            url = self._build_connection_url(db_config)
+            engine = create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 10})
+            inspector = sa_inspect(engine)
+            schema_name = db_config.get("schema") or None
+
+            schema_result["introspection_mode"] = "live"
+
+            # Tables
+            for table_name in inspector.get_table_names(schema=schema_name):
+                columns = []
+                for col in inspector.get_columns(table_name, schema=schema_name):
+                    columns.append({
+                        "name": col["name"],
+                        "type": str(col["type"]),
+                        "nullable": col.get("nullable", True),
+                        "primary_key": False,  # updated below
+                    })
+
+                pk = inspector.get_pk_constraint(table_name, schema=schema_name)
+                pk_cols = set(pk.get("constrained_columns", []))
+                for col in columns:
+                    if col["name"] in pk_cols:
+                        col["primary_key"] = True
+
+                schema_result["tables"].append({
+                    "name": table_name,
+                    "columns": columns,
+                    "column_count": len(columns),
+                })
+
+            # Views
+            for view_name in inspector.get_view_names(schema=schema_name):
+                schema_result["views"].append({"name": view_name})
+
+            # Indexes
+            for table_name in inspector.get_table_names(schema=schema_name):
+                for idx in inspector.get_indexes(table_name, schema=schema_name):
+                    schema_result["indexes"].append({
+                        "table": table_name,
+                        "name": idx.get("name", ""),
+                        "columns": idx.get("column_names", []),
+                        "unique": idx.get("unique", False),
+                    })
+
+            # Constraints (foreign keys)
+            for table_name in inspector.get_table_names(schema=schema_name):
+                for fk in inspector.get_foreign_keys(table_name, schema=schema_name):
+                    schema_result["constraints"].append({
+                        "table": table_name,
+                        "name": fk.get("name", ""),
+                        "type": "foreign_key",
+                        "columns": fk.get("constrained_columns", []),
+                        "referred_table": fk.get("referred_table", ""),
+                        "referred_columns": fk.get("referred_columns", []),
+                    })
+
+            engine.dispose()
+
+        except Exception as exc:
+            logger.warning("Database introspection failed (falling back to static): %s", exc)
+            schema_result["introspection_mode"] = "static"
+            schema_result["introspection_error"] = str(exc)
+
+        return schema_result
+
+    def _introspect_nosql_schema(self, db_config: dict) -> dict:
+        """Introspect a NoSQL database schema.
+
+        Supports MongoDB, Redis, Elasticsearch, Cassandra, DynamoDB,
+        Couchbase, and Neo4j.  Returns a dict with collections (instead
+        of tables), indexes, and introspection_mode.
+        """
+        engine_name = db_config.get("engine", "").lower()
+        schema_result: dict = {
+            "engine": db_config.get("engine", "unknown"),
+            "database": db_config.get("database", ""),
+            "schema": db_config.get("schema", ""),
+            "db_type": "nosql",
+            "collections": [],
+            "tables": [],      # empty — kept for uniform structure
+            "views": [],
+            "indexes": [],
+            "constraints": [],
+            "introspection_mode": "static",
+        }
+
+        try:
+            if engine_name in ("mongodb", "mongo"):
+                schema_result = self._introspect_mongodb(db_config, schema_result)
+            elif engine_name == "redis":
+                schema_result = self._introspect_redis(db_config, schema_result)
+            elif engine_name in ("elasticsearch", "elastic"):
+                schema_result = self._introspect_elasticsearch(db_config, schema_result)
+            elif engine_name == "cassandra":
+                schema_result = self._introspect_cassandra(db_config, schema_result)
+            elif engine_name == "dynamodb":
+                schema_result = self._introspect_dynamodb(db_config, schema_result)
+            elif engine_name == "couchbase":
+                schema_result = self._introspect_couchbase(db_config, schema_result)
+            elif engine_name == "neo4j":
+                schema_result = self._introspect_neo4j(db_config, schema_result)
+            else:
+                schema_result["introspection_error"] = f"Unsupported NoSQL engine: {engine_name}"
+        except Exception as exc:
+            logger.warning("NoSQL introspection failed (falling back to static): %s", exc)
+            schema_result["introspection_mode"] = "static"
+            schema_result["introspection_error"] = str(exc)
+
+        return schema_result
+
+    # --- NoSQL engine-specific introspection helpers ---
+
+    def _introspect_mongodb(self, db_config: dict, result: dict) -> dict:
+        """Introspect MongoDB collections and sample document fields."""
+        from pymongo import MongoClient
+
+        url = self._build_nosql_connection_url(db_config)
+        client = MongoClient(url, serverSelectionTimeoutMS=10000)
+        db_name = db_config.get("database", "test")
+        db = client[db_name]
+
+        result["introspection_mode"] = "live"
+
+        for coll_name in db.list_collection_names():
+            # Sample one document to infer field schema
+            sample = db[coll_name].find_one()
+            fields = []
+            if sample:
+                for key, value in sample.items():
+                    fields.append({
+                        "name": key,
+                        "type": type(value).__name__,
+                        "nullable": True,
+                        "primary_key": key == "_id",
+                    })
+
+            result["collections"].append({
+                "name": coll_name,
+                "fields": fields,
+                "field_count": len(fields),
+                "estimated_count": db[coll_name].estimated_document_count(),
+            })
+
+            # Indexes
+            for idx_name, idx_info in db[coll_name].index_information().items():
+                result["indexes"].append({
+                    "collection": coll_name,
+                    "table": coll_name,
+                    "name": idx_name,
+                    "columns": [k for k, _ in idx_info.get("key", [])],
+                    "unique": idx_info.get("unique", False),
+                })
+
+        client.close()
+        return result
+
+    def _introspect_redis(self, db_config: dict, result: dict) -> dict:
+        """Introspect Redis key patterns and types."""
+        import redis as redis_lib
+
+        url = self._build_nosql_connection_url(db_config)
+        client = redis_lib.from_url(url, socket_connect_timeout=10)
+        client.ping()
+
+        result["introspection_mode"] = "live"
+
+        # Scan a sample of keys to infer patterns
+        key_types: dict = {}
+        cursor = 0
+        sample_limit = 500
+        count = 0
+        while count < sample_limit:
+            cursor, keys = client.scan(cursor=cursor, count=100)
+            for key in keys:
+                key_str = key.decode("utf-8", errors="replace") if isinstance(key, bytes) else key
+                key_type = client.type(key)
+                type_str = key_type.decode("utf-8") if isinstance(key_type, bytes) else str(key_type)
+                # Extract key pattern (replace numeric/uuid segments)
+                import re as _re
+                pattern = _re.sub(r"[0-9a-f]{8,}", "*", key_str)
+                pattern = _re.sub(r"\d+", "*", pattern)
+                key_types.setdefault(pattern, {"type": type_str, "count": 0})
+                key_types[pattern]["count"] += 1
+                count += 1
+            if cursor == 0:
+                break
+
+        for pattern, info in key_types.items():
+            result["collections"].append({
+                "name": pattern,
+                "fields": [{"name": "value", "type": info["type"], "nullable": True, "primary_key": False}],
+                "field_count": 1,
+                "estimated_count": info["count"],
+            })
+
+        db_size = client.dbsize()
+        result["collections"].insert(0, {
+            "name": f"__db_info (total keys: {db_size})",
+            "fields": [],
+            "field_count": 0,
+            "estimated_count": db_size,
+        }) if not result["collections"] else None
+
+        client.close()
+        return result
+
+    def _introspect_elasticsearch(self, db_config: dict, result: dict) -> dict:
+        """Introspect Elasticsearch index mappings."""
+        from elasticsearch import Elasticsearch
+
+        url = self._build_nosql_connection_url(db_config)
+        username = db_config.get("username", "")
+        password = db_config.get("password", "")
+        auth = (username, password) if username else None
+        es = Elasticsearch([url], basic_auth=auth, request_timeout=10)
+
+        result["introspection_mode"] = "live"
+
+        indices = es.indices.get(index="*")
+        for index_name, index_info in indices.items():
+            if index_name.startswith("."):
+                continue  # skip system indices
+            mappings = index_info.get("mappings", {}).get("properties", {})
+            fields = []
+            for field_name, field_info in mappings.items():
+                fields.append({
+                    "name": field_name,
+                    "type": field_info.get("type", "object"),
+                    "nullable": True,
+                    "primary_key": False,
+                })
+            result["collections"].append({
+                "name": index_name,
+                "fields": fields,
+                "field_count": len(fields),
+                "estimated_count": 0,
+            })
+
+        es.close()
+        return result
+
+    def _introspect_cassandra(self, db_config: dict, result: dict) -> dict:
+        """Introspect Cassandra keyspace tables and columns."""
+        from cassandra.cluster import Cluster
+
+        host = db_config.get("host", "localhost")
+        port = int(db_config.get("port", 9042))
+        keyspace = db_config.get("database", "") or db_config.get("schema", "")
+
+        cluster = Cluster([host], port=port, connect_timeout=10)
+        session = cluster.connect()
+
+        result["introspection_mode"] = "live"
+
+        if keyspace:
+            meta = cluster.metadata.keyspaces.get(keyspace)
+            if meta:
+                for table_name, table_meta in meta.tables.items():
+                    fields = []
+                    pk_cols = {col.name for col in table_meta.primary_key}
+                    for col_name, col_meta in table_meta.columns.items():
+                        fields.append({
+                            "name": col_name,
+                            "type": str(col_meta.cql_type),
+                            "nullable": True,
+                            "primary_key": col_name in pk_cols,
+                        })
+                    result["collections"].append({
+                        "name": table_name,
+                        "fields": fields,
+                        "field_count": len(fields),
+                        "estimated_count": 0,
+                    })
+
+        cluster.shutdown()
+        return result
+
+    def _introspect_dynamodb(self, db_config: dict, result: dict) -> dict:
+        """Introspect DynamoDB tables and key schemas."""
+        import boto3
+
+        region = db_config.get("schema", "") or "us-east-1"
+        endpoint_url = None
+        host = db_config.get("host", "")
+        if host and host != "aws":
+            port = db_config.get("port", "8000")
+            endpoint_url = f"http://{host}:{port}"
+
+        client = boto3.client("dynamodb", region_name=region, endpoint_url=endpoint_url)
+
+        result["introspection_mode"] = "live"
+
+        table_names = client.list_tables().get("TableNames", [])
+        for table_name in table_names:
+            desc = client.describe_table(TableName=table_name)["Table"]
+            key_schema = desc.get("KeySchema", [])
+            attr_defs = {a["AttributeName"]: a["AttributeType"] for a in desc.get("AttributeDefinitions", [])}
+            pk_names = {k["AttributeName"] for k in key_schema}
+
+            fields = []
+            for attr_name, attr_type in attr_defs.items():
+                type_map = {"S": "String", "N": "Number", "B": "Binary"}
+                fields.append({
+                    "name": attr_name,
+                    "type": type_map.get(attr_type, attr_type),
+                    "nullable": attr_name not in pk_names,
+                    "primary_key": attr_name in pk_names,
+                })
+
+            result["collections"].append({
+                "name": table_name,
+                "fields": fields,
+                "field_count": len(fields),
+                "estimated_count": desc.get("ItemCount", 0),
+            })
+
+            # GSIs as indexes
+            for gsi in desc.get("GlobalSecondaryIndexes", []):
+                result["indexes"].append({
+                    "collection": table_name,
+                    "table": table_name,
+                    "name": gsi["IndexName"],
+                    "columns": [k["AttributeName"] for k in gsi.get("KeySchema", [])],
+                    "unique": False,
+                })
+
+        return result
+
+    def _introspect_couchbase(self, db_config: dict, result: dict) -> dict:
+        """Introspect Couchbase bucket info (basic metadata)."""
+        result["introspection_mode"] = "static"
+        result["introspection_error"] = "Couchbase live introspection requires Couchbase SDK — showing static config"
+        bucket = db_config.get("database", "default")
+        result["collections"].append({
+            "name": bucket,
+            "fields": [],
+            "field_count": 0,
+            "estimated_count": 0,
+        })
+        return result
+
+    def _introspect_neo4j(self, db_config: dict, result: dict) -> dict:
+        """Introspect Neo4j node labels and relationship types."""
+        from neo4j import GraphDatabase
+
+        url = self._build_nosql_connection_url(db_config)
+        username = db_config.get("username", "neo4j")
+        password = db_config.get("password", "")
+        driver = GraphDatabase.driver(url, auth=(username, password))
+
+        result["introspection_mode"] = "live"
+
+        with driver.session() as session:
+            # Node labels
+            labels_result = session.run("CALL db.labels()")
+            for record in labels_result:
+                label = record[0]
+                # Get sample properties
+                props_result = session.run(
+                    f"MATCH (n:`{label}`) RETURN properties(n) LIMIT 1"
+                )
+                fields = []
+                for prop_record in props_result:
+                    props = prop_record[0]
+                    if props:
+                        for key, value in props.items():
+                            fields.append({
+                                "name": key,
+                                "type": type(value).__name__,
+                                "nullable": True,
+                                "primary_key": False,
+                            })
+                count_result = session.run(f"MATCH (n:`{label}`) RETURN count(n)")
+                count = count_result.single()[0]
+                result["collections"].append({
+                    "name": f":{label}",
+                    "fields": fields,
+                    "field_count": len(fields),
+                    "estimated_count": count,
+                })
+
+            # Relationship types
+            rels_result = session.run("CALL db.relationshipTypes()")
+            for record in rels_result:
+                rel_type = record[0]
+                result["constraints"].append({
+                    "table": "",
+                    "name": rel_type,
+                    "type": "relationship",
+                    "columns": [],
+                    "referred_table": "",
+                    "referred_columns": [],
+                })
+
+        driver.close()
+        return result
+
+    def _compute_database_gap_analysis(self, source: dict, dest: dict) -> dict:
+        """Compare source and destination database schemas.
+
+        Handles both SQL (tables/columns) and NoSQL (collections/fields)
+        schemas, as well as cross-engine (SQL-to-NoSQL) migrations.
+        """
+        gap: dict = {
+            "categories_with_gaps": [],
+            "table_gaps": [],
+            "collection_gaps": [],
+            "column_gaps": [],
+            "index_gaps": [],
+            "type_mapping_gaps": [],
+            "view_gaps": [],
+            "summary": {},
+        }
+
+        src_is_nosql = source.get("db_type") == "nosql"
+        dst_is_nosql = dest.get("db_type") == "nosql"
+        is_cross_engine = src_is_nosql != dst_is_nosql
+
+        # Normalize: use collections for NoSQL, tables for SQL
+        def _get_entities(schema: dict) -> dict:
+            """Return entity dict {name: entity} from either tables or collections."""
+            if schema.get("db_type") == "nosql":
+                return {c["name"]: c for c in schema.get("collections", [])}
+            return {t["name"]: t for t in schema.get("tables", [])}
+
+        def _get_fields(entity: dict) -> dict:
+            """Return field dict {name: field} from either columns or fields."""
+            return {f["name"]: f for f in entity.get("fields", entity.get("columns", []))}
+
+        src_entities = _get_entities(source)
+        dst_entities = _get_entities(dest)
+
+        entity_label = "collection" if (src_is_nosql or dst_is_nosql) else "table"
+        gap_key = "collection_gaps" if (src_is_nosql or dst_is_nosql) else "table_gaps"
+        gap_category = "database_collections" if (src_is_nosql or dst_is_nosql) else "database_tables"
+
+        # Entity-level gaps
+        for name in src_entities:
+            if name not in dst_entities:
+                gap[gap_key].append({entity_label: name, "status": "missing_in_destination"})
+        for name in dst_entities:
+            if name not in src_entities:
+                gap[gap_key].append({entity_label: name, "status": "extra_in_destination"})
+        if gap[gap_key]:
+            gap["categories_with_gaps"].append(gap_category)
+
+        # Field/Column-level gaps (only for entities in both)
+        for name in src_entities:
+            if name not in dst_entities:
+                continue
+            src_fields = _get_fields(src_entities[name])
+            dst_fields = _get_fields(dst_entities[name])
+
+            for field_name, src_field in src_fields.items():
+                if field_name not in dst_fields:
+                    gap["column_gaps"].append({
+                        entity_label: name, "column": field_name, "status": "missing_in_destination",
+                    })
+                else:
+                    dst_field = dst_fields[field_name]
+                    if str(src_field.get("type", "")).lower() != str(dst_field.get("type", "")).lower():
+                        gap["type_mapping_gaps"].append({
+                            entity_label: name, "column": field_name,
+                            "source_type": str(src_field.get("type", "")),
+                            "destination_type": str(dst_field.get("type", "")),
+                            "status": "type_mismatch",
+                        })
+        if gap["column_gaps"]:
+            gap["categories_with_gaps"].append("database_columns")
+        if gap["type_mapping_gaps"]:
+            gap["categories_with_gaps"].append("database_types")
+
+        # Cross-engine gap flag
+        if is_cross_engine:
+            gap["categories_with_gaps"].append("database_nosql")
+
+        # Index gaps
+        src_indexes = {f"{i.get('table', i.get('collection', ''))}.{i['name']}": i for i in source.get("indexes", [])}
+        dst_indexes = {f"{i.get('table', i.get('collection', ''))}.{i['name']}": i for i in dest.get("indexes", [])}
+        for key in src_indexes:
+            if key not in dst_indexes:
+                gap["index_gaps"].append({**src_indexes[key], "status": "missing_in_destination"})
+        if gap["index_gaps"]:
+            gap["categories_with_gaps"].append("database_indexes")
+
+        # View gaps (SQL only)
+        src_views = {v["name"] for v in source.get("views", [])}
+        dst_views = {v["name"] for v in dest.get("views", [])}
+        for name in src_views - dst_views:
+            gap["view_gaps"].append({"view": name, "status": "missing_in_destination"})
+        if gap["view_gaps"]:
+            gap["categories_with_gaps"].append("database_views")
+
+        # Summary
+        total = (
+            len(gap["table_gaps"])
+            + len(gap["collection_gaps"])
+            + len(gap["column_gaps"])
+            + len(gap["index_gaps"])
+            + len(gap["type_mapping_gaps"])
+            + len(gap["view_gaps"])
+        )
+        gap["summary"] = {
+            "total_gaps": total,
+            "table_gap_count": len(gap["table_gaps"]),
+            "collection_gap_count": len(gap["collection_gaps"]),
+            "column_gap_count": len(gap["column_gaps"]),
+            "index_gap_count": len(gap["index_gaps"]),
+            "type_mapping_gap_count": len(gap["type_mapping_gaps"]),
+            "view_gap_count": len(gap["view_gaps"]),
+            "categories_affected": len(gap["categories_with_gaps"]),
+            "cross_engine": is_cross_engine,
+        }
+
+        return gap
+
+    def _compute_database_improvement_analysis(self, schema: dict) -> dict:
+        """Analyze a database schema for quality improvements.
+
+        Works for both SQL (tables/columns) and NoSQL (collections/fields).
+        """
+        improvement: dict = {
+            "areas_needing_improvement": [],
+            "indexing": {"needs_improvement": False, "issues": []},
+            "constraints": {"needs_improvement": False, "issues": []},
+            "schema_design": {"needs_improvement": False, "issues": []},
+            "summary": {},
+        }
+
+        is_nosql = schema.get("db_type") == "nosql"
+        entities = schema.get("collections", []) if is_nosql else schema.get("tables", [])
+        indexes = schema.get("indexes", [])
+        constraints = schema.get("constraints", [])
+        entity_label = "collection" if is_nosql else "table"
+
+        # Entities without indexes
+        indexed_entities = {i.get("table", i.get("collection", "")) for i in indexes}
+        entities_without_indexes = [e["name"] for e in entities if e["name"] not in indexed_entities]
+        if entities_without_indexes:
+            improvement["indexing"]["issues"].append(
+                f"{len(entities_without_indexes)} {entity_label}(s) without any indexes: {', '.join(entities_without_indexes[:5])}"
+            )
+            improvement["indexing"]["needs_improvement"] = True
+
+        if is_nosql:
+            # NoSQL-specific checks
+            # Collections with very wide schemas (too many fields)
+            wide_collections = [
+                e["name"] for e in entities
+                if e.get("field_count", len(e.get("fields", []))) > 50
+            ]
+            if wide_collections:
+                improvement["schema_design"]["issues"].append(
+                    f"{len(wide_collections)} collection(s) with >50 fields (consider subdocuments): {', '.join(wide_collections[:5])}"
+                )
+                improvement["schema_design"]["needs_improvement"] = True
+
+            # Collections without _id or primary key field
+            no_pk = [
+                e["name"] for e in entities
+                if not any(f.get("primary_key") for f in e.get("fields", []))
+            ]
+            if no_pk and schema.get("engine", "").lower() not in ("redis",):
+                improvement["constraints"]["issues"].append(
+                    f"{len(no_pk)} {entity_label}(s) without identifiable primary key"
+                )
+                improvement["constraints"]["needs_improvement"] = True
+        else:
+            # SQL-specific checks
+            # Tables without primary keys
+            tables_without_pk = []
+            for t in entities:
+                has_pk = any(c.get("primary_key") for c in t.get("columns", []))
+                if not has_pk:
+                    tables_without_pk.append(t["name"])
+            if tables_without_pk:
+                improvement["constraints"]["issues"].append(
+                    f"{len(tables_without_pk)} table(s) without primary keys: {', '.join(tables_without_pk[:5])}"
+                )
+                improvement["constraints"]["needs_improvement"] = True
+
+            # Few foreign keys relative to table count
+            fk_count = len([c for c in constraints if c.get("type") == "foreign_key"])
+            if len(entities) > 3 and fk_count < len(entities) // 2:
+                improvement["constraints"]["issues"].append(
+                    f"Few foreign key constraints ({fk_count}) relative to table count ({len(entities)})"
+                )
+                improvement["constraints"]["needs_improvement"] = True
+
+        if improvement["indexing"]["needs_improvement"]:
+            improvement["areas_needing_improvement"].append("database_indexes")
+        if improvement["constraints"]["needs_improvement"]:
+            improvement["areas_needing_improvement"].append("database_constraints")
+        if improvement["schema_design"]["needs_improvement"]:
+            improvement["areas_needing_improvement"].append("database_collections")
+
+        improvement["summary"] = {
+            "total_areas_scanned": 3,
+            "areas_needing_improvement": len(improvement["areas_needing_improvement"]),
+            "improvement_areas": improvement["areas_needing_improvement"],
+        }
+        return improvement
 
     # ------------------------------------------------------------------
     # Improvement Analysis

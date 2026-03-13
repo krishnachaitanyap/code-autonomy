@@ -114,20 +114,39 @@ export default function MigrationDashboard() {
               </div>
 
               <div className="space-y-1 text-xs text-gray-500">
-                {project.source_repo_url && (
-                  <div className="truncate">
-                    <span className="text-gray-400">Source:</span> {project.source_repo_url}
-                  </div>
-                )}
-                {project.source_local_path && !project.source_repo_url && (
-                  <div className="truncate">
-                    <span className="text-gray-400">Source:</span> {project.source_local_path}
-                  </div>
-                )}
-                {project.reference_repo_url && (
-                  <div className="truncate">
-                    <span className="text-gray-400">Ref:</span> {project.reference_repo_url}
-                  </div>
+                {project.migration_mode === 'database' ? (
+                  <>
+                    {project.config?.source_db && (
+                      <div className="truncate">
+                        <span className="text-gray-400">Source:</span>{' '}
+                        {project.config.source_db.engine}/{project.config.source_db.database}
+                      </div>
+                    )}
+                    {project.config?.destination_db && (
+                      <div className="truncate">
+                        <span className="text-gray-400">Dest:</span>{' '}
+                        {project.config.destination_db.engine}/{project.config.destination_db.database}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    {project.source_repo_url && (
+                      <div className="truncate">
+                        <span className="text-gray-400">Source:</span> {project.source_repo_url}
+                      </div>
+                    )}
+                    {project.source_local_path && !project.source_repo_url && (
+                      <div className="truncate">
+                        <span className="text-gray-400">Source:</span> {project.source_local_path}
+                      </div>
+                    )}
+                    {project.reference_repo_url && (
+                      <div className="truncate">
+                        <span className="text-gray-400">Ref:</span> {project.reference_repo_url}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
 

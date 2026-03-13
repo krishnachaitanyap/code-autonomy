@@ -12,7 +12,7 @@ from typing import Any, Optional
 # Default TTLs (seconds)
 TTL_CONSCIOUSNESS = 3600   # 1 hour
 TTL_CODE_INDEX = 3600      # 1 hour
-TTL_REPO_KNOWLEDGE = 300   # 5 minutes
+TTL_REPO_KNOWLEDGE = 3600  # 1 hour
 
 _MAX_REPOS = 32
 

@@ -62,6 +62,8 @@ async def create_project(data: MigrationProjectCreate):
             reference_branch=data.reference_branch,
             reference_folders=data.reference_folders,
             config=data.config,
+            source_db=data.source_db,
+            destination_db=data.destination_db,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -114,6 +116,35 @@ def _analyze_background(project_id: str, config: dict) -> None:
         _service.analyze_project(project_id, config)
     except Exception as exc:
         logger.error("Migration analysis %s failed: %s", project_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Database Connection Test
+# ---------------------------------------------------------------------------
+
+@router.post("/projects/{project_id}/test-connection")
+async def test_connection(project_id: str, target: str = Query("source")):
+    """Test database connectivity for source or destination."""
+    project = _service.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Migration project not found")
+
+    config = project.config or {}
+    db_key = "source_db" if target == "source" else "destination_db"
+    db_config = config.get(db_key)
+    if not db_config:
+        raise HTTPException(status_code=400, detail=f"No {target} database configured")
+
+    try:
+        url = _service._build_connection_url(db_config)
+        from sqlalchemy import create_engine, text
+        engine = create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 10})
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        engine.dispose()
+        return {"status": "ok", "target": target, "message": "Connection successful"}
+    except Exception as exc:
+        return {"status": "error", "target": target, "message": str(exc)}
 
 
 # ---------------------------------------------------------------------------

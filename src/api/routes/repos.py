@@ -312,8 +312,10 @@ async def get_repo_dependencies(repo_id: str):
 
     try:
         from src.consciousness.stack_analyzer import analyze_stack
+        from src.services.config_service import ConfigService
 
-        profile = analyze_stack(local_path)
+        config = ConfigService().load_config()
+        profile = analyze_stack(local_path, config=config)
 
         # Cross-reference: enrich each downstream service with invoking API endpoints
         class_to_endpoints: dict[str, list[dict]] = {}

@@ -13,6 +13,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   security: 'bg-yellow-100 text-yellow-700',
   testing: 'bg-emerald-100 text-emerald-700',
   quality: 'bg-pink-100 text-pink-700',
+  database: 'bg-cyan-100 text-cyan-700',
 };
 
 interface RecipeGridProps {

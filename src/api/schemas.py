@@ -467,7 +467,7 @@ class WorkflowListResponse(BaseModel):
 
 class MigrationProjectCreate(BaseModel):
     name: str
-    migration_mode: str = "migration"  # migration | improvement
+    migration_mode: str = "migration"  # migration | improvement | database
     source_repo_url: str = ""
     source_local_path: str = ""
     source_branch: str = "main"
@@ -476,6 +476,8 @@ class MigrationProjectCreate(BaseModel):
     reference_branch: str = "main"
     reference_folders: list[str] = Field(default_factory=list)
     config: dict = Field(default_factory=dict)
+    source_db: Optional[dict] = None
+    destination_db: Optional[dict] = None
 
 
 class MigrationProjectResponse(BaseModel):

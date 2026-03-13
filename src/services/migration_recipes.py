@@ -35,7 +35,7 @@ class MigrationRecipe:
 
 
 # ---------------------------------------------------------------------------
-# Built-in recipes (11 total)
+# Built-in recipes (32 total)
 # ---------------------------------------------------------------------------
 
 RECIPES: list[MigrationRecipe] = [
@@ -231,6 +231,215 @@ RECIPES: list[MigrationRecipe] = [
             "4. Align CORS policy with reference.\n"
             "5. Update authentication/authorization patterns.\n"
             "6. Add dependency vulnerability scanning configuration."
+        ),
+    ),
+
+    # -----------------------------------------------------------------------
+    # Database-mode recipes — schema, data, type mapping, constraints, etc.
+    # -----------------------------------------------------------------------
+
+    MigrationRecipe(
+        id="db_schema_migration",
+        name="Database Schema Migration (DDL)",
+        category="database",
+        description="Generate DDL migration scripts to align source database schema with destination. "
+                    "Creates/alters tables, columns, and data types to match target schema.",
+        priority=90,
+        tags=["database", "ddl", "schema", "tables", "columns"],
+        prerequisites=[],
+        agent_instructions=(
+            "1. Compare source and destination database schemas (tables, columns, data types).\n"
+            "2. Generate CREATE TABLE statements for missing tables.\n"
+            "3. Generate ALTER TABLE statements for column differences.\n"
+            "4. Handle data type conversions between database engines.\n"
+            "5. Order DDL statements to respect foreign key dependencies.\n"
+            "6. Generate rollback scripts for each migration step."
+        ),
+    ),
+    MigrationRecipe(
+        id="db_data_migration",
+        name="Data Migration (DML)",
+        category="database",
+        description="Generate DML scripts to migrate data between source and destination databases. "
+                    "Handles INSERT/UPDATE/UPSERT operations with data transformation.",
+        priority=85,
+        tags=["database", "dml", "data", "etl", "insert"],
+        prerequisites=["db_schema_migration"],
+        agent_instructions=(
+            "1. Identify tables requiring data migration.\n"
+            "2. Generate INSERT/SELECT statements for bulk data transfer.\n"
+            "3. Handle data type conversions during transfer.\n"
+            "4. Create upsert logic for incremental migrations.\n"
+            "5. Add batch processing for large tables.\n"
+            "6. Generate data validation queries post-migration."
+        ),
+    ),
+    MigrationRecipe(
+        id="db_type_mapping",
+        name="Data Type Mapping & Conversion",
+        category="database",
+        description="Map and convert data types between source and destination database engines. "
+                    "Handles vendor-specific types, precision differences, and encoding.",
+        priority=80,
+        tags=["database", "types", "mapping", "conversion"],
+        prerequisites=[],
+        agent_instructions=(
+            "1. Catalog all source database column types.\n"
+            "2. Map each type to the equivalent destination engine type.\n"
+            "3. Handle precision/scale differences (e.g. NUMBER vs DECIMAL).\n"
+            "4. Address vendor-specific types (e.g. Oracle CLOB -> PostgreSQL TEXT).\n"
+            "5. Flag potential data loss from type narrowing.\n"
+            "6. Generate CAST/CONVERT expressions for runtime conversion."
+        ),
+    ),
+    MigrationRecipe(
+        id="db_constraint_validation",
+        name="Constraint Validation & Integrity",
+        category="database",
+        description="Validate and migrate database constraints. Ensures primary keys, foreign keys, "
+                    "unique constraints, check constraints, and not-null rules are preserved.",
+        priority=75,
+        tags=["database", "constraints", "integrity", "foreign-key", "primary-key"],
+        prerequisites=["db_schema_migration"],
+        agent_instructions=(
+            "1. Extract all constraints from source schema.\n"
+            "2. Compare constraints with destination schema.\n"
+            "3. Generate ALTER TABLE ADD CONSTRAINT statements for missing constraints.\n"
+            "4. Validate foreign key references resolve correctly.\n"
+            "5. Check for orphaned records that would violate new constraints.\n"
+            "6. Order constraint creation after data migration to avoid violations."
+        ),
+    ),
+    MigrationRecipe(
+        id="db_index_optimization",
+        name="Index Optimization",
+        category="database",
+        description="Analyze and migrate database indexes. Identifies missing indexes, redundant indexes, "
+                    "and suggests optimal indexing strategies for the destination database.",
+        priority=70,
+        tags=["database", "indexes", "performance", "optimization"],
+        prerequisites=["db_schema_migration"],
+        agent_instructions=(
+            "1. Extract all indexes from source database.\n"
+            "2. Compare indexes with destination schema.\n"
+            "3. Generate CREATE INDEX statements for missing indexes.\n"
+            "4. Identify redundant or duplicate indexes.\n"
+            "5. Suggest covering indexes for frequent query patterns.\n"
+            "6. Consider destination engine-specific index types (GIN, BRIN, etc.)."
+        ),
+    ),
+    MigrationRecipe(
+        id="db_backup_rollback",
+        name="Backup & Rollback Strategy",
+        category="database",
+        description="Create backup and rollback procedures for the database migration. Includes "
+                    "pre-migration snapshots, incremental backups, and verified restore procedures.",
+        priority=65,
+        tags=["database", "backup", "rollback", "recovery", "safety"],
+        prerequisites=[],
+        agent_instructions=(
+            "1. Design pre-migration backup strategy (full + incremental).\n"
+            "2. Generate backup scripts for source database.\n"
+            "3. Create rollback scripts for each migration phase.\n"
+            "4. Define verification queries to validate backup integrity.\n"
+            "5. Document restore procedures with estimated timelines.\n"
+            "6. Create migration checkpoint markers for partial rollback."
+        ),
+    ),
+    MigrationRecipe(
+        id="db_stored_procedure_migration",
+        name="Stored Procedure & Function Migration",
+        category="database",
+        description="Migrate stored procedures, functions, and triggers between database engines. "
+                    "Handles syntax translation, parameter differences, and procedural logic.",
+        priority=60,
+        tags=["database", "stored-procedures", "functions", "triggers", "plsql"],
+        prerequisites=["db_schema_migration"],
+        agent_instructions=(
+            "1. Extract all stored procedures and functions from source.\n"
+            "2. Translate procedural syntax to destination engine (e.g. PL/SQL -> PL/pgSQL).\n"
+            "3. Convert vendor-specific built-in functions.\n"
+            "4. Migrate triggers with equivalent logic.\n"
+            "5. Handle cursor and exception handling differences.\n"
+            "6. Test migrated procedures with sample inputs."
+        ),
+    ),
+    MigrationRecipe(
+        id="db_view_migration",
+        name="View Migration",
+        category="database",
+        description="Migrate database views between source and destination. Handles view definitions, "
+                    "materialized views, and view dependencies.",
+        priority=55,
+        tags=["database", "views", "materialized-views"],
+        prerequisites=["db_schema_migration"],
+        agent_instructions=(
+            "1. Extract all view definitions from source database.\n"
+            "2. Translate view SQL to destination engine syntax.\n"
+            "3. Resolve view dependencies (views referencing other views).\n"
+            "4. Convert materialized views with refresh strategies.\n"
+            "5. Order view creation to respect dependency chain.\n"
+            "6. Validate view outputs match between source and destination."
+        ),
+    ),
+
+    # -----------------------------------------------------------------------
+    # NoSQL / cross-paradigm database recipes
+    # -----------------------------------------------------------------------
+
+    MigrationRecipe(
+        id="db_nosql_schema_design",
+        name="NoSQL Schema Design & Mapping",
+        category="database",
+        description="Design and map document/collection schemas for NoSQL databases. Handles "
+                    "SQL-to-NoSQL denormalization, embedding vs referencing decisions, "
+                    "and data modeling for MongoDB, Cassandra, DynamoDB, or Couchbase.",
+        priority=88,
+        tags=["database", "nosql", "mongodb", "cassandra", "dynamodb", "couchbase", "schema-design"],
+        prerequisites=[],
+        agent_instructions=(
+            "1. Analyze source relational schema (tables, relationships, join patterns).\n"
+            "2. Identify access patterns and query requirements for target NoSQL engine.\n"
+            "3. Design document/collection schemas with embedding vs referencing trade-offs.\n"
+            "4. Map relational joins to denormalized document structures.\n"
+            "5. Handle one-to-many and many-to-many relationships.\n"
+            "6. Create partition key / sort key design (DynamoDB) or shard key (MongoDB)."
+        ),
+    ),
+    MigrationRecipe(
+        id="db_nosql_data_migration",
+        name="NoSQL Data Migration & ETL",
+        category="database",
+        description="Migrate data between SQL and NoSQL or between NoSQL engines. Handles "
+                    "document transformation, denormalization, batch imports, and data validation.",
+        priority=83,
+        tags=["database", "nosql", "etl", "data-migration", "transformation"],
+        prerequisites=["db_nosql_schema_design"],
+        agent_instructions=(
+            "1. Map source records to target document structures.\n"
+            "2. Generate ETL scripts for bulk data transformation and loading.\n"
+            "3. Handle nested document creation from relational joins.\n"
+            "4. Implement batch processing with configurable chunk sizes.\n"
+            "5. Add data validation and reconciliation queries.\n"
+            "6. Handle binary/LOB data migration between paradigms."
+        ),
+    ),
+    MigrationRecipe(
+        id="db_nosql_index_strategy",
+        name="NoSQL Index & Query Optimization",
+        category="database",
+        description="Design indexes and optimize queries for NoSQL databases. Covers secondary "
+                    "indexes, compound indexes, TTL indexes, and query pattern optimization.",
+        priority=68,
+        tags=["database", "nosql", "indexes", "query-optimization", "performance"],
+        prerequisites=["db_nosql_schema_design"],
+        agent_instructions=(
+            "1. Analyze query patterns and access frequencies.\n"
+            "2. Design secondary indexes for common query patterns.\n"
+            "3. Add compound indexes for multi-field queries.\n"
+            "4. Configure TTL indexes for expiring data.\n"
+            "5. Optimize read/write throughput with partition strategies.\n"
+            "6. Add text/geospatial indexes where applicable."
         ),
     ),
 
@@ -484,6 +693,15 @@ def get_applicable_recipes(
         "structure": ["quality"],
         "error_handling": ["quality"],
         "api_documentation": ["quality"],
+        # Database-mode gap categories
+        "database_tables": ["database"],
+        "database_columns": ["database"],
+        "database_indexes": ["database"],
+        "database_types": ["database"],
+        "database_views": ["database"],
+        "database_constraints": ["database"],
+        "database_collections": ["database"],
+        "database_nosql": ["database"],
     }
 
     # Collect recipe categories that have gaps
