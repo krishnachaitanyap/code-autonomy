@@ -551,6 +551,30 @@ class MigrationProject(Base):
 
 
 # ---------------------------------------------------------------------------
+# CustomMigrationRecipe — user-defined migration recipes (DB-backed)
+# ---------------------------------------------------------------------------
+
+class CustomMigrationRecipe(Base):
+    __tablename__ = "custom_migration_recipes"
+
+    id = Column(String(128), primary_key=True, default=_uuid)
+    name = Column(String(256), nullable=False)
+    category = Column(String(64), nullable=False, default="custom")
+    description = Column(Text, nullable=False, default="")
+    priority = Column(Integer, nullable=False, default=50)
+    tags = Column(JSON, nullable=False, default=list)
+    prerequisites = Column(JSON, nullable=False, default=list)
+    agent_instructions = Column(Text, nullable=False, default="")
+    source_framework = Column(String(64), nullable=False, default="")  # e.g. "Nucleus", "JISI"
+    target_framework = Column(String(64), nullable=False, default="")  # e.g. "Photon"
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+    def __repr__(self) -> str:
+        return f"<CustomMigrationRecipe id={self.id!r} name={self.name!r}>"
+
+
+# ---------------------------------------------------------------------------
 # MigrationRun — tracked migration execution run
 # ---------------------------------------------------------------------------
 

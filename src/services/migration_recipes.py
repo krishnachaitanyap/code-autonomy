@@ -635,20 +635,356 @@ RECIPES: list[MigrationRecipe] = [
             "7. Add structured logging for exceptions with correlation IDs."
         ),
     ),
+
+    # -----------------------------------------------------------------------
+    # Internal framework migration recipes — Nucleus / JISI → Photon
+    # -----------------------------------------------------------------------
+
+    # -----------------------------------------------------------------------
+    # Nucleus (Spring) → Photon (Spring Boot) migration recipes
+    # Nucleus is a custom framework built on top of raw Spring (not Spring Boot).
+    # Photon uses Spring Boot. This is an architectural migration.
+    # -----------------------------------------------------------------------
+
+    MigrationRecipe(
+        id="nucleus_to_photon_spring_boot",
+        name="Nucleus → Photon: Spring to Spring Boot Migration",
+        category="java",
+        description="Migrate from Nucleus (raw Spring framework) to Photon (Spring Boot). This is "
+                    "the foundational step — replaces XML-based Spring configuration with Spring Boot "
+                    "auto-configuration, adds @SpringBootApplication entry point, and migrates "
+                    "web.xml/applicationContext.xml to Spring Boot conventions.",
+        priority=95,
+        tags=["nucleus", "photon", "spring", "spring-boot", "framework-migration"],
+        prerequisites=[],
+        agent_instructions=(
+            "1. Replace Nucleus parent POM with Photon/Spring Boot parent (spring-boot-starter-parent).\n"
+            "2. Create @SpringBootApplication main class (replace web.xml servlet container startup).\n"
+            "3. Convert XML bean definitions (applicationContext.xml) to @Configuration classes.\n"
+            "4. Replace web.xml servlet/filter/listener declarations with Spring Boot auto-config.\n"
+            "5. Migrate WAR packaging to executable JAR (update pom.xml packaging type).\n"
+            "6. Replace Nucleus custom servlet XML (rest-servlet.xml) with @RestController annotations.\n"
+            "7. Add spring-boot-starter-web and remove raw Spring MVC/servlet dependencies.\n"
+            "8. Verify application starts with `mvn spring-boot:run`."
+        ),
+    ),
+    MigrationRecipe(
+        id="nucleus_to_photon_config",
+        name="Nucleus → Photon: XML Config to application.yml",
+        category="config",
+        description="Migrate from Nucleus XML-based configuration and .properties files to Spring Boot "
+                    "application.yml. Converts Spring XML beans, property placeholders, and JNDI "
+                    "lookups to Spring Boot externalized configuration.",
+        priority=90,
+        tags=["nucleus", "photon", "config", "xml", "yml", "properties", "framework-migration"],
+        prerequisites=["nucleus_to_photon_spring_boot"],
+        agent_instructions=(
+            "1. Create application.yml from existing .properties files and XML property-placeholder configs.\n"
+            "2. Convert JNDI datasource lookups to spring.datasource.* properties.\n"
+            "3. Replace PropertyPlaceholderConfigurer XML beans with Spring Boot @Value / @ConfigurationProperties.\n"
+            "4. Migrate environment-specific configs to Spring Boot profiles (application-dev.yml, etc.).\n"
+            "5. Move server settings (port, context-path) from web.xml/server.xml to application.yml.\n"
+            "6. Convert Nucleus-specific property prefixes to Photon/Spring Boot conventions.\n"
+            "7. Remove XML config files that are now redundant."
+        ),
+    ),
+    MigrationRecipe(
+        id="nucleus_to_photon_annotations",
+        name="Nucleus → Photon: Servlet/XML to Annotation-Based Code",
+        category="java",
+        description="Replace Nucleus XML-defined beans, servlet mappings, and interceptors with "
+                    "Spring Boot annotations. Converts XML AOP to @Aspect, XML MVC config to "
+                    "@EnableWebMvc, and custom Nucleus annotations to Spring Boot equivalents.",
+        priority=85,
+        tags=["nucleus", "photon", "annotations", "xml", "servlet", "framework-migration"],
+        prerequisites=["nucleus_to_photon_spring_boot"],
+        agent_instructions=(
+            "1. Convert XML <bean> definitions to @Component / @Service / @Repository annotations.\n"
+            "2. Replace XML <mvc:interceptors> with WebMvcConfigurer.addInterceptors().\n"
+            "3. Convert XML AOP (<aop:config>) to @Aspect / @Around / @Before annotations.\n"
+            "4. Replace Nucleus custom annotations with Spring Boot equivalents.\n"
+            "5. Convert XML security config to @EnableWebSecurity / SecurityFilterChain beans.\n"
+            "6. Migrate XML transaction management to @Transactional annotations.\n"
+            "7. Remove all Nucleus-specific AOP aspects and servlet filters."
+        ),
+    ),
+    MigrationRecipe(
+        id="nucleus_to_photon_dependencies",
+        name="Nucleus → Photon: Dependency Migration",
+        category="dependencies",
+        description="Replace Nucleus internal libraries and raw Spring dependencies with Spring Boot "
+                    "starters. Removes Nucleus SDK, adds spring-boot-starters, and resolves "
+                    "transitive dependency conflicts.",
+        priority=80,
+        tags=["nucleus", "photon", "dependencies", "starters", "framework-migration"],
+        prerequisites=["nucleus_to_photon_spring_boot"],
+        agent_instructions=(
+            "1. Replace raw Spring dependencies (spring-context, spring-web, spring-jdbc) with Spring Boot starters.\n"
+            "2. Remove Nucleus-specific libraries (nucleus-core, nucleus-web, nucleus-common).\n"
+            "3. Add Photon-specific dependencies from reference repo.\n"
+            "4. Replace manual connection pool config (DBCP/C3P0) with Spring Boot HikariCP auto-config.\n"
+            "5. Remove servlet-api dependency (provided by embedded Tomcat in Spring Boot).\n"
+            "6. Replace application server-specific dependencies with Spring Boot embedded server.\n"
+            "7. Run `mvn dependency:tree` to verify clean resolution."
+        ),
+    ),
+    MigrationRecipe(
+        id="nucleus_to_photon_cicd",
+        name="Nucleus → Photon: CI/CD Pipeline Migration",
+        category="cicd",
+        description="Migrate CI/CD pipeline from Nucleus WAR-based deployment to Photon Spring Boot "
+                    "JAR-based deployment. Updates Jenkinsfile/jules.yml build steps, artifact types, "
+                    "and deployment targets.",
+        priority=75,
+        tags=["nucleus", "photon", "cicd", "jenkins", "jules", "pipeline", "framework-migration"],
+        prerequisites=["nucleus_to_photon_spring_boot"],
+        agent_instructions=(
+            "1. Review existing Jenkinsfile/jules.yml pipeline stages and build commands.\n"
+            "2. Update build command from `mvn package -P war` to `mvn package` (JAR).\n"
+            "3. Remove WAR deployment steps (copy to app server, restart Tomcat/WAS).\n"
+            "4. Add Docker build step if reference repo uses containerized deployment.\n"
+            "5. Update artifact upload to publish JAR instead of WAR.\n"
+            "6. Add Spring Boot actuator health check step in deployment verification.\n"
+            "7. Align pipeline stages with reference repo's Jenkinsfile/jules.yml.\n"
+            "8. Update deployment scripts for container/K8s orchestration if applicable."
+        ),
+    ),
+    MigrationRecipe(
+        id="nucleus_to_photon_k8s",
+        name="Nucleus → Photon: Kubernetes Deployment Config",
+        category="k8s",
+        description="Generate Kubernetes deployment configurations for Photon (Spring Boot). Creates "
+                    "Deployment, Service, ConfigMap, Ingress, HPA, and PDB manifests based on "
+                    "the reference repo's K8s patterns.",
+        priority=75,
+        tags=["nucleus", "photon", "k8s", "kubernetes", "deployment", "helm", "framework-migration"],
+        prerequisites=["nucleus_to_photon_config"],
+        agent_instructions=(
+            "1. If source has no K8s configs, generate them from reference repo as template.\n"
+            "2. Create Deployment manifest with Spring Boot JAR container, actuator health probes.\n"
+            "3. Create Service manifest (ClusterIP or LoadBalancer based on reference).\n"
+            "4. Create ConfigMap from application.yml for externalized configuration.\n"
+            "5. Create Ingress manifest if reference repo has one.\n"
+            "6. Add HPA (HorizontalPodAutoscaler) and PDB (PodDisruptionBudget) from reference.\n"
+            "7. Create Dockerfile with multi-stage build: build JAR → run on JRE base image.\n"
+            "8. Add Helm chart if reference repo uses Helm.\n"
+            "9. Set readiness/liveness probes to /actuator/health endpoint."
+        ),
+    ),
+    MigrationRecipe(
+        id="nucleus_to_photon_observability",
+        name="Nucleus → Photon: Observability Migration",
+        category="observability",
+        description="Migrate from Nucleus custom logging/monitoring to Spring Boot Actuator with "
+                    "Micrometer metrics, OpenTelemetry tracing, and structured logging.",
+        priority=65,
+        tags=["nucleus", "photon", "observability", "actuator", "metrics", "framework-migration"],
+        prerequisites=["nucleus_to_photon_dependencies"],
+        agent_instructions=(
+            "1. Add spring-boot-starter-actuator dependency.\n"
+            "2. Replace Nucleus custom health checks with Spring Boot HealthIndicator beans.\n"
+            "3. Add Micrometer + Prometheus registry for metrics (replace any custom metrics).\n"
+            "4. Configure OpenTelemetry tracing (replace Nucleus/custom tracing).\n"
+            "5. Migrate to Spring Boot structured logging (logback-spring.xml with JSON encoder).\n"
+            "6. Expose actuator endpoints: /actuator/health, /actuator/metrics, /actuator/info.\n"
+            "7. Update Grafana dashboards if applicable."
+        ),
+    ),
+
+    # -----------------------------------------------------------------------
+    # JISI (Spring/WAS GWS) → Photon (Spring Boot) migration recipes
+    # JISI is a custom framework on top of Spring with CXF/SOAP/REST via servlet XML.
+    # Photon uses Spring Boot with annotation-based REST.
+    # -----------------------------------------------------------------------
+
+    MigrationRecipe(
+        id="jisi_to_photon_spring_boot",
+        name="JISI → Photon: WAS GWS/Spring to Spring Boot Migration",
+        category="java",
+        description="Migrate from JISI (WAS GWS framework on raw Spring with CXF servlet XML) to "
+                    "Photon (Spring Boot). Replaces CXF REST/SOAP servlet configuration with Spring "
+                    "Boot @RestController, migrates from WAR/EAR to executable JAR.",
+        priority=95,
+        tags=["jisi", "photon", "spring", "spring-boot", "cxf", "was", "framework-migration"],
+        prerequisites=[],
+        agent_instructions=(
+            "1. Replace JISI/WAS GWS parent POM with Photon/Spring Boot parent.\n"
+            "2. Create @SpringBootApplication main class (replace WAS/servlet container startup).\n"
+            "3. Convert rest-servlet.xml / cxf-servlet.xml endpoint declarations to @RestController.\n"
+            "4. Migrate CXF JAX-RS annotations (@Path, @GET, @POST) to Spring MVC (@RequestMapping, @GetMapping).\n"
+            "5. Replace CXF JAX-RS Response objects with Spring ResponseEntity.\n"
+            "6. Convert SOAP endpoints (if any) from CXF XML config to Spring Boot @Endpoint.\n"
+            "7. Migrate WAR/EAR packaging to executable JAR.\n"
+            "8. Remove WAS-specific server.xml / ibm-web-bnd.xml configurations.\n"
+            "9. Verify application starts with `mvn spring-boot:run`."
+        ),
+    ),
+    MigrationRecipe(
+        id="jisi_to_photon_config",
+        name="JISI → Photon: WAS/JNDI Config to application.yml",
+        category="config",
+        description="Migrate from JISI WAS JNDI lookups, XML config, and .properties to Spring Boot "
+                    "application.yml. Converts WAS datasource JNDI, MQ connection factories, and "
+                    "property file patterns to Spring Boot externalized config.",
+        priority=90,
+        tags=["jisi", "photon", "config", "jndi", "was", "yml", "framework-migration"],
+        prerequisites=["jisi_to_photon_spring_boot"],
+        agent_instructions=(
+            "1. Create application.yml from existing .properties and XML property configs.\n"
+            "2. Convert WAS JNDI datasource lookups (java:comp/env/) to spring.datasource.* properties.\n"
+            "3. Replace WAS MQ connection factory JNDI with spring.jms.* or spring.kafka.* config.\n"
+            "4. Migrate JISI environment-specific .properties to Spring Boot profiles.\n"
+            "5. Convert WAS server.xml resource references to application.yml.\n"
+            "6. Remove ibm-web-bnd.xml, ibm-application-bnd.xml JNDI bindings.\n"
+            "7. Add spring.config.import for config server if reference repo uses it."
+        ),
+    ),
+    MigrationRecipe(
+        id="jisi_to_photon_annotations",
+        name="JISI → Photon: CXF/JAX-RS to Spring MVC Annotations",
+        category="java",
+        description="Replace JISI CXF/JAX-RS annotations and XML-configured beans with Spring Boot "
+                    "Spring MVC annotations. Converts @Path to @RequestMapping, migrates filters, "
+                    "and replaces XML-defined interceptors.",
+        priority=85,
+        tags=["jisi", "photon", "annotations", "cxf", "jax-rs", "spring-mvc", "framework-migration"],
+        prerequisites=["jisi_to_photon_spring_boot"],
+        agent_instructions=(
+            "1. Replace JAX-RS @Path with Spring @RequestMapping / @RestController.\n"
+            "2. Replace @GET/@POST/@PUT/@DELETE with @GetMapping/@PostMapping/@PutMapping/@DeleteMapping.\n"
+            "3. Replace @PathParam/@QueryParam with @PathVariable/@RequestParam.\n"
+            "4. Replace @Consumes/@Produces with Spring produces/consumes attributes.\n"
+            "5. Convert CXF interceptors/filters to Spring HandlerInterceptor or Filter beans.\n"
+            "6. Replace javax.ws.rs.core.Response with Spring ResponseEntity.\n"
+            "7. Convert @Provider exception mappers to @ControllerAdvice/@ExceptionHandler.\n"
+            "8. Remove CXF dependencies (cxf-rt-frontend-jaxrs, cxf-rt-transports-http)."
+        ),
+    ),
+    MigrationRecipe(
+        id="jisi_to_photon_dependencies",
+        name="JISI → Photon: Dependency Migration",
+        category="dependencies",
+        description="Replace JISI/WAS GWS libraries and CXF dependencies with Spring Boot starters. "
+                    "Removes WAS-specific JARs, adds Spring Boot auto-configuration starters.",
+        priority=80,
+        tags=["jisi", "photon", "dependencies", "cxf", "was", "starters", "framework-migration"],
+        prerequisites=["jisi_to_photon_spring_boot"],
+        agent_instructions=(
+            "1. Remove JISI/WAS GWS framework dependencies (com.chase.wasgwsframework.*).\n"
+            "2. Remove CXF dependencies (cxf-rt-*, cxf-spring-boot-starter if present).\n"
+            "3. Remove javax.ws.rs (JAX-RS) API dependency.\n"
+            "4. Add spring-boot-starter-web (replaces CXF REST).\n"
+            "5. Add spring-boot-starter-data-jpa (if using JPA, replaces raw Hibernate config).\n"
+            "6. Replace WAS-provided JARs with Spring Boot managed equivalents.\n"
+            "7. Add Photon-specific dependencies from reference repo.\n"
+            "8. Run `mvn dependency:tree` to verify clean resolution."
+        ),
+    ),
+    MigrationRecipe(
+        id="jisi_to_photon_cicd",
+        name="JISI → Photon: CI/CD Pipeline Migration",
+        category="cicd",
+        description="Migrate CI/CD pipeline from JISI WAR/EAR deployment on WAS to Photon Spring Boot "
+                    "containerized deployment. Updates Jenkinsfile/jules.yml for JAR build and K8s deploy.",
+        priority=75,
+        tags=["jisi", "photon", "cicd", "jenkins", "jules", "was", "pipeline", "framework-migration"],
+        prerequisites=["jisi_to_photon_spring_boot"],
+        agent_instructions=(
+            "1. Review existing Jenkinsfile/jules.yml pipeline stages.\n"
+            "2. Remove WAS deployment steps (wsadmin scripts, EAR/WAR install on WAS).\n"
+            "3. Update build command from WAR/EAR packaging to Spring Boot JAR.\n"
+            "4. Add Docker build step if reference repo uses containerized deployment.\n"
+            "5. Add container image push to registry.\n"
+            "6. Replace WAS deployment with K8s deployment (kubectl/helm) if reference uses K8s.\n"
+            "7. Add health check verification using /actuator/health.\n"
+            "8. Align pipeline stages with reference repo's Jenkinsfile/jules.yml."
+        ),
+    ),
+    MigrationRecipe(
+        id="jisi_to_photon_k8s",
+        name="JISI → Photon: Kubernetes Deployment Config",
+        category="k8s",
+        description="Generate Kubernetes deployment configurations for Photon (Spring Boot). Migrates "
+                    "from WAS-based deployment to containerized K8s deployment with proper manifests.",
+        priority=75,
+        tags=["jisi", "photon", "k8s", "kubernetes", "was", "deployment", "framework-migration"],
+        prerequisites=["jisi_to_photon_config"],
+        agent_instructions=(
+            "1. If source has no K8s configs, generate them from reference repo as template.\n"
+            "2. Create Deployment manifest with Spring Boot JAR container, actuator health probes.\n"
+            "3. Create Service manifest matching reference repo pattern.\n"
+            "4. Create ConfigMap from application.yml for externalized config.\n"
+            "5. Create Ingress manifest if reference repo has one.\n"
+            "6. Add HPA and PDB from reference repo patterns.\n"
+            "7. Create Dockerfile: multi-stage build → JRE base image → COPY JAR → ENTRYPOINT.\n"
+            "8. Add Helm chart if reference repo uses Helm.\n"
+            "9. Set probes to /actuator/health, replace any WAS health check patterns."
+        ),
+    ),
+    MigrationRecipe(
+        id="jisi_to_photon_observability",
+        name="JISI → Photon: Observability Migration",
+        category="observability",
+        description="Migrate from JISI/WAS custom monitoring to Spring Boot Actuator with "
+                    "Micrometer metrics, OpenTelemetry tracing, and structured JSON logging.",
+        priority=65,
+        tags=["jisi", "photon", "observability", "actuator", "was", "metrics", "framework-migration"],
+        prerequisites=["jisi_to_photon_dependencies"],
+        agent_instructions=(
+            "1. Add spring-boot-starter-actuator dependency.\n"
+            "2. Replace WAS PMI (Performance Monitoring Infrastructure) with Micrometer metrics.\n"
+            "3. Replace JISI custom health checks with Spring Boot HealthIndicator beans.\n"
+            "4. Configure OpenTelemetry tracing (replace WAS request metrics).\n"
+            "5. Migrate to Spring Boot structured logging (logback-spring.xml with JSON).\n"
+            "6. Expose actuator endpoints: /actuator/health, /actuator/metrics, /actuator/info.\n"
+            "7. Remove WAS-specific monitoring configuration."
+        ),
+    ),
 ]
 
 # Index for O(1) lookup
 _RECIPE_MAP: dict[str, MigrationRecipe] = {r.id: r for r in RECIPES}
 
 
+def _load_custom_recipes() -> list[MigrationRecipe]:
+    """Load custom recipes from database and convert to MigrationRecipe objects."""
+    try:
+        from src.data.db import get_session
+        from src.data.models import CustomMigrationRecipe
+        with get_session() as db:
+            customs = db.query(CustomMigrationRecipe).all()
+            return [
+                MigrationRecipe(
+                    id=c.id,
+                    name=c.name,
+                    category=c.category,
+                    description=c.description or "",
+                    priority=c.priority,
+                    tags=c.tags or [],
+                    prerequisites=c.prerequisites or [],
+                    agent_instructions=c.agent_instructions or "",
+                )
+                for c in customs
+            ]
+    except Exception:
+        return []
+
+
 def get_recipe(recipe_id: str) -> Optional[MigrationRecipe]:
-    """Get a single recipe by ID."""
-    return _RECIPE_MAP.get(recipe_id)
+    """Get a single recipe by ID (built-in or custom)."""
+    builtin = _RECIPE_MAP.get(recipe_id)
+    if builtin:
+        return builtin
+    # Check custom recipes
+    for r in _load_custom_recipes():
+        if r.id == recipe_id:
+            return r
+    return None
 
 
 def get_all_recipes() -> list[MigrationRecipe]:
-    """Return all available recipes."""
-    return list(RECIPES)
+    """Return all available recipes (built-in + custom)."""
+    return list(RECIPES) + _load_custom_recipes()
 
 
 def get_recipes_by_category() -> dict[str, list[MigrationRecipe]]:
@@ -716,11 +1052,24 @@ def get_applicable_recipes(
             for rc in _gap_to_recipe.get(area, []):
                 recipe_categories.add(rc)
 
-    if not recipe_categories:
-        return list(RECIPES)  # can't determine — return all
+    # Detect source framework from profile for framework-specific recipe matching
+    source_frameworks = source_profile.get("technologies", {}).get("framework", [])
 
-    for recipe in RECIPES:
+    if not recipe_categories and not source_frameworks:
+        return get_all_recipes()  # can't determine — return all
+
+    all_recipes = get_all_recipes()
+    for recipe in all_recipes:
+        # Match by gap category
         if recipe.category in recipe_categories:
             applicable.append(recipe)
+            continue
+        # Match framework-specific recipes by tag (e.g. tag "nucleus" + source has "Nucleus")
+        if source_frameworks:
+            for fw in source_frameworks:
+                fw_lower = fw.lower().split()[0]  # "JISI (WAS GWS)" → "jisi"
+                if fw_lower in [t.lower() for t in recipe.tags]:
+                    applicable.append(recipe)
+                    break
 
     return applicable

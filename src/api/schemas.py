@@ -563,3 +563,41 @@ class CapacityTargetUpdate(BaseModel):
 
 class RecipeSelectionRequest(BaseModel):
     recipe_ids: list[str]
+
+
+class CustomRecipeCreate(BaseModel):
+    name: str
+    category: str = "custom"
+    description: str = ""
+    priority: int = 50
+    tags: list[str] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list)
+    agent_instructions: str = ""
+    source_framework: str = ""
+    target_framework: str = ""
+
+
+class CustomRecipeUpdate(BaseModel):
+    name: str | None = None
+    category: str | None = None
+    description: str | None = None
+    priority: int | None = None
+    tags: list[str] | None = None
+    prerequisites: list[str] | None = None
+    agent_instructions: str | None = None
+    source_framework: str | None = None
+    target_framework: str | None = None
+
+
+class CustomRecipeResponse(BaseModel):
+    id: str
+    name: str
+    category: str
+    description: str
+    priority: int
+    tags: list[str] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list)
+    agent_instructions: str = ""
+    source_framework: str = ""
+    target_framework: str = ""
+    is_custom: bool = True
