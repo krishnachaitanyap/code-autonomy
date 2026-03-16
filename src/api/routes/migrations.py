@@ -172,7 +172,7 @@ async def list_recipes():
     """List all available migration recipes (built-in + custom)."""
     from src.services.migration_recipes import get_all_recipes
     from src.data.models import CustomMigrationRecipe
-    from src.data.db import get_session
+    from src.data.database import get_session
 
     # Built-in recipes
     builtin = get_all_recipes()
@@ -212,7 +212,7 @@ async def list_recipes():
 async def create_custom_recipe(data: CustomRecipeCreate):
     """Create a custom migration recipe."""
     from src.data.models import CustomMigrationRecipe
-    from src.data.db import get_session
+    from src.data.database import get_session
 
     recipe = CustomMigrationRecipe(
         name=data.name,
@@ -247,7 +247,7 @@ async def create_custom_recipe(data: CustomRecipeCreate):
 async def update_custom_recipe(recipe_id: str, data: CustomRecipeUpdate):
     """Update a custom migration recipe."""
     from src.data.models import CustomMigrationRecipe
-    from src.data.db import get_session
+    from src.data.database import get_session
 
     with get_session() as db:
         recipe = db.get(CustomMigrationRecipe, recipe_id)
@@ -275,7 +275,7 @@ async def update_custom_recipe(recipe_id: str, data: CustomRecipeUpdate):
 async def delete_custom_recipe(recipe_id: str):
     """Delete a custom migration recipe."""
     from src.data.models import CustomMigrationRecipe
-    from src.data.db import get_session
+    from src.data.database import get_session
 
     with get_session() as db:
         recipe = db.get(CustomMigrationRecipe, recipe_id)
