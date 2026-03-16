@@ -36,6 +36,25 @@ export default function MigrationProjectDetail() {
   const [generatingRoadmap, setGeneratingRoadmap] = useState(false);
   const [executingStep, setExecutingStep] = useState(false);
 
+  // Execution settings state
+  const [targetRepoUrl, setTargetRepoUrl] = useState('');
+  const [targetBranch, setTargetBranch] = useState('');
+
+  // Custom recipe form state
+  const [showRecipeForm, setShowRecipeForm] = useState(false);
+  const [creatingRecipe, setCreatingRecipe] = useState(false);
+  const [recipeForm, setRecipeForm] = useState({
+    name: '',
+    category: 'custom',
+    description: '',
+    priority: 50,
+    tags: '',
+    prerequisites: '',
+    agent_instructions: '',
+    source_framework: '',
+    target_framework: '',
+  });
+
   const loadProject = async () => {
     try {
       const p = await migrations.getProject(projectId);
@@ -76,6 +95,14 @@ export default function MigrationProjectDetail() {
     loadRuns();
   }, [projectId]);
 
+  // Initialize execution settings from project
+  useEffect(() => {
+    if (project) {
+      setTargetRepoUrl(project.source_repo_url || '');
+      setTargetBranch(`migration/${project.name.toLowerCase().replace(/\s+/g, '-')}`);
+    }
+  }, [project?.id]);
+
   // Poll for updates when project is analyzing or runs are in progress
   useEffect(() => {
     const shouldPoll = project?.status === 'analyzing' ||
@@ -108,6 +135,30 @@ export default function MigrationProjectDetail() {
     }
   };
 
+  const handleCreateRecipe = async () => {
+    setCreatingRecipe(true);
+    try {
+      await migrations.createCustomRecipe({
+        name: recipeForm.name,
+        category: recipeForm.category,
+        description: recipeForm.description,
+        priority: recipeForm.priority,
+        tags: recipeForm.tags.split(',').map(t => t.trim()).filter(Boolean),
+        prerequisites: recipeForm.prerequisites.split(',').map(t => t.trim()).filter(Boolean),
+        agent_instructions: recipeForm.agent_instructions,
+        source_framework: recipeForm.source_framework,
+        target_framework: recipeForm.target_framework,
+      });
+      setShowRecipeForm(false);
+      setRecipeForm({ name: '', category: 'custom', description: '', priority: 50, tags: '', prerequisites: '', agent_instructions: '', source_framework: '', target_framework: '' });
+      await loadRecipes();
+    } catch (err: any) {
+      setError(err.message || 'Failed to create recipe');
+    } finally {
+      setCreatingRecipe(false);
+    }
+  };
+
   const handleSaveCapacity = async (target: Record<string, any>) => {
     setSavingCapacity(true);
     try {
@@ -137,7 +188,7 @@ export default function MigrationProjectDetail() {
     if (runs.length === 0) return;
     setExecutingStep(true);
     try {
-      await migrations.executeStep(runs[0].id, stepIndex);
+      await migrations.executeStep(runs[0].id, stepIndex, targetBranch, targetRepoUrl);
       await loadRuns();
     } catch (err: any) {
       setError(err.message);
@@ -149,7 +200,7 @@ export default function MigrationProjectDetail() {
   const handleExecuteAll = async () => {
     if (runs.length === 0) return;
     try {
-      await migrations.executeRun(runs[0].id);
+      await migrations.executeRun(runs[0].id, targetBranch, targetRepoUrl);
       await loadRuns();
     } catch (err: any) {
       setError(err.message);
@@ -338,6 +389,12 @@ export default function MigrationProjectDetail() {
                 </p>
                 <div className="flex items-center gap-2">
                   <button
+                    onClick={() => setShowRecipeForm(!showRecipeForm)}
+                    className="px-3 py-1.5 text-xs text-emerald-600 border border-emerald-200 rounded-md hover:bg-emerald-50"
+                  >
+                    {showRecipeForm ? 'Cancel' : '+ Create Recipe'}
+                  </button>
+                  <button
                     onClick={() => setSelectedRecipeIds(recommendedRecipeIds)}
                     className="px-3 py-1.5 text-xs text-indigo-600 border border-indigo-200 rounded-md hover:bg-indigo-50"
                   >
@@ -352,6 +409,127 @@ export default function MigrationProjectDetail() {
                   </button>
                 </div>
               </div>
+
+              {/* Custom Recipe Form */}
+              {showRecipeForm && (
+                <div className="mb-6 bg-emerald-50 border border-emerald-200 rounded-lg p-4">
+                  <h4 className="text-sm font-semibold text-gray-900 mb-3">Create Custom Migration Recipe</h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Recipe Name *</label>
+                      <input
+                        type="text"
+                        value={recipeForm.name}
+                        onChange={e => setRecipeForm({ ...recipeForm, name: e.target.value })}
+                        placeholder="e.g. Nucleus → Photon: Config Server Migration"
+                        className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
+                      <select
+                        value={recipeForm.category}
+                        onChange={e => setRecipeForm({ ...recipeForm, category: e.target.value })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
+                      >
+                        <option value="custom">Custom</option>
+                        <option value="java">Java</option>
+                        <option value="dependencies">Dependencies</option>
+                        <option value="config">Config</option>
+                        <option value="docker">Docker</option>
+                        <option value="k8s">Kubernetes</option>
+                        <option value="cicd">CI/CD</option>
+                        <option value="observability">Observability</option>
+                        <option value="security">Security</option>
+                        <option value="testing">Testing</option>
+                        <option value="quality">Quality</option>
+                        <option value="database">Database</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Source Framework</label>
+                      <input
+                        type="text"
+                        value={recipeForm.source_framework}
+                        onChange={e => setRecipeForm({ ...recipeForm, source_framework: e.target.value })}
+                        placeholder="e.g. Nucleus, JISI"
+                        className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Target Framework</label>
+                      <input
+                        type="text"
+                        value={recipeForm.target_framework}
+                        onChange={e => setRecipeForm({ ...recipeForm, target_framework: e.target.value })}
+                        placeholder="e.g. Photon"
+                        className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Priority (0-100)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={recipeForm.priority}
+                        onChange={e => setRecipeForm({ ...recipeForm, priority: parseInt(e.target.value) || 50 })}
+                        className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Tags (comma-separated)</label>
+                      <input
+                        type="text"
+                        value={recipeForm.tags}
+                        onChange={e => setRecipeForm({ ...recipeForm, tags: e.target.value })}
+                        placeholder="nucleus, photon, config, framework-migration"
+                        className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
+                      <textarea
+                        value={recipeForm.description}
+                        onChange={e => setRecipeForm({ ...recipeForm, description: e.target.value })}
+                        placeholder="What this recipe migrates and why..."
+                        rows={2}
+                        className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Agent Instructions (step-by-step)</label>
+                      <textarea
+                        value={recipeForm.agent_instructions}
+                        onChange={e => setRecipeForm({ ...recipeForm, agent_instructions: e.target.value })}
+                        placeholder={"1. Find all Nucleus config properties...\n2. Replace with Photon equivalents...\n3. Update application.yml..."}
+                        rows={5}
+                        className="w-full px-3 py-2 border border-gray-300 rounded text-sm font-mono"
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Prerequisites (recipe IDs, comma-separated)</label>
+                      <input
+                        type="text"
+                        value={recipeForm.prerequisites}
+                        onChange={e => setRecipeForm({ ...recipeForm, prerequisites: e.target.value })}
+                        placeholder="e.g. nucleus_to_photon_parent_pom"
+                        className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
+                      />
+                    </div>
+                  </div>
+                  <div className="mt-3 flex justify-end">
+                    <button
+                      onClick={handleCreateRecipe}
+                      disabled={!recipeForm.name || creatingRecipe}
+                      className="px-4 py-2 bg-emerald-600 text-white text-sm rounded-md hover:bg-emerald-700 disabled:opacity-50"
+                    >
+                      {creatingRecipe ? 'Creating...' : 'Create Recipe'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <RecipeGrid
                 recipes={allRecipes}
                 selectedIds={selectedRecipeIds}
@@ -398,6 +576,35 @@ export default function MigrationProjectDetail() {
                   )}
                 </div>
               </div>
+
+              {/* Execution Settings */}
+              {latestRun && (latestRun.status === 'queued' || latestRun.status === 'paused') && (
+                <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                  <h4 className="text-sm font-semibold text-blue-900 mb-2">
+                    Execution Settings &mdash; Where should changes be applied?
+                  </h4>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs text-gray-600 mb-1">Repository URL</label>
+                      <input
+                        value={targetRepoUrl}
+                        onChange={e => setTargetRepoUrl(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-md text-sm"
+                        placeholder="https://bitbucket.org/..."
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-600 mb-1">Target Branch</label>
+                      <input
+                        value={targetBranch}
+                        onChange={e => setTargetBranch(e.target.value)}
+                        className="w-full px-3 py-2 border rounded-md text-sm"
+                        placeholder="migration/my-app"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Progress bar */}
               {latestRun && latestRun.status === 'running' && (

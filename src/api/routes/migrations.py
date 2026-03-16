@@ -12,6 +12,9 @@ from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconn
 
 from src.api.schemas import (
     CapacityTargetUpdate,
+    CustomRecipeCreate,
+    CustomRecipeResponse,
+    CustomRecipeUpdate,
     MigrationProjectCreate,
     MigrationProjectListResponse,
     MigrationProjectResponse,
@@ -166,10 +169,14 @@ async def update_capacity_target(project_id: str, data: CapacityTargetUpdate):
 
 @router.get("/recipes", response_model=list[MigrationRecipeResponse])
 async def list_recipes():
-    """List all available migration recipes."""
+    """List all available migration recipes (built-in + custom)."""
     from src.services.migration_recipes import get_all_recipes
-    recipes = get_all_recipes()
-    return [
+    from src.data.models import CustomMigrationRecipe
+    from src.data.db import get_session
+
+    # Built-in recipes
+    builtin = get_all_recipes()
+    results = [
         MigrationRecipeResponse(
             id=r.id,
             name=r.name,
@@ -180,8 +187,101 @@ async def list_recipes():
             prerequisites=r.prerequisites,
             agent_instructions=r.agent_instructions,
         )
-        for r in recipes
+        for r in builtin
     ]
+
+    # Custom recipes from DB
+    with get_session() as db:
+        customs = db.query(CustomMigrationRecipe).all()
+        for c in customs:
+            results.append(MigrationRecipeResponse(
+                id=c.id,
+                name=c.name,
+                category=c.category,
+                description=c.description,
+                priority=c.priority,
+                tags=c.tags or [],
+                prerequisites=c.prerequisites or [],
+                agent_instructions=c.agent_instructions or "",
+            ))
+
+    return results
+
+
+@router.post("/recipes/custom", response_model=CustomRecipeResponse)
+async def create_custom_recipe(data: CustomRecipeCreate):
+    """Create a custom migration recipe."""
+    from src.data.models import CustomMigrationRecipe
+    from src.data.db import get_session
+
+    recipe = CustomMigrationRecipe(
+        name=data.name,
+        category=data.category,
+        description=data.description,
+        priority=data.priority,
+        tags=data.tags,
+        prerequisites=data.prerequisites,
+        agent_instructions=data.agent_instructions,
+        source_framework=data.source_framework,
+        target_framework=data.target_framework,
+    )
+    with get_session() as db:
+        db.add(recipe)
+        db.flush()
+        db.refresh(recipe)
+        return CustomRecipeResponse(
+            id=recipe.id,
+            name=recipe.name,
+            category=recipe.category,
+            description=recipe.description,
+            priority=recipe.priority,
+            tags=recipe.tags or [],
+            prerequisites=recipe.prerequisites or [],
+            agent_instructions=recipe.agent_instructions or "",
+            source_framework=recipe.source_framework or "",
+            target_framework=recipe.target_framework or "",
+        )
+
+
+@router.put("/recipes/custom/{recipe_id}", response_model=CustomRecipeResponse)
+async def update_custom_recipe(recipe_id: str, data: CustomRecipeUpdate):
+    """Update a custom migration recipe."""
+    from src.data.models import CustomMigrationRecipe
+    from src.data.db import get_session
+
+    with get_session() as db:
+        recipe = db.get(CustomMigrationRecipe, recipe_id)
+        if not recipe:
+            raise HTTPException(status_code=404, detail="Custom recipe not found")
+        for field, value in data.model_dump(exclude_none=True).items():
+            setattr(recipe, field, value)
+        db.flush()
+        db.refresh(recipe)
+        return CustomRecipeResponse(
+            id=recipe.id,
+            name=recipe.name,
+            category=recipe.category,
+            description=recipe.description,
+            priority=recipe.priority,
+            tags=recipe.tags or [],
+            prerequisites=recipe.prerequisites or [],
+            agent_instructions=recipe.agent_instructions or "",
+            source_framework=recipe.source_framework or "",
+            target_framework=recipe.target_framework or "",
+        )
+
+
+@router.delete("/recipes/custom/{recipe_id}", status_code=204)
+async def delete_custom_recipe(recipe_id: str):
+    """Delete a custom migration recipe."""
+    from src.data.models import CustomMigrationRecipe
+    from src.data.db import get_session
+
+    with get_session() as db:
+        recipe = db.get(CustomMigrationRecipe, recipe_id)
+        if not recipe:
+            raise HTTPException(status_code=404, detail="Custom recipe not found")
+        db.delete(recipe)
 
 
 @router.get("/projects/{project_id}/recipes", response_model=list[MigrationRecipeResponse])
@@ -243,13 +343,21 @@ async def get_run(run_id: str):
 
 
 @router.post("/runs/{run_id}/execute", response_model=MigrationRunResponse)
-async def execute_run(run_id: str):
+async def execute_run(
+    run_id: str,
+    target_branch: str = Query(""),
+    target_repo_url: str = Query(""),
+):
     """Execute all migration steps (Phase 3)."""
     run = _service.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Migration run not found")
     if run.status not in ("queued", "paused"):
         raise HTTPException(status_code=400, detail=f"Run is not executable (status={run.status})")
+
+    # Store target info in run artifacts before executing
+    if target_branch or target_repo_url:
+        _service.update_run_target(run_id, target_repo_url, target_branch)
 
     try:
         from src.services.config_service import ConfigService
@@ -266,11 +374,20 @@ async def execute_run(run_id: str):
 
 
 @router.post("/runs/{run_id}/execute-step", response_model=MigrationRunResponse)
-async def execute_single_step(run_id: str, step_index: int = Query(...)):
+async def execute_single_step(
+    run_id: str,
+    step_index: int = Query(...),
+    target_branch: str = Query(""),
+    target_repo_url: str = Query(""),
+):
     """Execute a single migration step (Phase 3)."""
     run = _service.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Migration run not found")
+
+    # Store target info in run artifacts before executing
+    if target_branch or target_repo_url:
+        _service.update_run_target(run_id, target_repo_url, target_branch)
 
     try:
         from src.services.config_service import ConfigService

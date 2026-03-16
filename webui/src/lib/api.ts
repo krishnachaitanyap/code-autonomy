@@ -802,6 +802,22 @@ export const migrations = {
       method: 'PUT',
       body: JSON.stringify({ recipe_ids }),
     }),
+  createCustomRecipe: (data: {
+    name: string;
+    category?: string;
+    description?: string;
+    priority?: number;
+    tags?: string[];
+    prerequisites?: string[];
+    agent_instructions?: string;
+    source_framework?: string;
+    target_framework?: string;
+  }) => request<MigrationRecipe>('/migrations/recipes/custom', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
+  deleteCustomRecipe: (recipeId: string) =>
+    request<void>(`/migrations/recipes/custom/${recipeId}`, { method: 'DELETE' }),
 
   // Roadmap
   generateRoadmap: (projectId: string) =>
@@ -817,12 +833,19 @@ export const migrations = {
     return request<{ runs: MigrationRun[]; total: number }>(`/migrations/runs${query}`);
   },
   getRun: (id: string) => request<MigrationRun>(`/migrations/runs/${id}`),
-  executeRun: (id: string) =>
-    request<MigrationRun>(`/migrations/runs/${id}/execute`, { method: 'POST' }),
-  executeStep: (runId: string, stepIndex: number) =>
-    request<MigrationRun>(`/migrations/runs/${runId}/execute-step?step_index=${stepIndex}`, {
-      method: 'POST',
-    }),
+  executeRun: (id: string, targetBranch?: string, targetRepoUrl?: string) => {
+    const params = new URLSearchParams();
+    if (targetBranch) params.set('target_branch', targetBranch);
+    if (targetRepoUrl) params.set('target_repo_url', targetRepoUrl);
+    const qs = params.toString() ? `?${params}` : '';
+    return request<MigrationRun>(`/migrations/runs/${id}/execute${qs}`, { method: 'POST' });
+  },
+  executeStep: (runId: string, stepIndex: number, targetBranch?: string, targetRepoUrl?: string) => {
+    const params = new URLSearchParams({ step_index: String(stepIndex) });
+    if (targetBranch) params.set('target_branch', targetBranch);
+    if (targetRepoUrl) params.set('target_repo_url', targetRepoUrl);
+    return request<MigrationRun>(`/migrations/runs/${runId}/execute-step?${params}`, { method: 'POST' });
+  },
   cancelRun: (id: string) =>
     request<{ status: string }>(`/migrations/runs/${id}/cancel`, { method: 'POST' }),
 

@@ -328,6 +328,8 @@ class MigrationService:
             "k8s_gaps": [],
             "docker_gaps": [],
             "config_gaps": [],
+            "cicd_gaps": [],
+            "framework_migration": {},
             "summary": {},
         }
 
@@ -419,6 +421,56 @@ class MigrationService:
             gaps["categories_with_gaps"].append("config")
             gaps["config_gaps"] = config_gaps
 
+        # CI/CD gaps: pipelines in reference not in source
+        src_cicd = {p.get("type", ""): p for p in (source.get("cicd_pipelines") or [])}
+        ref_cicd = {p.get("type", ""): p for p in (reference.get("cicd_pipelines") or [])}
+
+        cicd_gaps = []
+        for cicd_type, ref_pipeline in ref_cicd.items():
+            if cicd_type not in src_cicd:
+                cicd_gaps.append({
+                    "type": cicd_type,
+                    "status": "missing",
+                    "reference_file": ref_pipeline.get("file", ""),
+                    "reference_stages": ref_pipeline.get("stages", []),
+                })
+            else:
+                src_pipeline = src_cicd[cicd_type]
+                ref_stages = set(ref_pipeline.get("stages", []))
+                src_stages = set(src_pipeline.get("stages", []))
+                missing_stages = ref_stages - src_stages
+                if missing_stages:
+                    cicd_gaps.append({
+                        "type": cicd_type,
+                        "status": "missing_stages",
+                        "missing_stages": sorted(missing_stages),
+                        "source_file": src_pipeline.get("file", ""),
+                        "reference_file": ref_pipeline.get("file", ""),
+                    })
+        if cicd_gaps:
+            gaps["categories_with_gaps"].append("cicd")
+            gaps["cicd_gaps"] = cicd_gaps
+
+        # Framework migration detection: detect source/reference frameworks
+        src_frameworks = (source.get("technologies") or {}).get("framework", [])
+        ref_frameworks = (reference.get("technologies") or {}).get("framework", [])
+        src_parent = (source.get("technologies") or {}).get("parent_pom")
+        ref_parent = (reference.get("technologies") or {}).get("parent_pom")
+
+        if src_frameworks or ref_frameworks:
+            gaps["framework_migration"] = {
+                "source_framework": src_frameworks[0] if src_frameworks else "Unknown",
+                "target_framework": ref_frameworks[0] if ref_frameworks else "Unknown",
+                "source_parent_pom": src_parent,
+                "target_parent_pom": ref_parent,
+            }
+            # If different frameworks detected, add to gap categories
+            src_fw = src_frameworks[0] if src_frameworks else ""
+            ref_fw = ref_frameworks[0] if ref_frameworks else ""
+            if src_fw and ref_fw and src_fw != ref_fw:
+                if "technology" not in gaps["categories_with_gaps"]:
+                    gaps["categories_with_gaps"].append("technology")
+
         # Summary
         gaps["summary"] = {
             "total_gaps": (
@@ -426,12 +478,15 @@ class MigrationService:
                 + len(gaps["dependency_gaps"])
                 + len(gaps["k8s_gaps"])
                 + len(gaps["config_gaps"])
+                + len(gaps["cicd_gaps"])
             ),
             "technology_gap_count": len(gaps["technology_gaps"]),
             "dependency_gap_count": len(gaps["dependency_gaps"]),
             "k8s_gap_count": len(gaps["k8s_gaps"]),
             "config_gap_count": len(gaps["config_gaps"]),
+            "cicd_gap_count": len(gaps["cicd_gaps"]),
             "categories_affected": len(gaps["categories_with_gaps"]),
+            "framework_migration": gaps.get("framework_migration", {}),
         }
 
         return gaps
@@ -2020,17 +2075,108 @@ class MigrationService:
             })
 
         try:
-            # Phase 3: Here we would call generate_changes_with_agent()
-            # For now, mark as pending (not executed)
-            step["status"] = "pending"
-            step["result_summary"] = "Execution not yet implemented (Phase 3)"
+            # 1. Load project from DB (run.project relationship)
+            project = run.project
+
+            # 2. Get target repo/branch from run.artifacts (set by API before execution)
+            target_repo_url = (run.artifacts or {}).get("target_repo_url", project.source_repo_url)
+            target_branch = (run.artifacts or {}).get("target_branch", "migration/" + _uuid())
+
+            # 3. Resolve repo path (clone if needed)
+            repo_path = self._resolve_repo_path(
+                project.source_local_path, target_repo_url,
+                project.source_branch, project.repo_id, config
+            )
+
+            # 4. Checkout target branch (create if needed)
+            from src.platform.git_ops import checkout_branch
+            checkout_branch(repo_path, target_branch, create=True)
+
+            # 5. Build consciousness + code index for understanding the repo
+            from src.consciousness.core import build_or_load_consciousness
+            from src.code_index.storage import build_or_load_code_index
+            from src.agent.knowledge import load_repo_knowledge
+            from src.code.executor import detect_build_tool
+
+            consciousness = build_or_load_consciousness(repo_path, config or {}, repo_url=target_repo_url)
+            code_index = build_or_load_code_index(repo_path, config or {}, repo_url=target_repo_url, consciousness=consciousness)
+            repo_knowledge = load_repo_knowledge(repo_path)
+            build_tool = detect_build_tool(repo_path)
+
+            # 6. Build requirements from recipe instructions + gap context
+            recipe_instructions = step.get("agent_instructions", step.get("description", ""))
+            ref_profile = project.reference_profile or {}
+            gap_analysis = project.gap_analysis or {}
+
+            requirements = (
+                f"## Migration Task: {step.get('title', '')}\n\n"
+                f"### Instructions\n{recipe_instructions}\n\n"
+                f"### Reference Architecture\n"
+                f"Technologies: {ref_profile.get('technologies', [])}\n"
+                f"Config sources: {ref_profile.get('config_sources', [])}\n\n"
+                f"### Gap Context\n"
+                f"Technology gaps: {gap_analysis.get('technology_gaps', [])}\n"
+                f"Framework migration: {gap_analysis.get('framework_migration', {})}\n\n"
+                f"Apply changes to this repository. Do NOT create placeholder or stub files."
+            )
+
+            # 7. Call AI agent
+            from src.agent.analyzer import generate_changes_with_agent
+            ai_cfg = (config or {}).get("ai", {})
+            agent_config = (config or {}).get("agent", {})
+
+            result = generate_changes_with_agent(
+                requirements=requirements,
+                repo_path=repo_path,
+                llm_config=ai_cfg,
+                consciousness=consciousness,
+                agent_config=agent_config,
+                config=config,
+                repo_url=target_repo_url,
+                repo_knowledge=repo_knowledge,
+                code_index=code_index,
+                build_tool=build_tool,
+            )
+
+            # 8. Update step with results
+            step["status"] = "completed" if result.success else "failed"
+            step["result_summary"] = result.summary
+            step["files_affected"] = result.files_changed
             step["completed_at"] = _utcnow().isoformat()
+
+            # 9. Commit + push if files were changed
+            if result.files_changed:
+                from src.platform.git_ops import stage_and_commit, push_branch
+                commit_msg = f"migration: {step.get('title', 'step ' + str(step_index))}"
+                stage_and_commit(repo_path, commit_msg)
+                try:
+                    push_branch(repo_path, target_branch)
+                except Exception as push_err:
+                    logger.warning("Push failed (may need auth): %s", push_err)
+                    step["result_summary"] += f"\n(Push failed: {push_err})"
+
+            # 10. Track token usage
+            if result.usage_stats:
+                run.total_tokens_used = (run.total_tokens_used or 0) + result.usage_stats.total_tokens
 
         except Exception as exc:
             step["status"] = "failed"
             step["error"] = str(exc)
             step["completed_at"] = _utcnow().isoformat()
             logger.error("Migration step %d failed: %s", step_index, exc)
+
+    def update_run_target(self, run_id: str, target_repo_url: str, target_branch: str) -> None:
+        """Store target repo URL and branch in run artifacts for execution."""
+        with get_session() as db:
+            run = db.get(MigrationRun, run_id)
+            if run:
+                artifacts = run.artifacts or {}
+                if target_repo_url:
+                    artifacts["target_repo_url"] = target_repo_url
+                if target_branch:
+                    artifacts["target_branch"] = target_branch
+                run.artifacts = artifacts
+                db.flush()
 
     # ------------------------------------------------------------------
     # Stats
