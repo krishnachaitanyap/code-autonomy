@@ -50,6 +50,9 @@ def build_recipe_context(recipe_ids: list[str]) -> str:
                         sections.append(f"Goal: {tool['goal']}")
                     if tool.get("agent_instructions"):
                         sections.append(f"Instructions: {tool['agent_instructions']}")
+                    if tool.get("resolved_model"):
+                        rm = tool["resolved_model"]
+                        sections.append(f"Model: {rm['label']} ({rm['provider']}/{rm['model']})")
                     sections.append("")  # blank line between tools
 
         sections.append("")  # blank line between recipes
@@ -112,7 +115,7 @@ def _load_recipes(recipe_ids: list[str]) -> list[dict]:
 
 
 def _load_tools(tool_ids: list[str]) -> list[dict]:
-    """Load CustomTool records by ID."""
+    """Load CustomTool records by ID, resolving model config at runtime."""
     tools: list[dict] = []
     try:
         from src.services.tools_service import ToolsService
@@ -121,12 +124,21 @@ def _load_tools(tool_ids: list[str]) -> list[dict]:
         for tool_id in tool_ids:
             tool = svc.get_tool(tool_id)
             if tool:
-                tools.append({
+                entry: dict = {
                     "name": tool.name,
                     "tool_type": tool.tool_type or "agent",
                     "goal": tool.goal or "",
                     "agent_instructions": tool.agent_instructions or "",
-                })
+                }
+                # Resolve model from linked ModelConfig (always current)
+                if tool.model_config_id and tool.model_config:
+                    mc = tool.model_config
+                    entry["resolved_model"] = {
+                        "label": mc.label,
+                        "provider": mc.provider,
+                        "model": mc.model,
+                    }
+                tools.append(entry)
             else:
                 logger.warning("Tool not found: %s", tool_id)
     except Exception as exc:

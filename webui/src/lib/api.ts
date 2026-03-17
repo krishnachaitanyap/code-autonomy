@@ -719,6 +719,13 @@ export const testing = {
 // Custom Tools — user-defined agent tools for migration, chat, testing
 // ---------------------------------------------------------------------------
 
+export interface ResolvedModelInfo {
+  id: string;
+  label: string;
+  provider: string;
+  model: string;
+}
+
 export interface CustomTool {
   id: string;
   name: string;
@@ -735,6 +742,8 @@ export interface CustomTool {
   prerequisites: string[];
   max_turns: number;
   model: string;
+  model_config_id: string | null;
+  resolved_model: ResolvedModelInfo | null;
   timeout_seconds: number;
   is_active: boolean;
   created_at: string;
@@ -776,6 +785,7 @@ export const tools = {
     prerequisites?: string[];
     max_turns?: number;
     model?: string;
+    model_config_id?: string | null;
     timeout_seconds?: number;
   }) =>
     request<CustomTool>('/tools', { method: 'POST', body: JSON.stringify(data) }),

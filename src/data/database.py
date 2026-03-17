@@ -92,6 +92,13 @@ def init_db(url: str = "") -> None:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE repos ADD COLUMN nickname VARCHAR(256) DEFAULT ''"))
 
+    # Migrate custom_tools: add model_config_id column
+    if 'custom_tools' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('custom_tools')]
+        if 'model_config_id' not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE custom_tools ADD COLUMN model_config_id VARCHAR(64) REFERENCES model_configs(id)"))
+
     # Seed default tools
     _seed_default_tools(engine)
 

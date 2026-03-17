@@ -686,6 +686,7 @@ class CustomToolCreate(BaseModel):
     prerequisites: list[str] = Field(default_factory=list)
     max_turns: int = 20
     model: str = ""
+    model_config_id: Optional[str] = None
     timeout_seconds: int = 300
 
 
@@ -704,8 +705,17 @@ class CustomToolUpdate(BaseModel):
     prerequisites: list[str] | None = None
     max_turns: int | None = None
     model: str | None = None
+    model_config_id: Optional[str] = None
     timeout_seconds: int | None = None
     is_active: bool | None = None
+
+
+class ResolvedModelInfo(BaseModel):
+    """Resolved model config — returned inline so UI always shows current state."""
+    id: str
+    label: str
+    provider: str
+    model: str
 
 
 class CustomToolResponse(BaseModel):
@@ -724,6 +734,8 @@ class CustomToolResponse(BaseModel):
     prerequisites: list[str] = Field(default_factory=list)
     max_turns: int = 20
     model: str = ""
+    model_config_id: Optional[str] = None
+    resolved_model: Optional[ResolvedModelInfo] = None
     timeout_seconds: int = 300
     is_active: bool = True
     created_at: Optional[str] = None

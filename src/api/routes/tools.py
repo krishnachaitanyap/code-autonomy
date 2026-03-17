@@ -12,6 +12,7 @@ from src.api.schemas import (
     CustomToolListResponse,
     CustomToolResponse,
     CustomToolUpdate,
+    ResolvedModelInfo,
 )
 from src.services.tools_service import ToolsService
 
@@ -72,6 +73,14 @@ async def list_builtin_tools():
 
 
 def _tool_to_response(tool) -> CustomToolResponse:
+    # Resolve model config if linked
+    resolved = None
+    if tool.model_config_id and tool.model_config:
+        mc = tool.model_config
+        resolved = ResolvedModelInfo(
+            id=mc.id, label=mc.label, provider=mc.provider, model=mc.model,
+        )
+
     return CustomToolResponse(
         id=tool.id,
         name=tool.name,
@@ -88,6 +97,8 @@ def _tool_to_response(tool) -> CustomToolResponse:
         prerequisites=tool.prerequisites or [],
         max_turns=tool.max_turns,
         model=tool.model,
+        model_config_id=tool.model_config_id,
+        resolved_model=resolved,
         timeout_seconds=tool.timeout_seconds,
         is_active=tool.is_active,
         created_at=str(tool.created_at) if tool.created_at else None,
@@ -139,6 +150,7 @@ async def create_tool(body: CustomToolCreate):
         prerequisites=body.prerequisites,
         max_turns=body.max_turns,
         model=body.model,
+        model_config_id=body.model_config_id,
         timeout_seconds=body.timeout_seconds,
     )
     return _tool_to_response(tool)

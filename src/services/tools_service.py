@@ -5,6 +5,8 @@ Service layer for Custom Tools — user-defined agent tools for migration, chat,
 import logging
 from typing import Optional
 
+from sqlalchemy.orm import joinedload
+
 from src.data.database import get_session
 from src.data.models import CustomTool, _uuid
 
@@ -23,7 +25,7 @@ class ToolsService:
         limit: int = 100,
     ) -> list[CustomTool]:
         with get_session() as db:
-            q = db.query(CustomTool)
+            q = db.query(CustomTool).options(joinedload(CustomTool.model_config))
             if enabled_for == "migration":
                 q = q.filter(CustomTool.enabled_for_migration.is_(True))
             elif enabled_for == "chat":
@@ -38,7 +40,12 @@ class ToolsService:
 
     def get_tool(self, tool_id: str) -> Optional[CustomTool]:
         with get_session() as db:
-            return db.get(CustomTool, tool_id)
+            return (
+                db.query(CustomTool)
+                .options(joinedload(CustomTool.model_config))
+                .filter(CustomTool.id == tool_id)
+                .first()
+            )
 
     def create_tool(self, **kwargs) -> CustomTool:
         with get_session() as db:
@@ -89,6 +96,7 @@ class ToolsService:
                 prerequisites=original.prerequisites,
                 max_turns=original.max_turns,
                 model=original.model,
+                model_config_id=original.model_config_id,
                 timeout_seconds=original.timeout_seconds,
                 is_active=True,
             )

@@ -41,6 +41,7 @@ const EMPTY_FORM = {
   prerequisites: [] as string[],
   max_turns: 20,
   model: '',
+  model_config_id: '' as string,
   timeout_seconds: 300,
 };
 
@@ -109,6 +110,7 @@ export default function ToolsPage() {
       prerequisites: tool.prerequisites || [],
       max_turns: tool.max_turns,
       model: tool.model,
+      model_config_id: tool.model_config_id || '',
       timeout_seconds: tool.timeout_seconds,
     });
     setTagInput('');
@@ -492,7 +494,14 @@ export default function ToolsPage() {
                       <div className="grid grid-cols-3 gap-2 text-xs">
                         <div>
                           <span className="text-gray-400">Model</span>
-                          <div className="text-gray-700 font-medium">{tool.model || 'default'}</div>
+                          <div className="text-gray-700 font-medium">
+                            {tool.resolved_model
+                              ? `${tool.resolved_model.label} (${tool.resolved_model.provider})`
+                              : 'default'}
+                          </div>
+                          {tool.resolved_model && (
+                            <div className="text-[10px] text-gray-400 font-mono">{tool.resolved_model.model}</div>
+                          )}
                         </div>
                         <div>
                           <span className="text-gray-400">Max Turns</span>
@@ -699,19 +708,27 @@ export default function ToolsPage() {
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Model</label>
                   <select
-                    value={form.model}
-                    onChange={e => setForm({ ...form, model: e.target.value })}
+                    value={form.model_config_id}
+                    onChange={e => {
+                      const configId = e.target.value;
+                      const selected = modelList.find(m => m.id === configId);
+                      setForm({
+                        ...form,
+                        model_config_id: configId,
+                        model: selected ? selected.model : '',
+                      });
+                    }}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">Default (config.ini)</option>
                     {modelList.map(m => (
-                      <option key={m.id} value={m.model}>
+                      <option key={m.id} value={m.id}>
                         {m.label} ({m.provider})
                       </option>
                     ))}
                   </select>
-                  {form.model && (() => {
-                    const sel = modelList.find(m => m.model === form.model);
+                  {form.model_config_id && (() => {
+                    const sel = modelList.find(m => m.id === form.model_config_id);
                     if (!sel) return null;
                     const dot = PROVIDER_COLORS[sel.provider] || 'bg-gray-500';
                     return (

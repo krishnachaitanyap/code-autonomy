@@ -1074,7 +1074,11 @@ export default function ChatPage() {
                               }]);
                               const s = await sessions.resume(msg.sessionId!);
                               setCurrentSession(s);
-                              setWsSessionId(s.id);
+                              // Force WS reconnect: clear first so React sees a state change
+                              // even when resuming the same session ID
+                              wsClearMessages();
+                              setWsSessionId(null);
+                              setTimeout(() => setWsSessionId(s.id), 50);
                               startPolling(s.id);
                             } catch (err: any) {
                               setSending(false);

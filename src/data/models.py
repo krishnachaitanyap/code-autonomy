@@ -641,8 +641,12 @@ class CustomTool(Base):
 
     # Execution settings
     max_turns = Column(Integer, nullable=False, default=20)
-    model = Column(String(64), nullable=False, default="")  # empty = use default
+    model = Column(String(64), nullable=False, default="")  # legacy — prefer model_config_id
+    model_config_id = Column(String(64), ForeignKey("model_configs.id"), nullable=True)
     timeout_seconds = Column(Integer, nullable=False, default=300)
+
+    # Relationship — eagerly resolve model config
+    model_config = relationship("ModelConfig", uselist=False, foreign_keys=[model_config_id])
 
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
