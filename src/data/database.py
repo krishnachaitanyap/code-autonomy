@@ -70,6 +70,12 @@ def init_db(url: str = "") -> None:
         if 'branch' not in columns:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE test_runs ADD COLUMN branch VARCHAR(256) DEFAULT 'main'"))
+    if 'workflows' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('workflows')]
+        if 'token_budget' not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE workflows ADD COLUMN token_budget INTEGER DEFAULT 0"))
+                conn.execute(text("ALTER TABLE workflows ADD COLUMN total_tokens_used INTEGER DEFAULT 0"))
 
     # Backfill TestProject.repo_id → ensure every project points to a valid Repo
     _backfill_test_project_repos(engine)

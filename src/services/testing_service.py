@@ -661,45 +661,52 @@ class TestingService:
             if frameworks:
                 _log_event("discovery_result", f"Frameworks: {', '.join(frameworks)}")
 
-            # --- D. Build requirements prompt ---
-            _progress(30, "building_requirements", "Building test generation prompt")
-            requirements = self._build_requirements_prompt(
-                run_type=run_type,
-                target_scope=target_scope,
-                strategy=strategy,
-                language=language,
-                framework=framework,
-                discovery=discovery,
-                repo_path=repo_path,
-                project_config=project_config,
-            )
-            _log_event("building_requirements", f"Strategy: {strategy} ({run_type})")
-            if target_scope:
-                _log_event("building_requirements", f"Scope: {target_scope}")
-
-            # --- E. Generate tests ---
-            _progress(40, "generating_tests", "Generating tests via agent")
-            _log_event("generating_tests", "Invoking AI agent for test generation...")
-            agent_result = self._generate_tests(
-                repo_path=repo_path,
-                requirements=requirements,
-                config=config,
-                repo_url=repo_url,
-                strategy=strategy,
-                log_fn=_log_event,
-            )
-
-            files_changed = agent_result.files_changed if agent_result else []
-            agent_summary = agent_result.summary if agent_result else "No agent result"
-
-            # Log agent results
-            if files_changed:
-                for f in files_changed[:10]:
-                    _log_event("tool_call", f"write_file {Path(f).name}")
-                if len(files_changed) > 10:
-                    _log_event("tool_call", f"... and {len(files_changed) - 10} more files")
+            if strategy == "existing":
+                # --- D/E. Skip AI generation — just run existing tests ---
+                _progress(40, "skipping_generation", "Running existing tests (no generation)")
+                _log_event("skipping_generation", "Strategy: existing — skipping AI test generation")
+                files_changed = []
+                agent_summary = "Ran existing tests (no generation)"
             else:
-                _log_event("generating_tests", "Agent completed (no files changed)")
+                # --- D. Build requirements prompt ---
+                _progress(30, "building_requirements", "Building test generation prompt")
+                requirements = self._build_requirements_prompt(
+                    run_type=run_type,
+                    target_scope=target_scope,
+                    strategy=strategy,
+                    language=language,
+                    framework=framework,
+                    discovery=discovery,
+                    repo_path=repo_path,
+                    project_config=project_config,
+                )
+                _log_event("building_requirements", f"Strategy: {strategy} ({run_type})")
+                if target_scope:
+                    _log_event("building_requirements", f"Scope: {target_scope}")
+
+                # --- E. Generate tests ---
+                _progress(40, "generating_tests", "Generating tests via agent")
+                _log_event("generating_tests", "Invoking AI agent for test generation...")
+                agent_result = self._generate_tests(
+                    repo_path=repo_path,
+                    requirements=requirements,
+                    config=config,
+                    repo_url=repo_url,
+                    strategy=strategy,
+                    log_fn=_log_event,
+                )
+
+                files_changed = agent_result.files_changed if agent_result else []
+                agent_summary = agent_result.summary if agent_result else "No agent result"
+
+                # Log agent results
+                if files_changed:
+                    for f in files_changed[:10]:
+                        _log_event("tool_call", f"write_file {Path(f).name}")
+                    if len(files_changed) > 10:
+                        _log_event("tool_call", f"... and {len(files_changed) - 10} more files")
+                else:
+                    _log_event("generating_tests", "Agent completed (no files changed)")
 
             # --- F. Execute tests ---
             _progress(70, "executing_tests", "Executing generated tests")

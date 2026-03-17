@@ -67,6 +67,12 @@ const IconConfig = () => (
   </svg>
 );
 
+const IconTools = () => (
+  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.42 15.17l-5.384-3.19A2.625 2.625 0 013 9.792V9.72a2.625 2.625 0 011.036-2.188l5.384-3.19a2.625 2.625 0 012.76 0l5.384 3.19A2.625 2.625 0 0121 9.72v.072a2.625 2.625 0 01-1.036 2.188l-5.384 3.19a2.625 2.625 0 01-2.76 0z" />
+  </svg>
+);
+
 const IconRepos = () => (
   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
@@ -86,6 +92,7 @@ const NAV_GROUPS: NavGroup[] = [
       { href: '/testing', label: 'Testing', icon: <IconTesting /> },
       { href: '/testing/coverage', label: 'Coverage', icon: <IconCoverage /> },
       { href: '/migration', label: 'Migration', icon: <IconMigration /> },
+      { href: '/tools', label: 'Tools', icon: <IconTools /> },
     ],
   },
   {

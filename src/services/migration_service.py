@@ -2093,7 +2093,7 @@ class MigrationService:
             checkout_branch(repo_path, target_branch, create=True)
 
             # 5. Build consciousness + code index for understanding the repo
-            from src.consciousness.core import build_or_load_consciousness
+            from src.consciousness.core import build_or_load_consciousness, build_consciousness as _build_ref_consciousness
             from src.code_index.storage import build_or_load_code_index
             from src.agent.knowledge import load_repo_knowledge
             from src.code.executor import detect_build_tool
@@ -2103,20 +2103,96 @@ class MigrationService:
             repo_knowledge = load_repo_knowledge(repo_path)
             build_tool = detect_build_tool(repo_path)
 
-            # 6. Build requirements from recipe instructions + gap context
+            # 5b. Build reference repo consciousness (structure + code samples)
+            ref_consciousness_text = ""
+            reference_repo_path = ""
+            has_reference = bool(project.reference_repo_url or project.reference_local_path)
+            if has_reference:
+                try:
+                    reference_repo_path = self._clone_reference_repo(
+                        project.reference_repo_url,
+                        project.reference_local_path,
+                        project.reference_branch,
+                    )
+                    ref_consciousness = _build_ref_consciousness(
+                        reference_repo_path,
+                        repo_url=project.reference_repo_url or "",
+                    )
+                    # Render with full detail: structure + samples + signatures
+                    ref_consciousness_text = ref_consciousness._render_full(
+                        max_samples_chars=25000,
+                        structure_depth=4,
+                        max_sigs=40,
+                    )
+                except Exception as ref_err:
+                    logger.warning("Could not build reference consciousness: %s", ref_err)
+
+            # 6. Build requirements from recipe instructions + gap context + reference structure
             recipe_instructions = step.get("agent_instructions", step.get("description", ""))
             ref_profile = project.reference_profile or {}
             gap_analysis = project.gap_analysis or {}
 
+            # Build rich reference context
+            ref_context_parts = []
+            ref_context_parts.append(f"Technologies: {ref_profile.get('technologies', [])}")
+            ref_context_parts.append(f"Config sources: {ref_profile.get('config_sources', [])}")
+
+            # Include reference directory structure + code samples
+            if ref_consciousness_text:
+                ref_context_parts.append("")
+                ref_context_parts.append("### Reference Repo Structure & Code Samples")
+                ref_context_parts.append(ref_consciousness_text)
+
+            # Include reference dependency details
+            ref_deps = ref_profile.get("dependencies", [])
+            if ref_deps:
+                ref_context_parts.append("")
+                ref_context_parts.append("### Reference Dependencies")
+                for dep in ref_deps[:30]:
+                    ref_context_parts.append(
+                        f"  - {dep.get('group', '')}:{dep.get('artifact', '')}:{dep.get('version', '')}"
+                    )
+
+            # Include reference API patterns
+            ref_endpoints = ref_profile.get("api_endpoints", [])
+            if ref_endpoints:
+                ref_context_parts.append("")
+                ref_context_parts.append("### Reference API Patterns")
+                for ep in ref_endpoints[:20]:
+                    ref_context_parts.append(
+                        f"  - {ep.get('http_method', 'GET')} {ep.get('path', '')} "
+                        f"→ {ep.get('class', '')}.{ep.get('method', '')}"
+                    )
+
+            ref_context = "\n".join(ref_context_parts)
+
+            # Build reference file reading instruction
+            ref_read_instruction = ""
+            if reference_repo_path:
+                ref_read_instruction = (
+                    f"\n\n### Reference Repository Access\n"
+                    f"The reference (golden template) repo is available at: {reference_repo_path}\n"
+                    f"Use `run_command` with `cat`, `find`, or `ls` on that path to read reference files.\n"
+                    f"IMPORTANT: You MUST read actual reference files to match their exact patterns:\n"
+                    f"  - Package structure and naming conventions\n"
+                    f"  - Class/method organization and coding style\n"
+                    f"  - Configuration format and property naming\n"
+                    f"  - Test structure and patterns\n"
+                    f"  - Build configuration (pom.xml / build.gradle)\n"
+                    f"Generate code that follows the reference repo's conventions, NOT generic defaults."
+                )
+
             requirements = (
                 f"## Migration Task: {step.get('title', '')}\n\n"
                 f"### Instructions\n{recipe_instructions}\n\n"
-                f"### Reference Architecture\n"
-                f"Technologies: {ref_profile.get('technologies', [])}\n"
-                f"Config sources: {ref_profile.get('config_sources', [])}\n\n"
+                f"### Reference Architecture\n{ref_context}\n\n"
                 f"### Gap Context\n"
                 f"Technology gaps: {gap_analysis.get('technology_gaps', [])}\n"
-                f"Framework migration: {gap_analysis.get('framework_migration', {})}\n\n"
+                f"Framework migration: {gap_analysis.get('framework_migration', {})}\n"
+                f"{ref_read_instruction}\n\n"
+                f"CRITICAL: Generate code that matches the reference repo's structure, naming "
+                f"conventions, package layout, and coding patterns — NOT generic Spring Boot defaults. "
+                f"Read reference files first to understand the exact patterns before making changes.\n\n"
                 f"Apply changes to this repository. Do NOT create placeholder or stub files."
             )
 

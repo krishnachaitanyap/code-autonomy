@@ -578,6 +578,55 @@ class CustomMigrationRecipe(Base):
 # MigrationRun — tracked migration execution run
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# CustomTool — user-defined agent tools for migration, chat, testing
+# ---------------------------------------------------------------------------
+
+class CustomTool(Base):
+    __tablename__ = "custom_tools"
+
+    id = Column(String(64), primary_key=True, default=_uuid)
+    name = Column(String(256), nullable=False)
+    description = Column(Text, nullable=False, default="")
+    tool_type = Column(String(32), nullable=False, default="agent")
+    # agent — autonomous agent tool
+    # validator — pre/post validation
+    # transformer — code transformation
+    # analyzer — analysis/reporting
+
+    # Where this tool can be used
+    enabled_for_migration = Column(Boolean, nullable=False, default=False)
+    enabled_for_chat = Column(Boolean, nullable=False, default=False)
+    enabled_for_testing = Column(Boolean, nullable=False, default=False)
+
+    # Agent instructions — the prompt/behavior definition
+    agent_instructions = Column(Text, nullable=False, default="")
+
+    # Goal — what this tool should achieve (especially for migration runs)
+    goal = Column(Text, nullable=False, default="")
+
+    # Configuration
+    allowed_tools = Column(JSON, nullable=False, default=list)
+    # e.g. ["Read", "Edit", "Bash", "Grep"]
+    parameters = Column(JSON, nullable=False, default=dict)
+    # custom parameters the tool accepts
+    tags = Column(JSON, nullable=False, default=list)
+    prerequisites = Column(JSON, nullable=False, default=list)
+    # other custom_tool IDs that must run first
+
+    # Execution settings
+    max_turns = Column(Integer, nullable=False, default=20)
+    model = Column(String(64), nullable=False, default="")  # empty = use default
+    timeout_seconds = Column(Integer, nullable=False, default=300)
+
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+    def __repr__(self) -> str:
+        return f"<CustomTool id={self.id!r} name={self.name!r} type={self.tool_type!r}>"
+
+
 class MigrationRun(Base):
     __tablename__ = "migration_runs"
 

@@ -655,6 +655,7 @@ function AgentsPage() {
                   <option value="e2e">End-to-End</option>
                   <option value="contract">Contract</option>
                   <option value="soap">SOAP</option>
+                  <option value="existing">Existing (run only)</option>
                 </select>
               </div>
               <div>

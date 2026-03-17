@@ -35,6 +35,7 @@ class StackProfile:
     observability: list = field(default_factory=list)    # [{"type", "detail"}]
     config_properties: dict = field(default_factory=dict)  # key → value for important properties
     dependencies: list = field(default_factory=list)      # [{"group", "artifact", "version", "category"}]
+    cicd_pipelines: list = field(default_factory=list)    # [{"type", "file", "stages"}]
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +217,86 @@ _PYTHON_TECH_MAP = {
 # Phase 1: Dependency Analysis
 # ---------------------------------------------------------------------------
 
+def _parse_maven_parent(repo: Path) -> dict | None:
+    """Extract parent POM info (groupId, artifactId, version) from root pom.xml."""
+    root_pom = repo / "pom.xml"
+    if not root_pom.is_file():
+        return None
+    try:
+        tree = ET.parse(str(root_pom))
+        root = tree.getroot()
+        ns_match = re.match(r'\{(.+?)\}', root.tag)
+        ns = {"m": ns_match.group(1)} if ns_match else {}
+        prefix = "m:" if ns else ""
+
+        parent_el = root.find(f"{prefix}parent", ns)
+        if parent_el is None:
+            return None
+        return {
+            "group": parent_el.findtext(f"{prefix}groupId", "", ns),
+            "artifact": parent_el.findtext(f"{prefix}artifactId", "", ns),
+            "version": parent_el.findtext(f"{prefix}version", "", ns),
+        }
+    except Exception:
+        return None
+
+
+# Framework detection rules — maps parent POM artifacts and dependency groupIds
+# to framework names. Add your organization's internal frameworks here.
+_FRAMEWORK_DETECTION_RULES: list[dict] = [
+    {
+        "name": "Photon",
+        "detect_by": {
+            "parent_artifact_contains": ["photon"],
+            "parent_group_contains": ["photon"],
+            "dependency_group_contains": ["photon"],
+        },
+    },
+    {
+        "name": "Nucleus",
+        "detect_by": {
+            "parent_artifact_contains": ["nucleus"],
+            "parent_group_contains": ["nucleus"],
+            "dependency_group_contains": ["nucleus"],
+        },
+    },
+    {
+        "name": "JISI (WAS GWS)",
+        "detect_by": {
+            "parent_artifact_contains": ["jisi", "wasgws", "was-gws"],
+            "parent_group_contains": ["jisi", "wasgwsframework"],
+            "dependency_group_contains": ["wasgwsframework", "jisi"],
+        },
+    },
+]
+
+
+def _detect_framework(parent: dict | None, deps: list[dict]) -> str | None:
+    """Detect internal framework from parent POM and dependency groupIds."""
+    for rule in _FRAMEWORK_DETECTION_RULES:
+        checks = rule["detect_by"]
+
+        # Check parent POM artifact
+        if parent:
+            parent_art = (parent.get("artifact") or "").lower()
+            parent_grp = (parent.get("group") or "").lower()
+            for kw in checks.get("parent_artifact_contains", []):
+                if kw in parent_art:
+                    return rule["name"]
+            for kw in checks.get("parent_group_contains", []):
+                if kw in parent_grp:
+                    return rule["name"]
+
+        # Check dependency group IDs
+        for dep in deps:
+            dep_grp = (dep.get("group") or "").lower()
+            for kw in checks.get("dependency_group_contains", []):
+                if kw in dep_grp:
+                    return rule["name"]
+
+    return None
+
+
 def _parse_maven_dependencies(repo: Path) -> list[dict]:
     """Parse pom.xml for dependencies. Reuses ET pattern from testing_service."""
     deps = []
@@ -327,10 +408,11 @@ def _parse_python_dependencies(repo: Path) -> list[dict]:
     return deps
 
 
-def _map_dependencies(deps: list[dict], lang: str) -> tuple[dict, list[dict]]:
+def _map_dependencies(deps: list[dict], lang: str, **kwargs) -> tuple[dict, list[dict]]:
     """Map raw dependencies to technology categories.
 
     Returns (technologies dict, enriched deps list with category).
+    Accepts optional parent_info kwarg for framework detection.
     """
     if lang == "java":
         tech_map = _MAVEN_TECH_MAP
@@ -357,13 +439,17 @@ def _map_dependencies(deps: list[dict], lang: str) -> tuple[dict, list[dict]]:
                 break
         enriched.append({**dep, "category": category})
 
-    # GroupId-based detection: JISI framework
-    for dep in deps:
-        if dep.get("group") == "com.chase.wasgwsframework":
-            technologies.setdefault("framework", [])
-            if "JISI (WAS GWS)" not in technologies["framework"]:
-                technologies["framework"].append("JISI (WAS GWS)")
-            break
+    # Framework detection via parent POM + dependency groupIds
+    # (parent_info is injected by the caller if available)
+    parent_info = kwargs.get("parent_info") if kwargs else None
+    detected_fw = _detect_framework(parent_info, deps)
+    if detected_fw:
+        technologies.setdefault("framework", [])
+        if detected_fw not in technologies["framework"]:
+            technologies["framework"].append(detected_fw)
+        # Store parent POM details for migration tooling
+        if parent_info:
+            technologies["parent_pom"] = parent_info
 
     return technologies, enriched
 
@@ -1234,6 +1320,82 @@ def _scan_config_files(repo: Path, profile: StackProfile) -> None:
         except Exception:
             pass
 
+    # -----------------------------------------------------------------------
+    # CI/CD Pipeline Detection
+    # -----------------------------------------------------------------------
+
+    # Jenkinsfile
+    for jf_name in ("Jenkinsfile", "jenkinsfile", "Jenkinsfile.groovy"):
+        jf = repo / jf_name
+        if jf.is_file():
+            try:
+                content = jf.read_text(encoding="utf-8", errors="replace")
+                stages = re.findall(r"stage\s*\(\s*['\"]([^'\"]+)['\"]", content)
+                profile.cicd_pipelines.append({
+                    "type": "Jenkins",
+                    "file": jf_name,
+                    "stages": stages,
+                })
+            except Exception:
+                pass
+
+    # jules.yml / jules.yaml
+    for jy_name in ("jules.yml", "jules.yaml"):
+        jy = repo / jy_name
+        if jy.is_file():
+            try:
+                content = jy.read_text(encoding="utf-8", errors="replace")
+                # Extract top-level keys as stages/sections
+                top_keys = re.findall(r"^(\w[\w-]*):", content, re.MULTILINE)
+                profile.cicd_pipelines.append({
+                    "type": "Jules",
+                    "file": jy_name,
+                    "stages": top_keys,
+                })
+            except Exception:
+                pass
+
+    # GitHub Actions
+    gh_workflows = repo / ".github" / "workflows"
+    if gh_workflows.is_dir():
+        for wf in gh_workflows.glob("*.yml"):
+            try:
+                content = wf.read_text(encoding="utf-8", errors="replace")
+                jobs = re.findall(r"^  (\w[\w-]*):", content, re.MULTILINE)
+                profile.cicd_pipelines.append({
+                    "type": "GitHub Actions",
+                    "file": f".github/workflows/{wf.name}",
+                    "stages": jobs,
+                })
+            except Exception:
+                pass
+        for wf in gh_workflows.glob("*.yaml"):
+            try:
+                content = wf.read_text(encoding="utf-8", errors="replace")
+                jobs = re.findall(r"^  (\w[\w-]*):", content, re.MULTILINE)
+                profile.cicd_pipelines.append({
+                    "type": "GitHub Actions",
+                    "file": f".github/workflows/{wf.name}",
+                    "stages": jobs,
+                })
+            except Exception:
+                pass
+
+    # GitLab CI
+    for gl_name in (".gitlab-ci.yml", ".gitlab-ci.yaml"):
+        gl = repo / gl_name
+        if gl.is_file():
+            try:
+                content = gl.read_text(encoding="utf-8", errors="replace")
+                stages = re.findall(r"^\s*-\s*(\w+)", content, re.MULTILINE)
+                profile.cicd_pipelines.append({
+                    "type": "GitLab CI",
+                    "file": gl_name,
+                    "stages": stages,
+                })
+            except Exception:
+                pass
+
 
 # ---------------------------------------------------------------------------
 # Phase 4: Enterprise Properties File Scanning
@@ -1722,9 +1884,11 @@ def analyze_stack(repo_path: str, consciousness=None, config: dict | None = None
 
     # Phase 1: Dependencies
     deps = []
+    parent_info = None
     if lang == "java":
         if (repo / "pom.xml").exists():
             deps = _parse_maven_dependencies(repo)
+            parent_info = _parse_maven_parent(repo)
         else:
             deps = _parse_gradle_dependencies(repo)
     elif lang in ("javascript", "typescript"):
@@ -1732,7 +1896,7 @@ def analyze_stack(repo_path: str, consciousness=None, config: dict | None = None
     elif lang == "python":
         deps = _parse_python_dependencies(repo)
 
-    technologies, enriched_deps = _map_dependencies(deps, lang)
+    technologies, enriched_deps = _map_dependencies(deps, lang, parent_info=parent_info)
     profile.technologies = technologies
     profile.dependencies = enriched_deps
 

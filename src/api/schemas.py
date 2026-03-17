@@ -601,3 +601,71 @@ class CustomRecipeResponse(BaseModel):
     source_framework: str = ""
     target_framework: str = ""
     is_custom: bool = True
+
+
+# ---------------------------------------------------------------------------
+# Custom Tools — user-defined agent tools for migration, chat, testing
+# ---------------------------------------------------------------------------
+
+class CustomToolCreate(BaseModel):
+    name: str
+    description: str = ""
+    tool_type: str = "agent"  # agent | validator | transformer | analyzer
+    enabled_for_migration: bool = False
+    enabled_for_chat: bool = False
+    enabled_for_testing: bool = False
+    agent_instructions: str = ""
+    goal: str = ""
+    allowed_tools: list[str] = Field(default_factory=list)
+    parameters: dict = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list)
+    max_turns: int = 20
+    model: str = ""
+    timeout_seconds: int = 300
+
+
+class CustomToolUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    tool_type: str | None = None
+    enabled_for_migration: bool | None = None
+    enabled_for_chat: bool | None = None
+    enabled_for_testing: bool | None = None
+    agent_instructions: str | None = None
+    goal: str | None = None
+    allowed_tools: list[str] | None = None
+    parameters: dict | None = None
+    tags: list[str] | None = None
+    prerequisites: list[str] | None = None
+    max_turns: int | None = None
+    model: str | None = None
+    timeout_seconds: int | None = None
+    is_active: bool | None = None
+
+
+class CustomToolResponse(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    tool_type: str = "agent"
+    enabled_for_migration: bool = False
+    enabled_for_chat: bool = False
+    enabled_for_testing: bool = False
+    agent_instructions: str = ""
+    goal: str = ""
+    allowed_tools: list[str] = Field(default_factory=list)
+    parameters: dict = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list)
+    max_turns: int = 20
+    model: str = ""
+    timeout_seconds: int = 300
+    is_active: bool = True
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class CustomToolListResponse(BaseModel):
+    tools: list[CustomToolResponse]
+    total: int

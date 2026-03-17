@@ -658,6 +658,78 @@ export const testing = {
 };
 
 // ---------------------------------------------------------------------------
+// Custom Tools — user-defined agent tools for migration, chat, testing
+// ---------------------------------------------------------------------------
+
+export interface CustomTool {
+  id: string;
+  name: string;
+  description: string;
+  tool_type: string;
+  enabled_for_migration: boolean;
+  enabled_for_chat: boolean;
+  enabled_for_testing: boolean;
+  agent_instructions: string;
+  goal: string;
+  allowed_tools: string[];
+  parameters: Record<string, any>;
+  tags: string[];
+  prerequisites: string[];
+  max_turns: number;
+  model: string;
+  timeout_seconds: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BuiltinTool {
+  name: string;
+  description: string;
+  category: string;
+  parameters: Record<string, string>;
+  required: string[];
+}
+
+export const tools = {
+  listBuiltin: () => request<{ tools: BuiltinTool[] }>('/tools/builtin'),
+  list: (params?: { enabled_for?: string; tool_type?: string; is_active?: boolean; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.enabled_for) qs.set('enabled_for', params.enabled_for);
+    if (params?.tool_type) qs.set('tool_type', params.tool_type);
+    if (params?.is_active !== undefined) qs.set('is_active', String(params.is_active));
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const query = qs.toString() ? `?${qs}` : '';
+    return request<{ tools: CustomTool[]; total: number }>(`/tools${query}`);
+  },
+  get: (id: string) => request<CustomTool>(`/tools/${id}`),
+  create: (data: {
+    name: string;
+    description?: string;
+    tool_type?: string;
+    enabled_for_migration?: boolean;
+    enabled_for_chat?: boolean;
+    enabled_for_testing?: boolean;
+    agent_instructions?: string;
+    goal?: string;
+    allowed_tools?: string[];
+    parameters?: Record<string, any>;
+    tags?: string[];
+    prerequisites?: string[];
+    max_turns?: number;
+    model?: string;
+    timeout_seconds?: number;
+  }) =>
+    request<CustomTool>('/tools', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: Partial<CustomTool>) =>
+    request<CustomTool>(`/tools/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: (id: string) =>
+    request<void>(`/tools/${id}`, { method: 'DELETE' }),
+  duplicate: (id: string) =>
+    request<CustomTool>(`/tools/${id}/duplicate`, { method: 'POST' }),
+};
+
+// ---------------------------------------------------------------------------
 // Migration Platform
 // ---------------------------------------------------------------------------
 

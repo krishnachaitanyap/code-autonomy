@@ -1,0 +1,786 @@
+'use client';
+
+import { useEffect, useState, useCallback } from 'react';
+import { tools, type CustomTool, type BuiltinTool } from '@/lib/api';
+
+const TOOL_TYPES = [
+  { value: 'agent', label: 'Agent', color: 'bg-green-100 text-green-700' },
+  { value: 'validator', label: 'Validator', color: 'bg-blue-100 text-blue-700' },
+  { value: 'transformer', label: 'Transformer', color: 'bg-purple-100 text-purple-700' },
+  { value: 'analyzer', label: 'Analyzer', color: 'bg-amber-100 text-amber-700' },
+];
+
+const AVAILABLE_TOOLS = [
+  'Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob',
+  'WebSearch', 'WebFetch', 'ListDir', 'FindFiles', 'DeleteFile',
+];
+
+const MODEL_OPTIONS = [
+  { value: '', label: 'Default' },
+  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+  { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
+  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
+  { value: 'gpt-4o', label: 'GPT-4o' },
+  { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+];
+
+type FilterTab = 'all' | 'migration' | 'chat' | 'testing';
+
+const EMPTY_FORM = {
+  name: '',
+  description: '',
+  tool_type: 'agent',
+  enabled_for_migration: false,
+  enabled_for_chat: false,
+  enabled_for_testing: false,
+  agent_instructions: '',
+  goal: '',
+  allowed_tools: ['Read', 'Edit', 'Bash', 'Grep'] as string[],
+  parameters: {} as Record<string, any>,
+  tags: [] as string[],
+  prerequisites: [] as string[],
+  max_turns: 20,
+  model: '',
+  timeout_seconds: 300,
+};
+
+export default function ToolsPage() {
+  const [toolList, setToolList] = useState<CustomTool[]>([]);
+  const [builtinTools, setBuiltinTools] = useState<BuiltinTool[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filterTab, setFilterTab] = useState<FilterTab>('all');
+  const [showForm, setShowForm] = useState(false);
+  const [editingTool, setEditingTool] = useState<CustomTool | null>(null);
+  const [form, setForm] = useState({ ...EMPTY_FORM });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [expandedBuiltinId, setExpandedBuiltinId] = useState<string | null>(null);
+  const [collapsedBuiltinCats, setCollapsedBuiltinCats] = useState<Set<string>>(new Set());
+  const [tagInput, setTagInput] = useState('');
+
+  const loadTools = useCallback(async () => {
+    try {
+      const params: { enabled_for?: string } = {};
+      if (filterTab !== 'all') params.enabled_for = filterTab;
+      const [customRes, builtinRes] = await Promise.all([
+        tools.list(params),
+        tools.listBuiltin().catch(() => ({ tools: [] })),
+      ]);
+      setToolList(customRes.tools);
+      setBuiltinTools(builtinRes.tools);
+    } catch (err) {
+      console.error('Failed to load tools:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [filterTab]);
+
+  useEffect(() => {
+    setLoading(true);
+    loadTools();
+  }, [loadTools]);
+
+  const openCreate = () => {
+    setEditingTool(null);
+    setForm({ ...EMPTY_FORM });
+    setTagInput('');
+    setError('');
+    setShowForm(true);
+  };
+
+  const openEdit = (tool: CustomTool) => {
+    setEditingTool(tool);
+    setForm({
+      name: tool.name,
+      description: tool.description,
+      tool_type: tool.tool_type,
+      enabled_for_migration: tool.enabled_for_migration,
+      enabled_for_chat: tool.enabled_for_chat,
+      enabled_for_testing: tool.enabled_for_testing,
+      agent_instructions: tool.agent_instructions,
+      goal: tool.goal,
+      allowed_tools: tool.allowed_tools || [],
+      parameters: tool.parameters || {},
+      tags: tool.tags || [],
+      prerequisites: tool.prerequisites || [],
+      max_turns: tool.max_turns,
+      model: tool.model,
+      timeout_seconds: tool.timeout_seconds,
+    });
+    setTagInput('');
+    setError('');
+    setShowForm(true);
+  };
+
+  const handleSave = async () => {
+    if (!form.name.trim()) {
+      setError('Name is required');
+      return;
+    }
+    if (!form.agent_instructions.trim()) {
+      setError('Agent instructions are required');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      if (editingTool) {
+        await tools.update(editingTool.id, form);
+      } else {
+        await tools.create(form);
+      }
+      setShowForm(false);
+      setEditingTool(null);
+      loadTools();
+    } catch (err: any) {
+      setError(err.message || 'Failed to save tool');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      await tools.delete(id);
+      loadTools();
+    } catch (err) {
+      console.error('Delete failed:', err);
+    }
+  };
+
+  const handleDuplicate = async (id: string) => {
+    try {
+      await tools.duplicate(id);
+      loadTools();
+    } catch (err) {
+      console.error('Duplicate failed:', err);
+    }
+  };
+
+  const handleToggleActive = async (tool: CustomTool) => {
+    try {
+      await tools.update(tool.id, { is_active: !tool.is_active } as any);
+      loadTools();
+    } catch (err) {
+      console.error('Toggle failed:', err);
+    }
+  };
+
+  const addTag = () => {
+    const tag = tagInput.trim();
+    if (tag && !form.tags.includes(tag)) {
+      setForm({ ...form, tags: [...form.tags, tag] });
+      setTagInput('');
+    }
+  };
+
+  const removeTag = (tag: string) => {
+    setForm({ ...form, tags: form.tags.filter(t => t !== tag) });
+  };
+
+  const toggleAllowedTool = (tool: string) => {
+    setForm({
+      ...form,
+      allowed_tools: form.allowed_tools.includes(tool)
+        ? form.allowed_tools.filter(t => t !== tool)
+        : [...form.allowed_tools, tool],
+    });
+  };
+
+  const typeColor = (type: string) =>
+    TOOL_TYPES.find(t => t.value === type)?.color || 'bg-gray-100 text-gray-600';
+
+  const enabledBadges = (tool: CustomTool) => {
+    const badges: { label: string; color: string }[] = [];
+    if (tool.enabled_for_migration) badges.push({ label: 'Migration', color: 'bg-indigo-100 text-indigo-700' });
+    if (tool.enabled_for_chat) badges.push({ label: 'Chat', color: 'bg-cyan-100 text-cyan-700' });
+    if (tool.enabled_for_testing) badges.push({ label: 'Testing', color: 'bg-emerald-100 text-emerald-700' });
+    return badges;
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <svg className="w-5 h-5 animate-spin text-indigo-600" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Custom Tools</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Build custom agent tools for migration, chat, and testing workflows
+          </p>
+        </div>
+        <button
+          onClick={openCreate}
+          className="px-4 py-2 bg-indigo-600 text-white rounded-md text-sm font-medium hover:bg-indigo-700 transition-colors"
+        >
+          + New Tool
+        </button>
+      </div>
+
+      {/* Filter tabs */}
+      <div className="flex gap-1 bg-gray-100 rounded-lg p-1 w-fit">
+        {(['all', 'migration', 'chat', 'testing'] as FilterTab[]).map(tab => (
+          <button
+            key={tab}
+            onClick={() => setFilterTab(tab)}
+            className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors capitalize ${
+              filterTab === tab
+                ? 'bg-white text-gray-900 shadow-sm'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
+
+      {/* Built-in Tools (read-only) */}
+      {builtinTools.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <h2 className="text-sm font-semibold text-gray-700">Built-in Tools</h2>
+            <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-[10px] font-medium">
+              {builtinTools.length} system tools
+            </span>
+            <span className="text-[10px] text-gray-400">Read-only — these are the core agent capabilities</span>
+          </div>
+          <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
+            {(() => {
+              const CATEGORY_META: Record<string, { label: string; color: string; icon: string }> = {
+                read: { label: 'Read', color: 'bg-blue-100 text-blue-700', icon: 'eye' },
+                write: { label: 'Write', color: 'bg-orange-100 text-orange-700', icon: 'pencil' },
+                execution: { label: 'Execution', color: 'bg-red-100 text-red-700', icon: 'terminal' },
+                memory: { label: 'Memory', color: 'bg-violet-100 text-violet-700', icon: 'brain' },
+                completion: { label: 'Completion', color: 'bg-green-100 text-green-700', icon: 'check' },
+                plan: { label: 'Plan', color: 'bg-amber-100 text-amber-700', icon: 'map' },
+                gcc: { label: 'GCC', color: 'bg-cyan-100 text-cyan-700', icon: 'git' },
+                code_index: { label: 'Code Index', color: 'bg-indigo-100 text-indigo-700', icon: 'search' },
+              };
+
+              // Group by category
+              const groups: Record<string, BuiltinTool[]> = {};
+              builtinTools.forEach(t => {
+                if (!groups[t.category]) groups[t.category] = [];
+                groups[t.category].push(t);
+              });
+
+              const categoryOrder = ['read', 'write', 'execution', 'memory', 'completion', 'plan', 'gcc', 'code_index'];
+              const sortedCategories = Object.keys(groups).sort(
+                (a, b) => (categoryOrder.indexOf(a) === -1 ? 99 : categoryOrder.indexOf(a)) -
+                           (categoryOrder.indexOf(b) === -1 ? 99 : categoryOrder.indexOf(b))
+              );
+
+              return sortedCategories.map(cat => {
+                const meta = CATEGORY_META[cat] || { label: cat, color: 'bg-gray-100 text-gray-600' };
+                const catTools = groups[cat];
+                return (
+                  <div key={cat}>
+                    {/* Category header — click to collapse/expand */}
+                    <div
+                      className="px-4 py-2 bg-gray-50/50 flex items-center gap-2 cursor-pointer hover:bg-gray-100/50 transition-colors select-none"
+                      onClick={() => setCollapsedBuiltinCats(prev => {
+                        const next = new Set(prev);
+                        if (next.has(cat)) next.delete(cat); else next.add(cat);
+                        return next;
+                      })}
+                    >
+                      <svg
+                        className={`w-3 h-3 text-gray-400 transition-transform flex-shrink-0 ${collapsedBuiltinCats.has(cat) ? '-rotate-90' : ''}`}
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider ${meta.color}`}>
+                        {meta.label}
+                      </span>
+                      <span className="text-[10px] text-gray-400">{catTools.length} tool{catTools.length > 1 ? 's' : ''}</span>
+                      {collapsedBuiltinCats.has(cat) && (
+                        <span className="text-[10px] text-gray-400 ml-auto">
+                          {catTools.map(t => t.name).join(', ')}
+                        </span>
+                      )}
+                    </div>
+                    {/* Tools in category — collapsible */}
+                    {!collapsedBuiltinCats.has(cat) && catTools.map(bt => {
+                      const isExpanded = expandedBuiltinId === `${cat}:${bt.name}`;
+                      return (
+                        <div key={bt.name}>
+                          <div
+                            className="flex items-center gap-3 px-4 py-2.5 hover:bg-gray-50 transition-colors cursor-pointer"
+                            onClick={() => setExpandedBuiltinId(isExpanded ? null : `${cat}:${bt.name}`)}
+                          >
+                            <svg className="w-3 h-3 text-gray-300 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                            </svg>
+                            <code className="text-sm font-mono font-medium text-gray-800">{bt.name}</code>
+                            <span className="text-xs text-gray-400 truncate flex-1">{bt.description.split('.')[0]}</span>
+                            {Object.keys(bt.parameters).length > 0 && (
+                              <span className="text-[9px] text-gray-400 flex-shrink-0">
+                                {Object.keys(bt.parameters).length} param{Object.keys(bt.parameters).length > 1 ? 's' : ''}
+                              </span>
+                            )}
+                            <svg
+                              className={`w-3.5 h-3.5 text-gray-400 transition-transform flex-shrink-0 ${isExpanded ? 'rotate-180' : ''}`}
+                              fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                            >
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                            </svg>
+                          </div>
+                          {isExpanded && (
+                            <div className="px-4 pb-3 bg-gray-50/50 border-t border-gray-100">
+                              <p className="text-xs text-gray-600 mt-2 mb-3 leading-relaxed">{bt.description}</p>
+                              {Object.keys(bt.parameters).length > 0 && (
+                                <div>
+                                  <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Parameters</label>
+                                  <div className="space-y-1">
+                                    {Object.entries(bt.parameters).map(([param, desc]) => (
+                                      <div key={param} className="flex items-start gap-2 text-xs">
+                                        <code className={`font-mono px-1.5 py-0.5 rounded flex-shrink-0 ${
+                                          bt.required.includes(param)
+                                            ? 'bg-indigo-50 text-indigo-700'
+                                            : 'bg-gray-100 text-gray-600'
+                                        }`}>
+                                          {param}
+                                          {bt.required.includes(param) && <span className="text-indigo-400 ml-0.5">*</span>}
+                                        </code>
+                                        <span className="text-gray-500">{desc}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              });
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* Custom Tool list */}
+      <div className="flex items-center gap-2">
+        <h2 className="text-sm font-semibold text-gray-700">Custom Tools</h2>
+        <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-[10px] font-medium">
+          {toolList.length} tool{toolList.length !== 1 ? 's' : ''}
+        </span>
+        <span className="text-[10px] text-gray-400">User-defined — editable, can be enabled per workflow</span>
+      </div>
+
+      {toolList.length === 0 ? (
+        <div className="bg-white rounded-lg border border-gray-200 p-12 text-center">
+          <svg className="w-10 h-10 mx-auto text-gray-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M11.42 15.17l-5.384-3.19A2.625 2.625 0 013 9.792V9.72a2.625 2.625 0 011.036-2.188l5.384-3.19a2.625 2.625 0 012.76 0l5.384 3.19A2.625 2.625 0 0121 9.72v.072a2.625 2.625 0 01-1.036 2.188l-5.384 3.19a2.625 2.625 0 01-2.76 0z" />
+          </svg>
+          <p className="text-sm text-gray-500">No custom tools yet</p>
+          <button
+            onClick={openCreate}
+            className="mt-3 text-sm text-indigo-600 hover:text-indigo-700 font-medium"
+          >
+            Create your first tool
+          </button>
+        </div>
+      ) : (
+        <div className="bg-white rounded-lg border border-gray-200 divide-y divide-gray-100">
+          {toolList.map(tool => (
+            <div key={tool.id}>
+              {/* Row */}
+              <div
+                className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors cursor-pointer"
+                onClick={() => setExpandedId(expandedId === tool.id ? null : tool.id)}
+              >
+                {/* Active indicator */}
+                <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                  tool.is_active ? 'bg-green-500' : 'bg-gray-300'
+                }`} />
+
+                {/* Type badge */}
+                <span className={`px-2 py-0.5 rounded text-[10px] font-medium flex-shrink-0 ${typeColor(tool.tool_type)}`}>
+                  {tool.tool_type}
+                </span>
+
+                {/* Name + description */}
+                <div className="flex-1 min-w-0">
+                  <span className="text-sm font-medium text-gray-900">{tool.name}</span>
+                  {tool.description && (
+                    <span className="text-xs text-gray-400 ml-2 truncate">{tool.description}</span>
+                  )}
+                </div>
+
+                {/* Enabled-for badges */}
+                <div className="flex gap-1 flex-shrink-0">
+                  {enabledBadges(tool).map(b => (
+                    <span key={b.label} className={`px-1.5 py-0.5 rounded text-[9px] font-medium ${b.color}`}>
+                      {b.label}
+                    </span>
+                  ))}
+                </div>
+
+                {/* Goal preview */}
+                {tool.goal && (
+                  <span className="text-[10px] text-gray-400 max-w-[140px] truncate flex-shrink-0" title={tool.goal}>
+                    Goal: {tool.goal}
+                  </span>
+                )}
+
+                {/* Chevron */}
+                <svg
+                  className={`w-4 h-4 text-gray-400 transition-transform flex-shrink-0 ${
+                    expandedId === tool.id ? 'rotate-180' : ''
+                  }`}
+                  fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
+
+              {/* Expanded detail */}
+              {expandedId === tool.id && (
+                <div className="px-4 pb-4 bg-gray-50 border-t border-gray-100">
+                  <div className="grid grid-cols-2 gap-4 mt-3">
+                    {/* Left: Instructions + Goal */}
+                    <div className="space-y-3">
+                      {tool.goal && (
+                        <div>
+                          <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Goal</label>
+                          <div className="bg-white rounded border border-gray-200 px-3 py-2 text-sm text-gray-700">
+                            {tool.goal}
+                          </div>
+                        </div>
+                      )}
+                      <div>
+                        <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Agent Instructions</label>
+                        <pre className="bg-white rounded border border-gray-200 px-3 py-2 text-xs text-gray-700 whitespace-pre-wrap max-h-40 overflow-y-auto font-mono">
+                          {tool.agent_instructions || '(none)'}
+                        </pre>
+                      </div>
+                    </div>
+
+                    {/* Right: Config */}
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Allowed Tools</label>
+                        <div className="flex flex-wrap gap-1">
+                          {(tool.allowed_tools || []).map(t => (
+                            <span key={t} className="px-1.5 py-0.5 bg-gray-200 text-gray-700 rounded text-[10px] font-mono">
+                              {t}
+                            </span>
+                          ))}
+                          {(!tool.allowed_tools || tool.allowed_tools.length === 0) && (
+                            <span className="text-xs text-gray-400">All tools</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 text-xs">
+                        <div>
+                          <span className="text-gray-400">Model</span>
+                          <div className="text-gray-700 font-medium">{tool.model || 'default'}</div>
+                        </div>
+                        <div>
+                          <span className="text-gray-400">Max Turns</span>
+                          <div className="text-gray-700 font-medium">{tool.max_turns}</div>
+                        </div>
+                        <div>
+                          <span className="text-gray-400">Timeout</span>
+                          <div className="text-gray-700 font-medium">{tool.timeout_seconds}s</div>
+                        </div>
+                      </div>
+                      {(tool.tags || []).length > 0 && (
+                        <div>
+                          <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Tags</label>
+                          <div className="flex flex-wrap gap-1">
+                            {tool.tags.map(t => (
+                              <span key={t} className="px-1.5 py-0.5 bg-indigo-50 text-indigo-600 rounded text-[10px]">
+                                {t}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex items-center gap-2 mt-4 pt-3 border-t border-gray-200">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); openEdit(tool); }}
+                      className="px-2.5 py-1 text-[11px] font-medium text-indigo-600 bg-indigo-50 rounded hover:bg-indigo-100 transition-colors"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDuplicate(tool.id); }}
+                      className="px-2.5 py-1 text-[11px] font-medium text-gray-600 bg-gray-100 rounded hover:bg-gray-200 transition-colors"
+                    >
+                      Duplicate
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleToggleActive(tool); }}
+                      className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors ${
+                        tool.is_active
+                          ? 'text-yellow-700 bg-yellow-50 hover:bg-yellow-100'
+                          : 'text-green-700 bg-green-50 hover:bg-green-100'
+                      }`}
+                    >
+                      {tool.is_active ? 'Disable' : 'Enable'}
+                    </button>
+                    <div className="flex-1" />
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDelete(tool.id); }}
+                      className="px-2.5 py-1 text-[11px] font-medium text-red-600 bg-red-50 rounded hover:bg-red-100 transition-colors"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Create/Edit Modal */}
+      {showForm && (
+        <div className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 pt-16 px-4 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl mb-16">
+            {/* Modal header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+              <h2 className="text-lg font-semibold text-gray-900">
+                {editingTool ? 'Edit Tool' : 'Create Custom Tool'}
+              </h2>
+              <button
+                onClick={() => setShowForm(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Modal body */}
+            <div className="px-6 py-4 space-y-4 max-h-[70vh] overflow-y-auto">
+              {error && (
+                <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded text-sm">
+                  {error}
+                </div>
+              )}
+
+              {/* Name + Type */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                  <input
+                    type="text"
+                    value={form.name}
+                    onChange={e => setForm({ ...form, name: e.target.value })}
+                    placeholder="e.g. Spring Boot Migrator"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                  <select
+                    value={form.tool_type}
+                    onChange={e => setForm({ ...form, tool_type: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    {TOOL_TYPES.map(t => (
+                      <option key={t.value} value={t.value}>{t.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Description */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                <input
+                  type="text"
+                  value={form.description}
+                  onChange={e => setForm({ ...form, description: e.target.value })}
+                  placeholder="Short description of what this tool does"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+
+              {/* Enabled For */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Enabled For</label>
+                <div className="flex gap-3">
+                  {([
+                    { key: 'enabled_for_migration' as const, label: 'Migration', color: 'indigo' },
+                    { key: 'enabled_for_chat' as const, label: 'Chat', color: 'cyan' },
+                    { key: 'enabled_for_testing' as const, label: 'Testing', color: 'emerald' },
+                  ]).map(({ key, label, color }) => (
+                    <label key={key} className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={form[key]}
+                        onChange={e => setForm({ ...form, [key]: e.target.checked })}
+                        className={`rounded border-gray-300 text-${color}-600 focus:ring-${color}-500`}
+                      />
+                      <span className="text-sm text-gray-700">{label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Goal */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Goal
+                  <span className="text-gray-400 font-normal ml-1">
+                    — what should be achieved when this tool runs
+                  </span>
+                </label>
+                <textarea
+                  value={form.goal}
+                  onChange={e => setForm({ ...form, goal: e.target.value })}
+                  placeholder="e.g. Migrate all Spring Boot 2.x configurations to Spring Boot 3.x format, ensuring backward compatibility and passing all existing tests."
+                  rows={3}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+
+              {/* Agent Instructions */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Agent Instructions</label>
+                <textarea
+                  value={form.agent_instructions}
+                  onChange={e => setForm({ ...form, agent_instructions: e.target.value })}
+                  placeholder={`You are a specialized agent for...\n\nStep 1: Analyze the current codebase...\nStep 2: Identify patterns that need migration...\nStep 3: Apply transformations...`}
+                  rows={8}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+
+              {/* Allowed Tools */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Allowed Tools</label>
+                <div className="flex flex-wrap gap-1.5">
+                  {AVAILABLE_TOOLS.map(t => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => toggleAllowedTool(t)}
+                      className={`px-2.5 py-1 rounded-md text-xs font-mono border transition-colors ${
+                        form.allowed_tools.includes(t)
+                          ? 'border-indigo-400 bg-indigo-50 text-indigo-700'
+                          : 'border-gray-200 text-gray-500 hover:bg-gray-50'
+                      }`}
+                    >
+                      {t}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Model + Max Turns + Timeout */}
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Model</label>
+                  <select
+                    value={form.model}
+                    onChange={e => setForm({ ...form, model: e.target.value })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    {MODEL_OPTIONS.map(m => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Max Turns</label>
+                  <input
+                    type="number"
+                    value={form.max_turns}
+                    onChange={e => setForm({ ...form, max_turns: parseInt(e.target.value) || 20 })}
+                    min={1}
+                    max={100}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Timeout (s)</label>
+                  <input
+                    type="number"
+                    value={form.timeout_seconds}
+                    onChange={e => setForm({ ...form, timeout_seconds: parseInt(e.target.value) || 300 })}
+                    min={30}
+                    max={3600}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              </div>
+
+              {/* Tags */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Tags</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={tagInput}
+                    onChange={e => setTagInput(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addTag(); } }}
+                    placeholder="Add tag..."
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={addTag}
+                    className="px-3 py-2 text-sm text-indigo-600 hover:bg-indigo-50 rounded-md transition-colors"
+                  >
+                    Add
+                  </button>
+                </div>
+                {form.tags.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {form.tags.map(tag => (
+                      <span key={tag} className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-50 text-indigo-700 rounded text-xs">
+                        {tag}
+                        <button onClick={() => removeTag(tag)} className="hover:text-indigo-900">&times;</button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Modal footer */}
+            <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-gray-200">
+              <button
+                onClick={() => setShowForm(false)}
+                className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-md text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+              >
+                {saving ? 'Saving...' : editingTool ? 'Update Tool' : 'Create Tool'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

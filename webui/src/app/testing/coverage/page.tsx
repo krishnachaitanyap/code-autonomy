@@ -24,6 +24,7 @@ function CoveragePage() {
   const [reports, setReports] = useState<CoverageReport[]>([]);
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
+  const [runningTests, setRunningTests] = useState(false);
 
   // Branch selector state
   const [branch, setBranch] = useState('main');
@@ -92,6 +93,24 @@ function CoveragePage() {
     }
   }
 
+  async function handleRunExistingTests() {
+    if (!selectedProjectId) return;
+    setRunningTests(true);
+    try {
+      await testing.createRun({
+        project_id: selectedProjectId,
+        run_type: 'functional',
+        strategy: 'existing',
+        branch: branch,
+      });
+      alert('Test run started! Check the Agent Monitor page for progress. Re-analyze coverage after completion.');
+    } catch (err) {
+      console.error('Failed to start test run:', err);
+    } finally {
+      setRunningTests(false);
+    }
+  }
+
   async function handleAnalyze() {
     setAnalyzing(true);
     try {
@@ -152,6 +171,13 @@ function CoveragePage() {
             onChange={(e) => setSonarProjectKey(e.target.value)}
             className="px-3 py-2 border border-gray-300 rounded-md text-sm w-56"
           />
+          <button
+            onClick={handleRunExistingTests}
+            disabled={!selectedProjectId || runningTests}
+            className="px-4 py-2 bg-emerald-600 text-white rounded-md text-sm font-medium hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {runningTests ? 'Starting...' : 'Run Existing Tests'}
+          </button>
           <button
             onClick={handleAnalyze}
             disabled={!selectedProjectId || analyzing}
