@@ -92,8 +92,86 @@ def init_db(url: str = "") -> None:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE repos ADD COLUMN nickname VARCHAR(256) DEFAULT ''"))
 
+    # Seed default tools
+    _seed_default_tools(engine)
+
     # Backfill TestProject.repo_id → ensure every project points to a valid Repo
     _backfill_test_project_repos(engine)
+
+
+def _seed_default_tools(engine) -> None:
+    """Seed built-in custom tools on first run. Skips if they already exist."""
+    from sqlalchemy import text
+
+    DEFAULT_TOOLS = [
+        {
+            "name": "Reference",
+            "description": "Reads and surfaces file, directory, or repo content as context for the current task",
+            "tool_type": "analyzer",
+            "enabled_for_migration": True,
+            "enabled_for_chat": True,
+            "enabled_for_testing": True,
+            "goal": (
+                "Read the specified file(s), directory tree, or repository structure "
+                "referenced by the user and return their contents as structured context. "
+                "Prioritize relevance — summarize large directories, return full content "
+                "for individual files, and highlight key entry points for repos."
+            ),
+            "agent_instructions": (
+                "When the user references a file, directory, or repo with @Reference:\n\n"
+                "1. **File**: Read the full file contents. If the file exceeds 500 lines, "
+                "return the first 100 lines with a summary of the rest and key sections "
+                "(exports, classes, functions).\n\n"
+                "2. **Directory**: List the directory tree (max 3 levels deep). For each file, "
+                "include a one-line description of its purpose inferred from the filename and "
+                "any leading comments. Highlight entry points (index.*, main.*, __init__.py, etc.).\n\n"
+                "3. **Repository**: Show the top-level structure, README summary if present, and "
+                "identify the tech stack, entry points, and key config files "
+                "(package.json, pyproject.toml, config.ini, etc.).\n\n"
+                "Return the context in this format:\n"
+                "---\n"
+                "**Referenced**: <path or repo>\n"
+                "**Type**: file | directory | repo\n"
+                "**Summary**: <1-2 sentence overview>\n"
+                "**Contents**:\n"
+                "<formatted content>\n"
+                "---\n\n"
+                "Use the read_file, list_directory, and search_code tools as needed. "
+                "Do not modify any files."
+            ),
+            "allowed_tools": '["Read", "Glob", "Grep", "ListDir", "FindFiles"]',
+            "parameters": "{}",
+            "tags": '["context", "reference", "default"]',
+            "prerequisites": "[]",
+            "max_turns": 10,
+            "model": "",
+            "timeout_seconds": 120,
+            "is_active": True,
+        },
+    ]
+
+    with engine.begin() as conn:
+        for tool_def in DEFAULT_TOOLS:
+            existing = conn.execute(
+                text("SELECT id FROM custom_tools WHERE name = :name"),
+                {"name": tool_def["name"]},
+            ).fetchone()
+            if existing:
+                continue
+            from src.data.models import _uuid
+            conn.execute(text(
+                "INSERT INTO custom_tools "
+                "(id, name, description, tool_type, "
+                "enabled_for_migration, enabled_for_chat, enabled_for_testing, "
+                "goal, agent_instructions, allowed_tools, parameters, "
+                "tags, prerequisites, max_turns, model, timeout_seconds, is_active, "
+                "created_at, updated_at) "
+                "VALUES (:id, :name, :description, :tool_type, "
+                ":enabled_for_migration, :enabled_for_chat, :enabled_for_testing, "
+                ":goal, :agent_instructions, :allowed_tools, :parameters, "
+                ":tags, :prerequisites, :max_turns, :model, :timeout_seconds, :is_active, "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ), {"id": _uuid(), **tool_def})
 
 
 def _backfill_test_project_repos(engine) -> None:

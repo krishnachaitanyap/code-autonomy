@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { tools, type CustomTool, type BuiltinTool } from '@/lib/api';
+import { tools, models, type CustomTool, type BuiltinTool, type ModelConfig } from '@/lib/api';
 
 const TOOL_TYPES = [
   { value: 'agent', label: 'Agent', color: 'bg-green-100 text-green-700' },
@@ -15,14 +15,14 @@ const AVAILABLE_TOOLS = [
   'WebSearch', 'WebFetch', 'ListDir', 'FindFiles', 'DeleteFile',
 ];
 
-const MODEL_OPTIONS = [
-  { value: '', label: 'Default' },
-  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-  { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
-  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
-  { value: 'gpt-4o', label: 'GPT-4o' },
-  { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-];
+const PROVIDER_COLORS: Record<string, string> = {
+  openai: 'bg-green-500',
+  anthropic: 'bg-orange-500',
+  gemini: 'bg-blue-500',
+  google: 'bg-blue-500',
+  azure: 'bg-cyan-500',
+  bedrock: 'bg-purple-500',
+};
 
 type FilterTab = 'all' | 'migration' | 'chat' | 'testing';
 
@@ -56,6 +56,7 @@ export default function ToolsPage() {
   const [error, setError] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [expandedBuiltinId, setExpandedBuiltinId] = useState<string | null>(null);
+  const [modelList, setModelList] = useState<ModelConfig[]>([]);
   const [collapsedBuiltinCats, setCollapsedBuiltinCats] = useState<Set<string>>(new Set());
   const [tagInput, setTagInput] = useState('');
 
@@ -63,12 +64,14 @@ export default function ToolsPage() {
     try {
       const params: { enabled_for?: string } = {};
       if (filterTab !== 'all') params.enabled_for = filterTab;
-      const [customRes, builtinRes] = await Promise.all([
+      const [customRes, builtinRes, modelsRes] = await Promise.all([
         tools.list(params),
         tools.listBuiltin().catch(() => ({ tools: [] })),
+        models.list().catch(() => ({ models: [] })),
       ]);
       setToolList(customRes.tools);
       setBuiltinTools(builtinRes.tools);
+      setModelList(modelsRes.models || []);
     } catch (err) {
       console.error('Failed to load tools:', err);
     } finally {
@@ -700,10 +703,26 @@ export default function ToolsPage() {
                     onChange={e => setForm({ ...form, model: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
-                    {MODEL_OPTIONS.map(m => (
-                      <option key={m.value} value={m.value}>{m.label}</option>
+                    <option value="">Default (config.ini)</option>
+                    {modelList.map(m => (
+                      <option key={m.id} value={m.model}>
+                        {m.label} ({m.provider})
+                      </option>
                     ))}
                   </select>
+                  {form.model && (() => {
+                    const sel = modelList.find(m => m.model === form.model);
+                    if (!sel) return null;
+                    const dot = PROVIDER_COLORS[sel.provider] || 'bg-gray-500';
+                    return (
+                      <div className="flex items-center gap-1.5 mt-1.5 text-xs text-gray-500">
+                        <span className={`w-2 h-2 rounded-full ${dot}`} />
+                        <span>{sel.provider}</span>
+                        <span className="text-gray-300">|</span>
+                        <span className="font-mono text-gray-400">{sel.model}</span>
+                      </div>
+                    );
+                  })()}
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Max Turns</label>
