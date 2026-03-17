@@ -98,7 +98,6 @@ const NAV_GROUPS: NavGroup[] = [
   {
     items: [
       { href: '/repos', label: 'Repos', icon: <IconRepos /> },
-      { href: '/sessions', label: 'Sessions', icon: <IconSessions /> },
       { href: '/config', label: 'Config', icon: <IconConfig /> },
     ],
   },

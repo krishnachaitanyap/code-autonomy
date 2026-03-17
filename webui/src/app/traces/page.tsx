@@ -65,7 +65,7 @@ export default function TracesPage() {
         <option value="">All Repos</option>
         {repoList.map((r) => (
           <option key={r.id} value={r.id}>
-            {r.url || r.local_path}
+            {r.nickname || r.url || r.local_path}
           </option>
         ))}
       </select>

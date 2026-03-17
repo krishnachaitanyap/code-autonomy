@@ -8,7 +8,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, HTTPException, Query, WebSocket, WebSocketDisconnect
 
 from src.api.schemas import (
     CapacityTargetUpdate,
@@ -352,6 +352,7 @@ async def execute_run(
     run_id: str,
     target_branch: str = Query(""),
     target_repo_url: str = Query(""),
+    config_overrides: dict = Body(default={}),
 ):
     """Execute all migration steps (Phase 3)."""
     run = _service.get_run(run_id)
@@ -370,6 +371,13 @@ async def execute_run(
     except Exception:
         config = {}
 
+    # Apply model overrides
+    for section, values in (config_overrides or {}).items():
+        if section in config and isinstance(config[section], dict):
+            config[section].update(values)
+        else:
+            config[section] = values
+
     loop = asyncio.get_running_loop()
     loop.run_in_executor(
         _executor, lambda: _execute_run_background(run_id, config)
@@ -384,6 +392,7 @@ async def execute_single_step(
     step_index: int = Query(...),
     target_branch: str = Query(""),
     target_repo_url: str = Query(""),
+    config_overrides: dict = Body(default={}),
 ):
     """Execute a single migration step (Phase 3)."""
     run = _service.get_run(run_id)
@@ -399,6 +408,13 @@ async def execute_single_step(
         config = ConfigService().load_config()
     except Exception:
         config = {}
+
+    # Apply model overrides
+    for section, values in (config_overrides or {}).items():
+        if section in config and isinstance(config[section], dict):
+            config[section].update(values)
+        else:
+            config[section] = values
 
     loop = asyncio.get_running_loop()
     loop.run_in_executor(

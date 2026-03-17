@@ -528,7 +528,7 @@ export default function NewMigrationWizard() {
                   >
                     <option value="">Select a repo...</option>
                     {existingRepos.map(r => (
-                      <option key={r.id} value={r.id}>{r.url || r.local_path || r.id}</option>
+                      <option key={r.id} value={r.id}>{r.nickname || r.url || r.local_path || r.id}</option>
                     ))}
                   </select>
                 )}

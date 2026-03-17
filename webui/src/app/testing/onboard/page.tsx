@@ -92,7 +92,7 @@ export default function OnboardPage() {
             <option value="">-- Select Repository --</option>
             {existingRepos.map((r) => (
               <option key={r.id} value={r.id}>
-                {r.url || r.local_path || r.id}
+                {r.nickname || r.url || r.local_path || r.id}
               </option>
             ))}
             <option value="__new__">+ New Repository</option>

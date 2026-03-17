@@ -21,7 +21,7 @@ export default function RepoCard({ repo, branchCount, onDelete }: RepoCardProps)
       <div className="flex items-start justify-between">
         <div className="min-w-0 flex-1">
           <h3 className="text-lg font-semibold text-gray-900 truncate">
-            {repo.url || repo.local_path}
+            {repo.nickname || repo.url || repo.local_path}
           </h3>
           <p className="text-sm text-gray-500 mt-1 truncate">{repo.local_path}</p>
         </div>

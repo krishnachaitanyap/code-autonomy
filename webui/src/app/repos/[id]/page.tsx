@@ -169,7 +169,7 @@ export default function RepoDetailPage() {
       <div className="flex items-start justify-between">
         <div className="min-w-0 flex-1">
           <h1 className="text-2xl font-bold text-gray-900 truncate">
-            {repo.url || repo.local_path}
+            {repo.nickname || repo.url || repo.local_path}
           </h1>
           <div className="flex items-center gap-3 mt-2">
             <span
@@ -262,7 +262,7 @@ export default function RepoDetailPage() {
         <p className="text-sm text-gray-500 mb-4">
           Downstream services, data stores, messaging, and API endpoints detected via static analysis.
         </p>
-        <DependencyVisualizer repoId={repoId} repoName={repo.url || repo.local_path || repoId} />
+        <DependencyVisualizer repoId={repoId} repoName={repo.nickname || repo.url || repo.local_path || repoId} />
       </div>
 
       {/* SKILLS.md Editor */}

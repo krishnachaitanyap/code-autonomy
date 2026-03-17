@@ -16,6 +16,20 @@ router = APIRouter(tags=["repos"])
 repo_service = RepoService()
 
 
+def _default_nickname(url: str, local_path: str) -> str:
+    """Derive a short nickname from URL or local path."""
+    source = url or local_path
+    if not source:
+        return ""
+    # Strip trailing slashes and .git
+    name = source.rstrip("/")
+    if name.endswith(".git"):
+        name = name[:-4]
+    # Take the last path segment
+    name = name.rsplit("/", 1)[-1]
+    return name
+
+
 class SkillsBody(BaseModel):
     content: str
 
@@ -31,7 +45,9 @@ async def list_repos():
     return [
         RepoResponse(
             id=r.id, url=r.url, local_path=r.local_path,
-            platform=r.platform, created_at=r.created_at, updated_at=r.updated_at,
+            platform=r.platform,
+            nickname=r.nickname or _default_nickname(r.url, r.local_path),
+            created_at=r.created_at, updated_at=r.updated_at,
         )
         for r in repos
     ]
@@ -48,6 +64,21 @@ async def register_repo(body: RepoCreate):
         platform=body.platform,
         repo_url=body.url,
     )
+
+    # Set nickname
+    if body.nickname:
+        nickname = body.nickname
+    elif not repo.nickname:
+        nickname = _default_nickname(repo.url, repo.local_path)
+    else:
+        nickname = repo.nickname
+
+    if nickname and nickname != repo.nickname:
+        from src.data.database import get_session
+        from src.data.repositories import RepoRepository
+        with get_session() as db:
+            RepoRepository(db).update(repo.id, nickname=nickname)
+            repo.nickname = nickname
 
     # Auto-generate SKILLS.md and CLAUDE.md if local path exists
     if repo.local_path and os.path.isdir(repo.local_path):
@@ -80,7 +111,9 @@ async def register_repo(body: RepoCreate):
 
     return RepoResponse(
         id=repo.id, url=repo.url, local_path=repo.local_path,
-        platform=repo.platform, created_at=repo.created_at, updated_at=repo.updated_at,
+        platform=repo.platform,
+        nickname=repo.nickname or _default_nickname(repo.url, repo.local_path),
+        created_at=repo.created_at, updated_at=repo.updated_at,
     )
 
 
@@ -92,7 +125,9 @@ async def get_repo(repo_id: str):
         raise HTTPException(status_code=404, detail="Repository not found")
     return RepoResponse(
         id=repo.id, url=repo.url, local_path=repo.local_path,
-        platform=repo.platform, created_at=repo.created_at, updated_at=repo.updated_at,
+        platform=repo.platform,
+        nickname=repo.nickname or _default_nickname(repo.url, repo.local_path),
+        created_at=repo.created_at, updated_at=repo.updated_at,
     )
 
 

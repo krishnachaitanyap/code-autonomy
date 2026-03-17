@@ -35,6 +35,7 @@ export interface Repo {
   url: string;
   local_path: string;
   platform: string;
+  nickname: string;
   created_at: string;
   updated_at: string;
 }
@@ -98,7 +99,7 @@ export interface IdentifiedDependencies {
 export const repos = {
   list: () => request<Repo[]>('/repos'),
   get: (id: string) => request<Repo>(`/repos/${id}`),
-  create: (data: { url?: string; local_path?: string; platform?: string }) =>
+  create: (data: { url?: string; local_path?: string; platform?: string; nickname?: string }) =>
     request<Repo>('/repos', { method: 'POST', body: JSON.stringify(data) }),
   delete: (id: string) => {
     const url = `${API_BASE}/repos/${id}`;
@@ -168,7 +169,7 @@ export const sessions = {
     return request<{ sessions: Session[]; total: number }>(`/sessions${query}`);
   },
   get: (id: string) => request<Session>(`/sessions/${id}`),
-  create: (data: { repo_id: string; mode: string; requirements: string; branch?: string; context?: Array<{role: string; content: string}>; recipe_ids?: string[] }) =>
+  create: (data: { repo_id: string; mode: string; requirements: string; branch?: string; context?: Array<{role: string; content: string}>; recipe_ids?: string[]; config_overrides?: Record<string, any> }) =>
     request<Session>('/sessions', { method: 'POST', body: JSON.stringify(data) }),
   cancel: (id: string) =>
     request<{ status: string }>(`/sessions/${id}/cancel`, { method: 'POST' }),
@@ -187,6 +188,52 @@ export const config = {
       method: 'PUT',
       body: JSON.stringify({ updates, profile_name: profileName || 'default' }),
     }),
+};
+
+// ---------------------------------------------------------------------------
+// Models — LLM model configurations
+// ---------------------------------------------------------------------------
+
+export interface ModelConfig {
+  id: string;
+  label: string;
+  provider: string;
+  model: string;
+  api_key_set: boolean;
+  base_url: string;
+  extra_config: Record<string, any>;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export const models = {
+  list: () => request<{ models: ModelConfig[]; total: number }>('/models'),
+  create: (data: {
+    label: string;
+    provider: string;
+    model: string;
+    api_key?: string;
+    base_url?: string;
+    extra_config?: Record<string, any>;
+    is_default?: boolean;
+  }) => request<ModelConfig>('/models', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: {
+    label?: string;
+    provider?: string;
+    model?: string;
+    api_key?: string;
+    base_url?: string;
+    extra_config?: Record<string, any>;
+    is_default?: boolean;
+  }) => request<ModelConfig>(`/models/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: (id: string) => request<void>(`/models/${id}`, { method: 'DELETE' }),
+  setDefault: (id: string) => request<ModelConfig>(`/models/${id}/default`, { method: 'PUT' }),
+  test: (id: string) => request<{ status: string; response?: string; error?: string; latency_ms: number }>(`/models/${id}/test`, { method: 'POST' }),
+  testInline: (data: {
+    label: string; provider: string; model: string; api_key?: string;
+    base_url?: string; extra_config?: Record<string, any>;
+  }) => request<{ status: string; response?: string; error?: string; latency_ms: number }>('/models/test-inline', { method: 'POST', body: JSON.stringify(data) }),
 };
 
 // ---------------------------------------------------------------------------
@@ -521,7 +568,7 @@ export const workflows = {
     return request<{ workflows: Workflow[]; total: number }>(`/workflows${query}`);
   },
   get: (id: string) => request<Workflow>(`/workflows/${id}`),
-  create: (data: { repo_id?: string; project_id?: string; goal: string; mode?: string; branch?: string; token_budget?: number; recipe_ids?: string[] }) =>
+  create: (data: { repo_id?: string; project_id?: string; goal: string; mode?: string; branch?: string; token_budget?: number; recipe_ids?: string[]; config_overrides?: Record<string, any> }) =>
     request<Workflow>('/workflows', { method: 'POST', body: JSON.stringify(data) }),
   resume: (id: string) => request<Workflow>(`/workflows/${id}/resume`, { method: 'POST' }),
   cancel: (id: string) => request<{ status: string }>(`/workflows/${id}/cancel`, { method: 'POST' }),
@@ -933,18 +980,24 @@ export const migrations = {
     return request<{ runs: MigrationRun[]; total: number }>(`/migrations/runs${query}`);
   },
   getRun: (id: string) => request<MigrationRun>(`/migrations/runs/${id}`),
-  executeRun: (id: string, targetBranch?: string, targetRepoUrl?: string) => {
+  executeRun: (id: string, targetBranch?: string, targetRepoUrl?: string, configOverrides?: Record<string, any>) => {
     const params = new URLSearchParams();
     if (targetBranch) params.set('target_branch', targetBranch);
     if (targetRepoUrl) params.set('target_repo_url', targetRepoUrl);
     const qs = params.toString() ? `?${params}` : '';
-    return request<MigrationRun>(`/migrations/runs/${id}/execute${qs}`, { method: 'POST' });
+    return request<MigrationRun>(`/migrations/runs/${id}/execute${qs}`, {
+      method: 'POST',
+      body: JSON.stringify(configOverrides || {}),
+    });
   },
-  executeStep: (runId: string, stepIndex: number, targetBranch?: string, targetRepoUrl?: string) => {
+  executeStep: (runId: string, stepIndex: number, targetBranch?: string, targetRepoUrl?: string, configOverrides?: Record<string, any>) => {
     const params = new URLSearchParams({ step_index: String(stepIndex) });
     if (targetBranch) params.set('target_branch', targetBranch);
     if (targetRepoUrl) params.set('target_repo_url', targetRepoUrl);
-    return request<MigrationRun>(`/migrations/runs/${runId}/execute-step?${params}`, { method: 'POST' });
+    return request<MigrationRun>(`/migrations/runs/${runId}/execute-step?${params}`, {
+      method: 'POST',
+      body: JSON.stringify(configOverrides || {}),
+    });
   },
   cancelRun: (id: string) =>
     request<{ status: string }>(`/migrations/runs/${id}/cancel`, { method: 'POST' }),

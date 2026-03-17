@@ -37,8 +37,8 @@ class RepoRepository:
     def list_all(self) -> list[Repo]:
         return self.db.query(Repo).order_by(Repo.created_at.desc()).all()
 
-    def create(self, repo_id: str, url: str = "", local_path: str = "", platform: str = "local") -> Repo:
-        repo = Repo(id=repo_id, url=url, local_path=local_path, platform=platform)
+    def create(self, repo_id: str, url: str = "", local_path: str = "", platform: str = "local", nickname: str = "") -> Repo:
+        repo = Repo(id=repo_id, url=url, local_path=local_path, platform=platform, nickname=nickname)
         self.db.add(repo)
         self.db.flush()
         return repo

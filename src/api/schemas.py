@@ -16,6 +16,7 @@ class RepoCreate(BaseModel):
     url: str = ""
     local_path: str = ""
     platform: str = "local"
+    nickname: str = ""
 
 
 class RepoResponse(BaseModel):
@@ -23,6 +24,7 @@ class RepoResponse(BaseModel):
     url: str
     local_path: str
     platform: str
+    nickname: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -82,6 +84,48 @@ class ConfigResponse(BaseModel):
 class ConfigUpdate(BaseModel):
     updates: dict
     profile_name: str = "default"
+
+
+# ---------------------------------------------------------------------------
+# Model Configs
+# ---------------------------------------------------------------------------
+
+class ModelConfigCreate(BaseModel):
+    label: str
+    provider: str
+    model: str
+    api_key: str = ""
+    base_url: str = ""
+    extra_config: dict = Field(default_factory=dict)
+    is_default: bool = False
+
+
+class ModelConfigUpdate(BaseModel):
+    label: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    extra_config: dict | None = None
+    is_default: bool | None = None
+
+
+class ModelConfigResponse(BaseModel):
+    id: str
+    label: str
+    provider: str
+    model: str
+    api_key_set: bool = False
+    base_url: str = ""
+    extra_config: dict = Field(default_factory=dict)
+    is_default: bool = False
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ModelConfigListResponse(BaseModel):
+    models: list[ModelConfigResponse]
+    total: int
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +309,7 @@ class TestRunCreate(BaseModel):
     strategy: str = "auto"
     config: dict = Field(default_factory=dict)
     branch: str = ""
+    config_overrides: dict = Field(default_factory=dict)
 
 
 class TestRunResponse(BaseModel):
@@ -418,6 +463,7 @@ class WorkflowCreate(BaseModel):
     branch: str = ""
     token_budget: int = 0  # 0 = unlimited
     recipe_ids: list[str] = Field(default_factory=list)
+    config_overrides: dict = Field(default_factory=dict)
 
 
 class SubtaskSchema(BaseModel):

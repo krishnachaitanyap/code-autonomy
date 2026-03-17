@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { migrations, tools as toolsApi, type MigrationProject, type MigrationRecipe, type MigrationRun, type CustomTool } from '@/lib/api';
@@ -9,6 +9,7 @@ import GapAnalysisPanel from '@/components/migration/GapAnalysisPanel';
 import RecipeGrid from '@/components/migration/RecipeGrid';
 import CapacityForm from '@/components/migration/CapacityForm';
 import RoadmapTimeline from '@/components/migration/RoadmapTimeline';
+import ModelSelector from '@/components/ModelSelector';
 
 type Tab = 'gaps' | 'recipes' | 'capacity' | 'roadmap' | 'runs';
 
@@ -39,9 +40,12 @@ export default function MigrationProjectDetail() {
   // Execution settings state
   const [targetRepoUrl, setTargetRepoUrl] = useState('');
   const [targetBranch, setTargetBranch] = useState('');
+  const [selectedModelId, setSelectedModelId] = useState('');
+  const [modelOverrides, setModelOverrides] = useState<Record<string, any>>({});
 
   // Available custom tools (for recipe builder)
   const [availableTools, setAvailableTools] = useState<CustomTool[]>([]);
+  const recipeFormRef = useRef<HTMLDivElement>(null);
 
   // Custom recipe form state
   const [showRecipeForm, setShowRecipeForm] = useState(false);
@@ -201,6 +205,7 @@ export default function MigrationProjectDetail() {
       tool_ids: recipe.tool_ids || [],
     });
     setShowRecipeForm(true);
+    setTimeout(() => recipeFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
   };
 
   const handleDeleteRecipe = async (recipeId: string) => {
@@ -242,7 +247,7 @@ export default function MigrationProjectDetail() {
     if (runs.length === 0) return;
     setExecutingStep(true);
     try {
-      await migrations.executeStep(runs[0].id, stepIndex, targetBranch, targetRepoUrl);
+      await migrations.executeStep(runs[0].id, stepIndex, targetBranch, targetRepoUrl, Object.keys(modelOverrides).length > 0 ? modelOverrides : undefined);
       await loadRuns();
     } catch (err: any) {
       setError(err.message);
@@ -254,7 +259,7 @@ export default function MigrationProjectDetail() {
   const handleExecuteAll = async () => {
     if (runs.length === 0) return;
     try {
-      await migrations.executeRun(runs[0].id, targetBranch, targetRepoUrl);
+      await migrations.executeRun(runs[0].id, targetBranch, targetRepoUrl, Object.keys(modelOverrides).length > 0 ? modelOverrides : undefined);
       await loadRuns();
     } catch (err: any) {
       setError(err.message);
@@ -474,7 +479,7 @@ export default function MigrationProjectDetail() {
 
               {/* Custom Recipe Form */}
               {showRecipeForm && (
-                <div className="mb-6 bg-emerald-50 border border-emerald-200 rounded-lg p-4">
+                <div ref={recipeFormRef} className="mb-6 bg-emerald-50 border border-emerald-200 rounded-lg p-4">
                   <h4 className="text-sm font-semibold text-gray-900 mb-3">
                     {editingRecipeId ? 'Edit Migration Recipe' : 'Create Custom Migration Recipe'}
                   </h4>
@@ -773,6 +778,14 @@ export default function MigrationProjectDetail() {
                         placeholder="migration/my-app"
                       />
                     </div>
+                  </div>
+                  <div className="mt-3">
+                    <label className="block text-xs text-gray-600 mb-1">LLM Model</label>
+                    <ModelSelector
+                      selectedModelId={selectedModelId}
+                      onChange={(id, overrides) => { setSelectedModelId(id); setModelOverrides(overrides); }}
+                      storageKey="selected-model-migration"
+                    />
                   </div>
                 </div>
               )}

@@ -8,6 +8,7 @@ import {
   type ReferenceLearnResult, type Workflow, type WorkflowSubtask, type MigrationRecipe,
 } from '@/lib/api';
 import RecipePicker from '@/components/RecipePicker';
+import ModelSelector from '@/components/ModelSelector';
 import WorkflowDiagram from '@/components/WorkflowDiagram';
 
 // ---------------------------------------------------------------------------
@@ -234,6 +235,9 @@ function AgentsPage() {
   const [availableRecipes, setAvailableRecipes] = useState<MigrationRecipe[]>([]);
   const [selectedRecipeIds, setSelectedRecipeIds] = useState<string[]>([]);
 
+  const [selectedModelId, setSelectedModelId] = useState('');
+  const [modelOverrides, setModelOverrides] = useState<Record<string, any>>({});
+
   const terminalRef = useRef<HTMLDivElement>(null);
 
   // Load branches when project/repo selection changes
@@ -410,6 +414,7 @@ function AgentsPage() {
           branch,
           token_budget: newWorkflow.token_budget || undefined,
           recipe_ids: selectedRecipeIds.length > 0 ? selectedRecipeIds : undefined,
+          config_overrides: Object.keys(modelOverrides).length > 0 ? modelOverrides : undefined,
         });
         created = workflowToUnified(r);
       } else {
@@ -630,7 +635,7 @@ function AgentsPage() {
                     .filter((r) => !projects.some((p) => p.repo_url === r.url))
                     .map((r) => (
                       <option key={`repo-${r.id}`} value={r.id}>
-                        {r.url || r.local_path || r.id}
+                        {r.nickname || r.url || r.local_path || r.id}
                       </option>
                     ))}
                 </select>
@@ -709,7 +714,7 @@ function AgentsPage() {
                   <option value="">Select repository...</option>
                   {repoList.map((r) => (
                     <option key={r.id} value={r.id}>
-                      {r.url || r.local_path || r.id}
+                      {r.nickname || r.url || r.local_path || r.id}
                     </option>
                   ))}
                   {repoList.length === 0 && projects.map((p) => (
@@ -879,6 +884,16 @@ function AgentsPage() {
               )}
             </div>
           )}
+
+          {/* Model selector */}
+          <ModelSelector
+            selectedModelId={selectedModelId}
+            onChange={(modelId, overrides) => {
+              setSelectedModelId(modelId);
+              setModelOverrides(overrides);
+            }}
+            storageKey="agents-model"
+          />
 
           <div className="flex justify-end gap-2">
             <button type="button" onClick={() => setShowNewRun(false)} className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50">

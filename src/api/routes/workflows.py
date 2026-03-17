@@ -113,12 +113,21 @@ async def create_workflow(data: WorkflowCreate):
     except Exception:
         config = {}
 
+    # Apply any model/config overrides
+    for section, values in (data.config_overrides or {}).items():
+        if section in config and isinstance(config[section], dict):
+            config[section].update(values)
+        else:
+            config[section] = values
+
     # Create workflow record
     wf_config: dict = {}
     if data.branch:
         wf_config["branch"] = data.branch
     if data.recipe_ids:
         wf_config["recipe_ids"] = data.recipe_ids
+    if data.config_overrides:
+        wf_config["config_overrides"] = data.config_overrides
     wf = _service.create_workflow(
         goal=data.goal,
         mode=data.mode,

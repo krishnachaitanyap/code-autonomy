@@ -48,6 +48,7 @@ class Repo(Base):
     url = Column(String(1024), nullable=False, default="")
     local_path = Column(String(1024), nullable=False, default="")
     platform = Column(String(32), nullable=False, default="local")  # github | bitbucket | local
+    nickname = Column(String(256), nullable=False, default="")  # friendly display name
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
 
@@ -289,6 +290,28 @@ class ConfigProfile(Base):
 
     def __repr__(self) -> str:
         return f"<ConfigProfile name={self.name!r} active={self.is_active}>"
+
+
+# ---------------------------------------------------------------------------
+# ModelConfig — user-configured LLM models for per-session selection
+# ---------------------------------------------------------------------------
+
+class ModelConfig(Base):
+    __tablename__ = "model_configs"
+
+    id = Column(String(64), primary_key=True, default=_uuid)
+    label = Column(String(128), nullable=False)
+    provider = Column(String(32), nullable=False)  # openai | anthropic | gemini | azure | bedrock
+    model = Column(String(256), nullable=False)
+    api_key = Column(String(1024), nullable=False, default="")
+    base_url = Column(String(1024), nullable=False, default="")
+    extra_config = Column(JSON, nullable=False, default=dict)
+    is_default = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+    def __repr__(self) -> str:
+        return f"<ModelConfig id={self.id!r} label={self.label!r} provider={self.provider!r}>"
 
 
 # ---------------------------------------------------------------------------

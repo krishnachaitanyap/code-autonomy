@@ -5,6 +5,7 @@ import { repos, sessions, workflows as workflowsApi, migrations, type Repo, type
 import RecipePicker from '@/components/RecipePicker';
 import { useSessionStream, type WSMessage } from '@/lib/websocket';
 import StructuredResult, { tryParseStructured } from '@/components/StructuredResult';
+import ModelSelector from '@/components/ModelSelector';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -323,6 +324,8 @@ export default function ChatPage() {
   const [activeWorkflow, setActiveWorkflow] = useState<Workflow | null>(null);
   const [availableRecipes, setAvailableRecipes] = useState<MigrationRecipe[]>([]);
   const [selectedRecipeIds, setSelectedRecipeIds] = useState<string[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState('');
+  const [modelOverrides, setModelOverrides] = useState<Record<string, any>>({});
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activityEndRef = useRef<HTMLDivElement>(null);
@@ -642,6 +645,7 @@ export default function ChatPage() {
           goal: text,
           mode: 'engineering',
           branch: branch || undefined,
+          config_overrides: Object.keys(modelOverrides).length > 0 ? modelOverrides : undefined,
         });
         setActiveWorkflow(wf);
 
@@ -691,6 +695,7 @@ export default function ChatPage() {
         branch: branch || undefined,
         context: context.length > 0 ? context : undefined,
         recipe_ids: selectedRecipeIds.length > 0 ? selectedRecipeIds : undefined,
+        config_overrides: Object.keys(modelOverrides).length > 0 ? modelOverrides : undefined,
       });
       setCurrentSession(s);
       setWsSessionId(s.id);
@@ -827,7 +832,7 @@ export default function ChatPage() {
           <option value="">Select repo...</option>
           {repoList.map((r) => (
             <option key={r.id} value={r.id}>
-              {r.url || r.local_path || r.id}
+              {r.nickname || r.url || r.local_path || r.id}
             </option>
           ))}
         </select>
@@ -927,6 +932,13 @@ export default function ChatPage() {
             </button>
           ))}
         </div>
+
+        {/* Model selector */}
+        <ModelSelector
+          selectedModelId={selectedModelId}
+          onChange={(id, overrides) => { setSelectedModelId(id); setModelOverrides(overrides); }}
+          storageKey="selected-model-chat"
+        />
 
         {/* Activity toggle + WS indicator */}
         <div className="flex items-center gap-1">
@@ -1200,7 +1212,7 @@ export default function ChatPage() {
             {/* Footer actions */}
             <div className="flex items-center justify-between pt-1">
               <span className="text-[10px] text-gray-400">
-                {selectedRepo ? (selectedRepo.url || selectedRepo.local_path) : ''} @ {branch || 'default'}
+                {selectedRepo ? (selectedRepo.nickname || selectedRepo.url || selectedRepo.local_path) : ''} @ {branch || 'default'}
               </span>
               {messages.length > 0 && (
                 <button
