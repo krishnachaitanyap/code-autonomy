@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { repos, sessions, workflows as workflowsApi, migrations, type Repo, type Session, type Workflow, type WorkflowSubtask, type MigrationRecipe } from '@/lib/api';
 import RecipePicker from '@/components/RecipePicker';
+import MermaidBlock from '@/components/MermaidBlock';
 import { useSessionStream, type WSMessage } from '@/lib/websocket';
 import StructuredResult, { tryParseStructured } from '@/components/StructuredResult';
 import ModelSelector from '@/components/ModelSelector';
@@ -183,6 +184,11 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
       setTimeout(() => setCopied(false), 2000);
     } catch { /* clipboard not available */ }
   };
+
+  // Mermaid diagram rendering
+  if (language === 'mermaid') {
+    return <MermaidBlock code={code} />;
+  }
 
   // Diff detection
   if (language === 'diff' || code.split('\n').some(l => /^[+-]/.test(l) && !/^[+-]{3}/.test(l))) {
