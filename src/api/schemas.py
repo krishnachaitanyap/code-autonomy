@@ -119,6 +119,7 @@ class ModelConfigResponse(BaseModel):
     base_url: str = ""
     extra_config: dict = Field(default_factory=dict)
     is_default: bool = False
+    is_system: bool = False
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 

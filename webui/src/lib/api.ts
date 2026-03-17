@@ -203,6 +203,7 @@ export interface ModelConfig {
   base_url: string;
   extra_config: Record<string, any>;
   is_default: boolean;
+  is_system: boolean;
   created_at: string;
   updated_at: string;
 }

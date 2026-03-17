@@ -29,24 +29,25 @@ def _model_to_response(m: ModelConfig) -> ModelConfigResponse:
         base_url=m.base_url or "",
         extra_config=m.extra_config or {},
         is_default=m.is_default,
+        is_system=m.is_system if hasattr(m, 'is_system') else False,
         created_at=str(m.created_at) if m.created_at else None,
         updated_at=str(m.updated_at) if m.updated_at else None,
     )
 
 
-def _auto_seed() -> None:
-    """If model_configs table is empty, seed one entry from config.ini."""
+def _build_system_config() -> dict | None:
+    """Build system model fields from config.ini. Returns None if no AI config."""
     try:
         from src.services.config_service import ConfigService
         config = ConfigService().load_config()
         ai = config.get("ai", {})
         if not ai:
-            return
-        provider = ai.get("provider", "openai")
+            return None
+        provider = (ai.get("provider") or "openai").lower()
         model = ai.get("model", "")
         api_key = ai.get("api_key", "")
         if not model and not api_key:
-            return
+            return None
 
         label_map = {
             "openai": "OpenAI",
@@ -54,39 +55,104 @@ def _auto_seed() -> None:
             "gemini": "Google Gemini",
             "azure": "Azure OpenAI",
             "bedrock": "AWS Bedrock",
+            "cdao": "AWS Bedrock (CDAO)",
         }
         label = f"{label_map.get(provider, provider)} — {model}" if model else label_map.get(provider, provider)
 
-        from src.data.models import _uuid
-        m = ModelConfig(
-            id=_uuid(),
-            label=label,
-            provider=provider,
-            model=model,
-            api_key=api_key,
-            base_url=ai.get("base_url", ""),
-            is_default=True,
-        )
+        # Capture all [ai] config fields (except provider/model/api_key/base_url which are top-level)
+        skip_keys = {"provider", "model", "api_key", "api_key_env", "base_url"}
+        extra_config: dict = {}
+        for key, val in ai.items():
+            if key in skip_keys:
+                continue
+            if isinstance(val, bool):
+                extra_config[key] = val
+            elif isinstance(val, (int, float)):
+                extra_config[key] = val
+            elif isinstance(val, str) and val.strip():
+                extra_config[key] = val.strip()
+
+        return {
+            "label": label,
+            "provider": provider,
+            "model": model,
+            "api_key": api_key,
+            "base_url": ai.get("base_url", ""),
+            "extra_config": extra_config,
+        }
+    except Exception as exc:
+        logger.debug("_build_system_config failed: %s", exc)
+        return None
+
+
+def _ensure_system_model() -> None:
+    """Ensure a system model exists that reflects config.ini. Creates or updates as needed."""
+    sys_cfg = _build_system_config()
+    if not sys_cfg:
+        return
+
+    try:
         with get_session() as db:
+            # Look for existing system model
+            existing = db.query(ModelConfig).filter(ModelConfig.is_system == True).first()
+            if existing:
+                # Update it to reflect current config.ini
+                existing.label = sys_cfg["label"]
+                existing.provider = sys_cfg["provider"]
+                existing.model = sys_cfg["model"]
+                existing.api_key = sys_cfg["api_key"]
+                existing.base_url = sys_cfg["base_url"]
+                existing.extra_config = sys_cfg["extra_config"]
+                db.flush()
+                return
+
+            # No system model — check if there's a non-system default that matches config.ini (legacy seed)
+            legacy = db.query(ModelConfig).filter(
+                ModelConfig.is_default == True,
+                ModelConfig.provider == sys_cfg["provider"],
+                ModelConfig.model == sys_cfg["model"],
+            ).first()
+            if legacy:
+                # Upgrade legacy seed to system model
+                legacy.is_system = True
+                legacy.label = sys_cfg["label"]
+                legacy.api_key = sys_cfg["api_key"]
+                legacy.base_url = sys_cfg["base_url"]
+                legacy.extra_config = sys_cfg["extra_config"]
+                db.flush()
+                logger.info("Upgraded legacy model to system model: %s", sys_cfg["label"])
+                return
+
+            # Create new system model
+            from src.data.models import _uuid
+            m = ModelConfig(
+                id=_uuid(),
+                label=sys_cfg["label"],
+                provider=sys_cfg["provider"],
+                model=sys_cfg["model"],
+                api_key=sys_cfg["api_key"],
+                base_url=sys_cfg["base_url"],
+                extra_config=sys_cfg["extra_config"],
+                is_default=True,
+                is_system=True,
+            )
             db.add(m)
             db.flush()
-        logger.info("Auto-seeded model config from config.ini: %s", label)
+            logger.info("Created system model from config.ini: %s", sys_cfg["label"])
     except Exception as exc:
-        logger.debug("Auto-seed skipped: %s", exc)
+        logger.debug("_ensure_system_model failed: %s", exc)
 
 
 @router.get("", response_model=ModelConfigListResponse)
 async def list_models():
-    """List all configured models. Auto-seeds from config.ini if empty."""
+    """List all configured models. Ensures system model from config.ini exists."""
     init_db()
+    _ensure_system_model()
     with get_session() as db:
-        models = db.query(ModelConfig).order_by(ModelConfig.created_at).all()
-        if not models:
-            _auto_seed()
-            models = db.query(ModelConfig).order_by(ModelConfig.created_at).all()
+        all_models = db.query(ModelConfig).order_by(ModelConfig.created_at).all()
         return ModelConfigListResponse(
-            models=[_model_to_response(m) for m in models],
-            total=len(models),
+            models=[_model_to_response(m) for m in all_models],
+            total=len(all_models),
         )
 
 
@@ -123,6 +189,8 @@ async def update_model(model_id: str, data: ModelConfigUpdate):
         m = db.get(ModelConfig, model_id)
         if not m:
             raise HTTPException(status_code=404, detail="Model config not found")
+        if m.is_system:
+            raise HTTPException(status_code=403, detail="System model (from config.ini) cannot be edited")
         for field, value in data.model_dump(exclude_unset=True).items():
             setattr(m, field, value)
         if data.is_default:
@@ -140,6 +208,8 @@ async def delete_model(model_id: str):
         m = db.get(ModelConfig, model_id)
         if not m:
             raise HTTPException(status_code=404, detail="Model config not found")
+        if m.is_system:
+            raise HTTPException(status_code=403, detail="System model (from config.ini) cannot be deleted")
         db.delete(m)
         db.flush()
 

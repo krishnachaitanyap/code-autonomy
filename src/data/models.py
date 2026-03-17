@@ -307,6 +307,7 @@ class ModelConfig(Base):
     base_url = Column(String(1024), nullable=False, default="")
     extra_config = Column(JSON, nullable=False, default=dict)
     is_default = Column(Boolean, nullable=False, default=False)
+    is_system = Column(Boolean, nullable=False, default=False)  # True = seeded from config.ini, read-only
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
 

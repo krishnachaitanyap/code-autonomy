@@ -265,7 +265,7 @@ export default function ConfigPage() {
           <div className="divide-y divide-gray-100">
             {modelList.map(m => (
               <div key={m.id}>
-              <div className="flex items-center justify-between px-4 py-3 hover:bg-gray-50">
+              <div className={`flex items-center justify-between px-4 py-3 ${m.is_system ? 'bg-gray-50/70' : 'hover:bg-gray-50'}`}>
                 <div className="flex items-center gap-3">
                   <span className={`w-2.5 h-2.5 rounded-full ${
                     m.provider === 'openai' ? 'bg-green-500' :
@@ -278,6 +278,7 @@ export default function ConfigPage() {
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium text-gray-800">{m.label}</span>
                       {m.is_default && <span className="px-1.5 py-0.5 text-[10px] bg-yellow-100 text-yellow-700 rounded">default</span>}
+                      {m.is_system && <span className="px-1.5 py-0.5 text-[10px] bg-gray-200 text-gray-600 rounded">system</span>}
                     </div>
                     <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                       <span className="text-xs text-gray-500">{m.provider}</span>
@@ -301,22 +302,62 @@ export default function ConfigPage() {
                   >
                     {testingModelId === m.id ? 'Testing...' : 'Test'}
                   </button>
-                  {!m.is_default && (
+                  {!m.is_system && !m.is_default && (
                     <button onClick={() => handleSetDefault(m.id)} className="px-2 py-1 text-xs text-gray-500 hover:text-indigo-600" title="Set as default">
                       Set Default
                     </button>
                   )}
-                  <button onClick={() => startEditModel(m)} className="px-2 py-1 text-xs text-gray-500 hover:text-indigo-600">
-                    Edit
-                  </button>
-                  <button onClick={() => handleDeleteModel(m.id)} className="px-2 py-1 text-xs text-red-400 hover:text-red-600">
-                    Delete
-                  </button>
+                  {!m.is_system && (
+                    <button onClick={() => startEditModel(m)} className="px-2 py-1 text-xs text-gray-500 hover:text-indigo-600">
+                      Edit
+                    </button>
+                  )}
+                  {!m.is_system && (
+                    <button onClick={() => handleDeleteModel(m.id)} className="px-2 py-1 text-xs text-red-400 hover:text-red-600">
+                      Delete
+                    </button>
+                  )}
                 </div>
               </div>
+              {/* Model config details (read-only for system, info for all) */}
+              {m.is_system && (
+                <div className="px-4 pb-3 ml-[calc(0.625rem+0.75rem)]">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1">
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-[10px] text-gray-400">provider:</span>
+                      <span className="text-[10px] text-gray-600 font-mono">{m.provider}</span>
+                    </div>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-[10px] text-gray-400">model:</span>
+                      <span className="text-[10px] text-gray-600 font-mono truncate">{m.model}</span>
+                    </div>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-[10px] text-gray-400">api_key:</span>
+                      <span className={`text-[10px] font-mono ${m.api_key_set ? 'text-green-600' : 'text-gray-400'}`}>
+                        {m.api_key_set ? 'configured' : 'not set'}
+                      </span>
+                    </div>
+                    {m.base_url && (
+                      <div className="flex items-baseline gap-1.5 col-span-2">
+                        <span className="text-[10px] text-gray-400">base_url:</span>
+                        <span className="text-[10px] text-gray-600 font-mono truncate">{m.base_url}</span>
+                      </div>
+                    )}
+                    {m.extra_config && Object.entries(m.extra_config).map(([key, val]) => (
+                      <div key={key} className="flex items-baseline gap-1.5">
+                        <span className="text-[10px] text-gray-400">{key}:</span>
+                        <span className="text-[10px] text-gray-600 font-mono truncate">
+                          {typeof val === 'boolean' ? (val ? 'true' : 'false') : String(val)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1.5 italic">Configured in config.ini {'\u2014'} read-only</p>
+                </div>
+              )}
               {/* Test result inline */}
               {testResults[m.id] && (
-                <div className={`px-4 pb-3 -mt-1 ${testResults[m.id].status === 'ok' ? '' : ''}`}>
+                <div className="px-4 pb-3 -mt-1">
                   <div className={`text-xs px-3 py-2 rounded-md ${
                     testResults[m.id].status === 'ok'
                       ? 'bg-green-50 text-green-700 border border-green-200'

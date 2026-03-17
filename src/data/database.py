@@ -81,6 +81,11 @@ def init_db(url: str = "") -> None:
         if 'tool_ids' not in columns:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE custom_migration_recipes ADD COLUMN tool_ids JSON DEFAULT '[]'"))
+    if 'model_configs' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('model_configs')]
+        if 'is_system' not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE model_configs ADD COLUMN is_system BOOLEAN DEFAULT 0"))
     if 'repos' in inspector.get_table_names():
         columns = [c['name'] for c in inspector.get_columns('repos')]
         if 'nickname' not in columns:
