@@ -366,22 +366,34 @@ export default function ChatPage() {
       };
       setActivityLog(prev => [...prev, entry]);
 
+      // Stop polling first to prevent duplicate messages
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+
       // Add assistant message from WS complete event
       const resultContent = latest.data.summary || 'Done.';
-      setMessages(prev => [
-        ...prev,
-        {
-          id: `assistant-${Date.now()}`,
-          role: 'assistant',
-          content: resultContent,
-          mode,
-          sessionId: wsSessionId || undefined,
-          status: latest.data.success ? 'completed' : 'failed',
-          partial: !!latest.data.partial,
-          canExploreDeeper: !!latest.data.can_explore_deeper,
-          timestamp: new Date().toISOString(),
-        },
-      ]);
+      setMessages(prev => {
+        // Guard: skip if an assistant message for this session already exists
+        if (wsSessionId && prev.some(m => m.role === 'assistant' && m.sessionId === wsSessionId && m.status)) {
+          return prev;
+        }
+        return [
+          ...prev,
+          {
+            id: `assistant-ws-${Date.now()}`,
+            role: 'assistant',
+            content: resultContent,
+            mode,
+            sessionId: wsSessionId || undefined,
+            status: latest.data.success ? 'completed' : 'failed',
+            partial: !!latest.data.partial,
+            canExploreDeeper: !!latest.data.can_explore_deeper,
+            timestamp: new Date().toISOString(),
+          },
+        ];
+      });
       setSending(false);
       setWsSessionId(null);
     } else if (latest.type === 'error') {
@@ -598,22 +610,27 @@ export default function ChatPage() {
             detail: `${s.status === 'completed' ? 'Completed' : 'Failed'} (${s.turns_used} turns)`,
           }]);
 
-          // Add assistant message
+          // Add assistant message (skip if WS already added one for this session)
           const isPartial = s.status === 'failed' && !!s.result_summary;
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `assistant-${Date.now()}`,
-              role: 'assistant',
-              content: resultContent,
-              mode: s.mode as Mode,
-              sessionId: s.id,
-              status: s.status,
-              partial: isPartial,
-              canExploreDeeper: isPartial,
-              timestamp: new Date().toISOString(),
-            },
-          ]);
+          setMessages((prev) => {
+            if (prev.some(m => m.role === 'assistant' && m.sessionId === s.id && m.status)) {
+              return prev;
+            }
+            return [
+              ...prev,
+              {
+                id: `assistant-poll-${Date.now()}`,
+                role: 'assistant',
+                content: resultContent,
+                mode: s.mode as Mode,
+                sessionId: s.id,
+                status: s.status,
+                partial: isPartial,
+                canExploreDeeper: isPartial,
+                timestamp: new Date().toISOString(),
+              },
+            ];
+          });
         }
       } catch (err) {
         console.error('Poll error:', err);
@@ -1004,11 +1021,11 @@ export default function ChatPage() {
 
               {messages.map((msg) => (
                 <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[75%] rounded-lg px-4 py-3 ${
+                  <div className={`max-w-[75%] rounded-lg px-4 py-3 overflow-hidden ${
                     msg.role === 'user'
                       ? 'bg-indigo-600 text-white'
                       : 'bg-white border border-gray-200 text-gray-800'
-                  }`}>
+                  }`} style={{ wordBreak: 'break-word' }}>
                     {/* Header */}
                     <div className="flex items-center gap-2 mb-1">
                       <span className={`text-xs font-medium ${
