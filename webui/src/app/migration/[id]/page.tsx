@@ -43,6 +43,7 @@ export default function MigrationProjectDetail() {
   // Custom recipe form state
   const [showRecipeForm, setShowRecipeForm] = useState(false);
   const [creatingRecipe, setCreatingRecipe] = useState(false);
+  const [editingRecipeId, setEditingRecipeId] = useState<string | null>(null);
   const [recipeForm, setRecipeForm] = useState({
     name: '',
     category: 'custom',
@@ -135,10 +136,15 @@ export default function MigrationProjectDetail() {
     }
   };
 
+  const _resetRecipeForm = () => {
+    setRecipeForm({ name: '', category: 'custom', description: '', priority: 50, tags: '', prerequisites: '', agent_instructions: '', source_framework: '', target_framework: '' });
+    setEditingRecipeId(null);
+  };
+
   const handleCreateRecipe = async () => {
     setCreatingRecipe(true);
     try {
-      await migrations.createCustomRecipe({
+      const payload = {
         name: recipeForm.name,
         category: recipeForm.category,
         description: recipeForm.description,
@@ -148,14 +154,45 @@ export default function MigrationProjectDetail() {
         agent_instructions: recipeForm.agent_instructions,
         source_framework: recipeForm.source_framework,
         target_framework: recipeForm.target_framework,
-      });
+      };
+      if (editingRecipeId) {
+        await migrations.updateCustomRecipe(editingRecipeId, payload);
+      } else {
+        await migrations.createCustomRecipe(payload);
+      }
       setShowRecipeForm(false);
-      setRecipeForm({ name: '', category: 'custom', description: '', priority: 50, tags: '', prerequisites: '', agent_instructions: '', source_framework: '', target_framework: '' });
+      _resetRecipeForm();
       await loadRecipes();
     } catch (err: any) {
-      setError(err.message || 'Failed to create recipe');
+      setError(err.message || 'Failed to save recipe');
     } finally {
       setCreatingRecipe(false);
+    }
+  };
+
+  const handleEditRecipe = (recipe: MigrationRecipe) => {
+    setEditingRecipeId(recipe.id);
+    setRecipeForm({
+      name: recipe.name,
+      category: recipe.category,
+      description: recipe.description,
+      priority: recipe.priority,
+      tags: (recipe.tags || []).join(', '),
+      prerequisites: (recipe.prerequisites || []).join(', '),
+      agent_instructions: recipe.agent_instructions || '',
+      source_framework: '',
+      target_framework: '',
+    });
+    setShowRecipeForm(true);
+  };
+
+  const handleDeleteRecipe = async (recipeId: string) => {
+    try {
+      await migrations.deleteCustomRecipe(recipeId);
+      setSelectedRecipeIds(prev => prev.filter(id => id !== recipeId));
+      await loadRecipes();
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete recipe');
     }
   };
 
@@ -389,7 +426,15 @@ export default function MigrationProjectDetail() {
                 </p>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setShowRecipeForm(!showRecipeForm)}
+                    onClick={() => {
+                      if (showRecipeForm) {
+                        setShowRecipeForm(false);
+                        _resetRecipeForm();
+                      } else {
+                        _resetRecipeForm();
+                        setShowRecipeForm(true);
+                      }
+                    }}
                     className="px-3 py-1.5 text-xs text-emerald-600 border border-emerald-200 rounded-md hover:bg-emerald-50"
                   >
                     {showRecipeForm ? 'Cancel' : '+ Create Recipe'}
@@ -413,7 +458,9 @@ export default function MigrationProjectDetail() {
               {/* Custom Recipe Form */}
               {showRecipeForm && (
                 <div className="mb-6 bg-emerald-50 border border-emerald-200 rounded-lg p-4">
-                  <h4 className="text-sm font-semibold text-gray-900 mb-3">Create Custom Migration Recipe</h4>
+                  <h4 className="text-sm font-semibold text-gray-900 mb-3">
+                    {editingRecipeId ? 'Edit Migration Recipe' : 'Create Custom Migration Recipe'}
+                  </h4>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs font-medium text-gray-600 mb-1">Recipe Name *</label>
@@ -524,7 +571,9 @@ export default function MigrationProjectDetail() {
                       disabled={!recipeForm.name || creatingRecipe}
                       className="px-4 py-2 bg-emerald-600 text-white text-sm rounded-md hover:bg-emerald-700 disabled:opacity-50"
                     >
-                      {creatingRecipe ? 'Creating...' : 'Create Recipe'}
+                      {creatingRecipe
+                        ? (editingRecipeId ? 'Saving...' : 'Creating...')
+                        : (editingRecipeId ? 'Save Changes' : 'Create Recipe')}
                     </button>
                   </div>
                 </div>
@@ -535,6 +584,8 @@ export default function MigrationProjectDetail() {
                 selectedIds={selectedRecipeIds}
                 recommendedIds={recommendedRecipeIds}
                 onToggle={handleToggleRecipe}
+                onEdit={handleEditRecipe}
+                onDelete={handleDeleteRecipe}
               />
             </div>
           )}

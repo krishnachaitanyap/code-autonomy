@@ -519,6 +519,7 @@ class MigrationRecipeResponse(BaseModel):
     tags: list[str] = Field(default_factory=list)
     prerequisites: list[str] = Field(default_factory=list)
     agent_instructions: str = ""
+    is_custom: bool = False
 
 
 class MigrationRoadmapStep(BaseModel):

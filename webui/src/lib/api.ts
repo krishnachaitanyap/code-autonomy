@@ -777,6 +777,7 @@ export interface MigrationRecipe {
   tags: string[];
   prerequisites: string[];
   agent_instructions: string;
+  is_custom?: boolean;
 }
 
 export interface MigrationRoadmapStep {
@@ -886,6 +887,20 @@ export const migrations = {
     target_framework?: string;
   }) => request<MigrationRecipe>('/migrations/recipes/custom', {
     method: 'POST',
+    body: JSON.stringify(data),
+  }),
+  updateCustomRecipe: (recipeId: string, data: {
+    name?: string;
+    category?: string;
+    description?: string;
+    priority?: number;
+    tags?: string[];
+    prerequisites?: string[];
+    agent_instructions?: string;
+    source_framework?: string;
+    target_framework?: string;
+  }) => request<MigrationRecipe>(`/migrations/recipes/custom/${recipeId}`, {
+    method: 'PUT',
     body: JSON.stringify(data),
   }),
   deleteCustomRecipe: (recipeId: string) =>

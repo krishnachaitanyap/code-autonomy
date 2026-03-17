@@ -203,6 +203,7 @@ async def list_recipes():
                 tags=c.tags or [],
                 prerequisites=c.prerequisites or [],
                 agent_instructions=c.agent_instructions or "",
+                is_custom=True,
             ))
 
     return results
