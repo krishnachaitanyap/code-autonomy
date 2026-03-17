@@ -76,6 +76,11 @@ def init_db(url: str = "") -> None:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE workflows ADD COLUMN token_budget INTEGER DEFAULT 0"))
                 conn.execute(text("ALTER TABLE workflows ADD COLUMN total_tokens_used INTEGER DEFAULT 0"))
+    if 'custom_migration_recipes' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('custom_migration_recipes')]
+        if 'tool_ids' not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE custom_migration_recipes ADD COLUMN tool_ids JSON DEFAULT '[]'"))
 
     # Backfill TestProject.repo_id → ensure every project points to a valid Repo
     _backfill_test_project_repos(engine)
