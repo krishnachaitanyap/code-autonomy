@@ -777,6 +777,7 @@ export interface MigrationRecipe {
   tags: string[];
   prerequisites: string[];
   agent_instructions: string;
+  tool_ids: string[];
   is_custom?: boolean;
 }
 
@@ -885,6 +886,7 @@ export const migrations = {
     agent_instructions?: string;
     source_framework?: string;
     target_framework?: string;
+    tool_ids?: string[];
   }) => request<MigrationRecipe>('/migrations/recipes/custom', {
     method: 'POST',
     body: JSON.stringify(data),
@@ -899,6 +901,7 @@ export const migrations = {
     agent_instructions?: string;
     source_framework?: string;
     target_framework?: string;
+    tool_ids?: string[];
   }) => request<MigrationRecipe>(`/migrations/recipes/custom/${recipeId}`, {
     method: 'PUT',
     body: JSON.stringify(data),

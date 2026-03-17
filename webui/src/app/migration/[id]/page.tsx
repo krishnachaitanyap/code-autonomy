@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { migrations, type MigrationProject, type MigrationRecipe, type MigrationRun } from '@/lib/api';
+import { migrations, tools as toolsApi, type MigrationProject, type MigrationRecipe, type MigrationRun, type CustomTool } from '@/lib/api';
 import MigrationStatusBadge from '@/components/migration/MigrationStatusBadge';
 import GapAnalysisPanel from '@/components/migration/GapAnalysisPanel';
 import RecipeGrid from '@/components/migration/RecipeGrid';
@@ -40,6 +40,9 @@ export default function MigrationProjectDetail() {
   const [targetRepoUrl, setTargetRepoUrl] = useState('');
   const [targetBranch, setTargetBranch] = useState('');
 
+  // Available custom tools (for recipe builder)
+  const [availableTools, setAvailableTools] = useState<CustomTool[]>([]);
+
   // Custom recipe form state
   const [showRecipeForm, setShowRecipeForm] = useState(false);
   const [creatingRecipe, setCreatingRecipe] = useState(false);
@@ -54,7 +57,10 @@ export default function MigrationProjectDetail() {
     agent_instructions: '',
     source_framework: '',
     target_framework: '',
+    tool_ids: [] as string[],
   });
+  const [showToolMention, setShowToolMention] = useState(false);
+  const [toolMentionFilter, setToolMentionFilter] = useState('');
 
   const loadProject = async () => {
     try {
@@ -94,6 +100,7 @@ export default function MigrationProjectDetail() {
     loadProject();
     loadRecipes();
     loadRuns();
+    toolsApi.list({ enabled_for: 'migration' }).then(res => setAvailableTools(res.tools)).catch(() => {});
   }, [projectId]);
 
   // Initialize execution settings from project
@@ -137,8 +144,10 @@ export default function MigrationProjectDetail() {
   };
 
   const _resetRecipeForm = () => {
-    setRecipeForm({ name: '', category: 'custom', description: '', priority: 50, tags: '', prerequisites: '', agent_instructions: '', source_framework: '', target_framework: '' });
+    setRecipeForm({ name: '', category: 'custom', description: '', priority: 50, tags: '', prerequisites: '', agent_instructions: '', source_framework: '', target_framework: '', tool_ids: [] });
     setEditingRecipeId(null);
+    setShowToolMention(false);
+    setToolMentionFilter('');
   };
 
   const handleCreateRecipe = async () => {
@@ -154,6 +163,7 @@ export default function MigrationProjectDetail() {
         agent_instructions: recipeForm.agent_instructions,
         source_framework: recipeForm.source_framework,
         target_framework: recipeForm.target_framework,
+        tool_ids: recipeForm.tool_ids,
       };
       if (editingRecipeId) {
         await migrations.updateCustomRecipe(editingRecipeId, payload);
@@ -171,9 +181,15 @@ export default function MigrationProjectDetail() {
   };
 
   const handleEditRecipe = (recipe: MigrationRecipe) => {
-    setEditingRecipeId(recipe.id);
+    // For custom recipes: edit in place
+    // For built-in recipes: create a custom override (new recipe with modified content)
+    if (recipe.is_custom) {
+      setEditingRecipeId(recipe.id);
+    } else {
+      setEditingRecipeId(null); // will create a new custom recipe as override
+    }
     setRecipeForm({
-      name: recipe.name,
+      name: recipe.is_custom ? recipe.name : `${recipe.name} (customized)`,
       category: recipe.category,
       description: recipe.description,
       priority: recipe.priority,
@@ -182,6 +198,7 @@ export default function MigrationProjectDetail() {
       agent_instructions: recipe.agent_instructions || '',
       source_framework: '',
       target_framework: '',
+      tool_ids: recipe.tool_ids || [],
     });
     setShowRecipeForm(true);
   };
@@ -544,16 +561,119 @@ export default function MigrationProjectDetail() {
                         className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
                       />
                     </div>
-                    <div className="md:col-span-2">
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Agent Instructions (step-by-step)</label>
+                    <div className="md:col-span-2 relative">
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        Agent Instructions
+                        <span className="text-gray-400 font-normal ml-1">Type @tool to reference a tool inline</span>
+                      </label>
                       <textarea
                         value={recipeForm.agent_instructions}
-                        onChange={e => setRecipeForm({ ...recipeForm, agent_instructions: e.target.value })}
-                        placeholder={"1. Find all Nucleus config properties...\n2. Replace with Photon equivalents...\n3. Update application.yml..."}
-                        rows={5}
+                        onChange={e => {
+                          const val = e.target.value;
+                          setRecipeForm({ ...recipeForm, agent_instructions: val });
+                          // Detect @tool mention trigger
+                          const cursor = e.target.selectionStart;
+                          const textBefore = val.slice(0, cursor);
+                          const atMatch = textBefore.match(/@(\w*)$/);
+                          if (atMatch) {
+                            setShowToolMention(true);
+                            setToolMentionFilter(atMatch[1].toLowerCase());
+                          } else {
+                            setShowToolMention(false);
+                          }
+                        }}
+                        onKeyDown={e => {
+                          if (showToolMention && e.key === 'Escape') {
+                            setShowToolMention(false);
+                          }
+                        }}
+                        placeholder={"1. Run @Enterprise Framework Detector to identify frameworks\n2. Use @Config Migrator to convert XML configs\n3. Apply Spring Boot annotations..."}
+                        rows={6}
                         className="w-full px-3 py-2 border border-gray-300 rounded text-sm font-mono"
                       />
+                      {/* @tool mention dropdown */}
+                      {showToolMention && availableTools.length > 0 && (
+                        <div className="absolute z-10 left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                          <div className="px-3 py-1.5 text-[10px] text-gray-400 border-b border-gray-100 uppercase tracking-wider">
+                            Insert tool reference
+                          </div>
+                          {availableTools
+                            .filter(t => !toolMentionFilter || t.name.toLowerCase().includes(toolMentionFilter))
+                            .map(t => (
+                              <button
+                                key={t.id}
+                                type="button"
+                                className="w-full text-left px-3 py-2 hover:bg-indigo-50 text-sm flex items-center gap-2 transition-colors"
+                                onClick={() => {
+                                  // Replace @partial with @ToolName
+                                  const textarea = document.querySelector('textarea[placeholder*="@Enterprise"]') as HTMLTextAreaElement;
+                                  if (textarea) {
+                                    const cursor = textarea.selectionStart;
+                                    const text = recipeForm.agent_instructions;
+                                    const before = text.slice(0, cursor);
+                                    const after = text.slice(cursor);
+                                    const atPos = before.lastIndexOf('@');
+                                    const newText = before.slice(0, atPos) + `@${t.name}` + after;
+                                    setRecipeForm({ ...recipeForm, agent_instructions: newText, tool_ids: recipeForm.tool_ids.includes(t.id) ? recipeForm.tool_ids : [...recipeForm.tool_ids, t.id] });
+                                  }
+                                  setShowToolMention(false);
+                                }}
+                              >
+                                <span className="font-medium text-indigo-700">@{t.name}</span>
+                                <span className="text-xs text-gray-400 truncate">{t.description}</span>
+                              </button>
+                            ))}
+                          {availableTools.filter(t => !toolMentionFilter || t.name.toLowerCase().includes(toolMentionFilter)).length === 0 && (
+                            <div className="px-3 py-2 text-xs text-gray-400">No matching tools</div>
+                          )}
+                        </div>
+                      )}
                     </div>
+
+                    {/* Attached Tools */}
+                    <div className="md:col-span-2">
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        Attached Tools
+                        <span className="text-gray-400 font-normal ml-1">Tools that run as part of this recipe</span>
+                      </label>
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {recipeForm.tool_ids.map(tid => {
+                          const tool = availableTools.find(t => t.id === tid);
+                          return (
+                            <span key={tid} className="inline-flex items-center gap-1 px-2 py-1 bg-indigo-50 text-indigo-700 rounded text-xs">
+                              @{tool?.name || tid}
+                              <button
+                                type="button"
+                                onClick={() => setRecipeForm({ ...recipeForm, tool_ids: recipeForm.tool_ids.filter(id => id !== tid) })}
+                                className="hover:text-indigo-900 ml-0.5"
+                              >
+                                &times;
+                              </button>
+                            </span>
+                          );
+                        })}
+                        {recipeForm.tool_ids.length === 0 && (
+                          <span className="text-xs text-gray-400">No tools attached. Use @tool in instructions or add below.</span>
+                        )}
+                      </div>
+                      {availableTools.length > 0 && (
+                        <div className="flex flex-wrap gap-1">
+                          {availableTools
+                            .filter(t => !recipeForm.tool_ids.includes(t.id))
+                            .map(t => (
+                              <button
+                                key={t.id}
+                                type="button"
+                                onClick={() => setRecipeForm({ ...recipeForm, tool_ids: [...recipeForm.tool_ids, t.id] })}
+                                className="px-2 py-0.5 text-[11px] border border-gray-200 rounded hover:bg-indigo-50 hover:border-indigo-300 text-gray-600 transition-colors"
+                              >
+                                + @{t.name}
+                              </button>
+                            ))}
+                        </div>
+                      )}
+                    </div>
+
                     <div className="md:col-span-2">
                       <label className="block text-xs font-medium text-gray-600 mb-1">Prerequisites (recipe IDs, comma-separated)</label>
                       <input

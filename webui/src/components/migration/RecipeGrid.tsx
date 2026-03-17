@@ -96,18 +96,18 @@ export default function RecipeGrid({ recipes, selectedIds, recommendedIds, onTog
                     </div>
                   </div>
 
-                  {/* Edit / Delete actions for custom recipes */}
-                  {isCustom && (onEdit || onDelete) && (
+                  {/* Edit / Delete actions */}
+                  {(onEdit || onDelete) && (
                     <div className="flex items-center gap-1.5 mt-2 ml-6 pt-2 border-t border-gray-100">
                       {onEdit && (
                         <button
                           onClick={(e) => { e.stopPropagation(); onEdit(recipe); }}
                           className="px-2 py-0.5 text-[11px] font-medium text-indigo-600 bg-indigo-50 rounded hover:bg-indigo-100 transition-colors"
                         >
-                          Edit
+                          {isCustom ? 'Edit' : 'Edit (Override)'}
                         </button>
                       )}
-                      {onDelete && (
+                      {isCustom && onDelete && (
                         <button
                           onClick={(e) => { e.stopPropagation(); onDelete(recipe.id); }}
                           className="px-2 py-0.5 text-[11px] font-medium text-red-600 bg-red-50 rounded hover:bg-red-100 transition-colors"

@@ -519,6 +519,7 @@ class MigrationRecipeResponse(BaseModel):
     tags: list[str] = Field(default_factory=list)
     prerequisites: list[str] = Field(default_factory=list)
     agent_instructions: str = ""
+    tool_ids: list[str] = Field(default_factory=list)
     is_custom: bool = False
 
 
@@ -576,6 +577,7 @@ class CustomRecipeCreate(BaseModel):
     agent_instructions: str = ""
     source_framework: str = ""
     target_framework: str = ""
+    tool_ids: list[str] = Field(default_factory=list)
 
 
 class CustomRecipeUpdate(BaseModel):
@@ -588,6 +590,7 @@ class CustomRecipeUpdate(BaseModel):
     agent_instructions: str | None = None
     source_framework: str | None = None
     target_framework: str | None = None
+    tool_ids: list[str] | None = None
 
 
 class CustomRecipeResponse(BaseModel):
@@ -601,6 +604,7 @@ class CustomRecipeResponse(BaseModel):
     agent_instructions: str = ""
     source_framework: str = ""
     target_framework: str = ""
+    tool_ids: list[str] = Field(default_factory=list)
     is_custom: bool = True
 
 

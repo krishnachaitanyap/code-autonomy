@@ -203,6 +203,7 @@ async def list_recipes():
                 tags=c.tags or [],
                 prerequisites=c.prerequisites or [],
                 agent_instructions=c.agent_instructions or "",
+                tool_ids=c.tool_ids or [],
                 is_custom=True,
             ))
 
@@ -225,6 +226,7 @@ async def create_custom_recipe(data: CustomRecipeCreate):
         agent_instructions=data.agent_instructions,
         source_framework=data.source_framework,
         target_framework=data.target_framework,
+        tool_ids=data.tool_ids,
     )
     with get_session() as db:
         db.add(recipe)
@@ -241,6 +243,7 @@ async def create_custom_recipe(data: CustomRecipeCreate):
             agent_instructions=recipe.agent_instructions or "",
             source_framework=recipe.source_framework or "",
             target_framework=recipe.target_framework or "",
+            tool_ids=recipe.tool_ids or [],
         )
 
 
@@ -269,6 +272,7 @@ async def update_custom_recipe(recipe_id: str, data: CustomRecipeUpdate):
             agent_instructions=recipe.agent_instructions or "",
             source_framework=recipe.source_framework or "",
             target_framework=recipe.target_framework or "",
+            tool_ids=recipe.tool_ids or [],
         )
 
 

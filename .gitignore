@@ -25,6 +25,10 @@ config.ini
 # Project consciousness cache
 .consciousness/
 
+# Next.js
+webui/.next/
+webui/node_modules/
+
 # Secrets
 .env
 *.pem

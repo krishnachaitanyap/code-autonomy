@@ -567,6 +567,7 @@ class CustomMigrationRecipe(Base):
     agent_instructions = Column(Text, nullable=False, default="")
     source_framework = Column(String(64), nullable=False, default="")  # e.g. "Nucleus", "JISI"
     target_framework = Column(String(64), nullable=False, default="")  # e.g. "Photon"
+    tool_ids = Column(JSON, nullable=False, default=list)  # custom tool IDs to run with this recipe
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
 
