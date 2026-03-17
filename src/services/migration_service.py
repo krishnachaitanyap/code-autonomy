@@ -2182,9 +2182,22 @@ class MigrationService:
                     f"Generate code that follows the reference repo's conventions, NOT generic defaults."
                 )
 
+            # Resolve tool context from recipe's attached tools
+            tool_context = ""
+            recipe_id = step.get("recipe_id", "")
+            if recipe_id:
+                try:
+                    from src.agent.recipe_context import build_recipe_context
+                    tool_context = build_recipe_context([recipe_id])
+                except Exception as tc_err:
+                    logger.debug("Could not build tool context for recipe %s: %s", recipe_id, tc_err)
+
+            tool_section = f"\n{tool_context}\n" if tool_context else ""
+
             requirements = (
                 f"## Migration Task: {step.get('title', '')}\n\n"
                 f"### Instructions\n{recipe_instructions}\n\n"
+                f"{tool_section}"
                 f"### Reference Architecture\n{ref_context}\n\n"
                 f"### Gap Context\n"
                 f"Technology gaps: {gap_analysis.get('technology_gaps', [])}\n"

@@ -772,6 +772,9 @@ Output ONLY a JSON array of subtask objects. No markdown, no explanation."""
             if not requirements:
                 requirements = f"Implement: {subtask.get('title', 'task')}"
 
+            # Pass recipe_ids from workflow config if available
+            recipe_ids = wf_config.get("recipe_ids") or None
+
             result = generate_changes_with_agent(
                 requirements,
                 repo_path,
@@ -785,6 +788,7 @@ Output ONLY a JSON array of subtask objects. No markdown, no explanation."""
                 code_index=code_index,
                 build_tool=build_tool,
                 initial_working_memory=working_memory or None,
+                recipe_ids=recipe_ids,
             )
 
             return SubtaskResult(

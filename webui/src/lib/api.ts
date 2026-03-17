@@ -168,7 +168,7 @@ export const sessions = {
     return request<{ sessions: Session[]; total: number }>(`/sessions${query}`);
   },
   get: (id: string) => request<Session>(`/sessions/${id}`),
-  create: (data: { repo_id: string; mode: string; requirements: string; branch?: string; context?: Array<{role: string; content: string}> }) =>
+  create: (data: { repo_id: string; mode: string; requirements: string; branch?: string; context?: Array<{role: string; content: string}>; recipe_ids?: string[] }) =>
     request<Session>('/sessions', { method: 'POST', body: JSON.stringify(data) }),
   cancel: (id: string) =>
     request<{ status: string }>(`/sessions/${id}/cancel`, { method: 'POST' }),
@@ -482,6 +482,14 @@ export interface WorkflowSubtask {
   tokens_used: number;
 }
 
+export interface WorkflowRecipeInfo {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  tool_names: string[];
+}
+
 export interface Workflow {
   id: string;
   repo_id: string | null;
@@ -497,6 +505,8 @@ export interface Workflow {
   log: Record<string, any>[];
   token_budget: number;
   total_tokens_used: number;
+  recipe_ids: string[];
+  recipes: WorkflowRecipeInfo[];
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
@@ -511,7 +521,7 @@ export const workflows = {
     return request<{ workflows: Workflow[]; total: number }>(`/workflows${query}`);
   },
   get: (id: string) => request<Workflow>(`/workflows/${id}`),
-  create: (data: { repo_id?: string; project_id?: string; goal: string; mode?: string; branch?: string; token_budget?: number }) =>
+  create: (data: { repo_id?: string; project_id?: string; goal: string; mode?: string; branch?: string; token_budget?: number; recipe_ids?: string[] }) =>
     request<Workflow>('/workflows', { method: 'POST', body: JSON.stringify(data) }),
   resume: (id: string) => request<Workflow>(`/workflows/${id}/resume`, { method: 'POST' }),
   cancel: (id: string) => request<{ status: string }>(`/workflows/${id}/cancel`, { method: 'POST' }),

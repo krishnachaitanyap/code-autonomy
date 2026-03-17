@@ -187,6 +187,7 @@ class AgentService:
         progress_callback: ProgressCallback = None,
         conversation_context: Optional[list[dict]] = None,
         session_id: Optional[str] = None,
+        recipe_ids: Optional[list[str]] = None,
     ) -> "AgentResult":
         """Run agent mode — full agentic loop with exploration, editing, and testing."""
         from src.agent.analyzer import generate_changes_with_agent
@@ -229,6 +230,7 @@ class AgentService:
                 resume=resume,
                 build_tool=build_tool,
                 conversation_context=conversation_context,
+                recipe_ids=recipe_ids,
             )
         except Exception as exc:
             clear_progress_callback()
@@ -267,6 +269,7 @@ class AgentService:
         progress_callback: ProgressCallback = None,
         conversation_context: Optional[list[dict]] = None,
         session_id: Optional[str] = None,
+        recipe_ids: Optional[list[str]] = None,
     ) -> "PlanResult":
         """Run plan mode — read-only exploration + proposed changes."""
         from src.agent.analyzer import generate_plan_with_agent
@@ -315,6 +318,7 @@ class AgentService:
                 build_tool=build_tool,
                 resume=resume,
                 conversation_context=conversation_context,
+                recipe_ids=recipe_ids,
             )
         except Exception as exc:
             clear_progress_callback()
@@ -352,6 +356,7 @@ class AgentService:
         progress_callback: ProgressCallback = None,
         conversation_context: Optional[list[dict]] = None,
         session_id: Optional[str] = None,
+        recipe_ids: Optional[list[str]] = None,
     ) -> "AskResult":
         """Run ask mode — answer a question about the codebase."""
         from src.agent.analyzer import generate_answer_with_agent
@@ -414,6 +419,7 @@ class AgentService:
                 code_index=code_index,
                 resume=resume,
                 conversation_context=conversation_context,
+                recipe_ids=recipe_ids,
             )
         except Exception as exc:
             clear_progress_callback()

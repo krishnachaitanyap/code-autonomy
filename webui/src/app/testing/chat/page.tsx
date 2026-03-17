@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { repos, sessions, workflows as workflowsApi, type Repo, type Session, type Workflow, type WorkflowSubtask } from '@/lib/api';
+import { repos, sessions, workflows as workflowsApi, migrations, type Repo, type Session, type Workflow, type WorkflowSubtask, type MigrationRecipe } from '@/lib/api';
+import RecipePicker from '@/components/RecipePicker';
 import { useSessionStream, type WSMessage } from '@/lib/websocket';
 import StructuredResult, { tryParseStructured } from '@/components/StructuredResult';
 
@@ -320,6 +321,8 @@ export default function ChatPage() {
   const [loadingBranches, setLoadingBranches] = useState(false);
   const [wsSessionId, setWsSessionId] = useState<string | null>(null);
   const [activeWorkflow, setActiveWorkflow] = useState<Workflow | null>(null);
+  const [availableRecipes, setAvailableRecipes] = useState<MigrationRecipe[]>([]);
+  const [selectedRecipeIds, setSelectedRecipeIds] = useState<string[]>([]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activityEndRef = useRef<HTMLDivElement>(null);
@@ -428,6 +431,13 @@ export default function ChatPage() {
         setLoadingRepos(false);
       }
     })();
+  }, []);
+
+  // --- load available recipes on mount ---
+  useEffect(() => {
+    migrations.listRecipes()
+      .then((r) => setAvailableRecipes(Array.isArray(r) ? r : []))
+      .catch(() => setAvailableRecipes([]));
   }, []);
 
   // --- load branches + chat history when repo changes ---
@@ -680,6 +690,7 @@ export default function ChatPage() {
         requirements: text,
         branch: branch || undefined,
         context: context.length > 0 ? context : undefined,
+        recipe_ids: selectedRecipeIds.length > 0 ? selectedRecipeIds : undefined,
       });
       setCurrentSession(s);
       setWsSessionId(s.id);
@@ -1098,6 +1109,16 @@ export default function ChatPage() {
                 ))}
               </div>
             )}
+
+            {/* Recipe selector */}
+            <div className="pt-2">
+              <RecipePicker
+                recipes={availableRecipes}
+                selectedIds={selectedRecipeIds}
+                onChange={setSelectedRecipeIds}
+                accent="indigo"
+              />
+            </div>
 
             {/* Input bar */}
             <form onSubmit={handleSend} className="flex gap-2 pt-2 border-t border-gray-200">

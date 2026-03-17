@@ -13,6 +13,7 @@ from src.api.schemas import (
     WorkflowCreate,
     WorkflowListResponse,
     WorkflowResponse,
+    WorkflowRecipeInfo,
     SubtaskSchema,
 )
 from src.services.orchestrator_service import OrchestratorService
@@ -48,6 +49,24 @@ def _workflow_to_response(wf) -> WorkflowResponse:
             model_used=s.get("model_used", ""),
             tokens_used=s.get("tokens_used", 0),
         ))
+    # Resolve recipe_ids from config
+    wf_config = wf.config or {}
+    recipe_ids = wf_config.get("recipe_ids", [])
+    resolved_recipes: list[WorkflowRecipeInfo] = []
+    if recipe_ids:
+        try:
+            from src.agent.recipe_context import _load_recipes, _load_tools
+            for r in _load_recipes(recipe_ids):
+                tool_names = []
+                if r.get("tool_ids"):
+                    tool_names = [t["name"] for t in _load_tools(r["tool_ids"])]
+                resolved_recipes.append(WorkflowRecipeInfo(
+                    id=r["id"], name=r["name"], category=r["category"],
+                    description=r.get("description", ""), tool_names=tool_names,
+                ))
+        except Exception:
+            pass
+
     return WorkflowResponse(
         id=wf.id,
         repo_id=wf.repo_id,
@@ -63,6 +82,8 @@ def _workflow_to_response(wf) -> WorkflowResponse:
         log=wf.log or [],
         token_budget=wf.token_budget or 0,
         total_tokens_used=wf.total_tokens_used or 0,
+        recipe_ids=recipe_ids,
+        recipes=resolved_recipes,
         created_at=str(wf.created_at) if wf.created_at else None,
         started_at=str(wf.started_at) if wf.started_at else None,
         completed_at=str(wf.completed_at) if wf.completed_at else None,
@@ -96,6 +117,8 @@ async def create_workflow(data: WorkflowCreate):
     wf_config: dict = {}
     if data.branch:
         wf_config["branch"] = data.branch
+    if data.recipe_ids:
+        wf_config["recipe_ids"] = data.recipe_ids
     wf = _service.create_workflow(
         goal=data.goal,
         mode=data.mode,

@@ -458,6 +458,7 @@ def _build_agent_context(
     repo_url: str = "",
     instruction_suffix: str = "",
     repo_knowledge: str = "",
+    recipe_context: str = "",
 ) -> tuple[str, str]:
     """Build the user message and knowledge context for both agent and plan modes.
 
@@ -530,8 +531,11 @@ def _build_agent_context(
         "before making any changes."
     )
 
+    recipe_section = f"\n{recipe_context}\n" if recipe_context else ""
+
     user_msg = (
         f"## Requirements\n{requirements}\n"
+        f"{recipe_section}"
         f"{initial_context}\n"
         f"{repo_knowledge_section}"
         f"{framework_section}"
@@ -583,6 +587,7 @@ def generate_changes_with_agent(
     resume: bool = False,
     initial_working_memory: Optional[dict[str, str]] = None,
     conversation_context: Optional[list[dict]] = None,
+    recipe_ids: Optional[list[str]] = None,
 ) -> AgentResult:
     """Run the agentic loop: explore → edit → test → fix → complete.
 
@@ -651,6 +656,12 @@ def generate_changes_with_agent(
     # Build the full tool list (read + write + exec + memory + complete + code_index)
     all_tools = build_agent_tools(agent_cfg, code_index=code_index)
 
+    # Build recipe context from selected recipes
+    _recipe_ctx = ""
+    if recipe_ids:
+        from src.agent.recipe_context import build_recipe_context
+        _recipe_ctx = build_recipe_context(recipe_ids)
+
     # Build shared context
     user_msg, _knowledge_ctx = _build_agent_context(
         requirements=requirements,
@@ -664,6 +675,7 @@ def generate_changes_with_agent(
         config=config,
         repo_url=repo_url,
         repo_knowledge=repo_knowledge,
+        recipe_context=_recipe_ctx,
     )
 
     skip_tests = agent_cfg.get("skip_tests", False)
@@ -1484,6 +1496,7 @@ def generate_plan_with_agent(
     code_index: "CodeIndex | None" = None,
     resume: bool = False,
     conversation_context: Optional[list[dict]] = None,
+    recipe_ids: Optional[list[str]] = None,
 ) -> "PlanResult":
     """Run the agent in plan mode: explore → propose changes → complete.
 
@@ -1530,6 +1543,12 @@ def generate_plan_with_agent(
     # Build plan-mode tool list (read + propose + memory + completion + code_index)
     all_tools = build_plan_tools(agent_cfg, code_index=code_index)
 
+    # Build recipe context from selected recipes
+    _recipe_ctx = ""
+    if recipe_ids:
+        from src.agent.recipe_context import build_recipe_context
+        _recipe_ctx = build_recipe_context(recipe_ids)
+
     # Build shared context
     user_msg, _knowledge_ctx = _build_agent_context(
         requirements=requirements,
@@ -1548,6 +1567,7 @@ def generate_plan_with_agent(
             "When done proposing, call task_complete."
         ),
         repo_knowledge=repo_knowledge,
+        recipe_context=_recipe_ctx,
     )
 
     system_prompt = _PLAN_SYSTEM_PROMPT
@@ -2067,6 +2087,7 @@ def generate_answer_with_agent(
     code_index: "CodeIndex | None" = None,
     resume: bool = False,
     conversation_context: Optional[list[dict]] = None,
+    recipe_ids: Optional[list[str]] = None,
 ) -> "AskResult":
     """Run the agent in ask mode: explore → answer question → complete.
 
@@ -2201,8 +2222,16 @@ def generate_answer_with_agent(
             "to answer the question. When you have a complete answer, call task_complete."
         )
 
+    # Build recipe context from selected recipes
+    _recipe_ctx = ""
+    if recipe_ids:
+        from src.agent.recipe_context import build_recipe_context
+        _recipe_ctx = build_recipe_context(recipe_ids)
+    recipe_section = f"\n{_recipe_ctx}\n" if _recipe_ctx else ""
+
     user_msg = (
         f"## Question\n{question}\n"
+        f"{recipe_section}"
         f"{initial_context}\n"
         f"{repo_knowledge_section}"
         f"{knowledge_section}\n\n"

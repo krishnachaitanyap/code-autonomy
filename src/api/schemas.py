@@ -49,6 +49,7 @@ class SessionCreate(BaseModel):
     branch: str = ""  # empty = use current/default branch
     config_overrides: dict = Field(default_factory=dict)
     context: list[dict] = Field(default_factory=list)
+    recipe_ids: list[str] = Field(default_factory=list)
 
 
 class SessionResponse(BaseModel):
@@ -416,6 +417,7 @@ class WorkflowCreate(BaseModel):
     mode: str = "testing"  # testing | engineering
     branch: str = ""
     token_budget: int = 0  # 0 = unlimited
+    recipe_ids: list[str] = Field(default_factory=list)
 
 
 class SubtaskSchema(BaseModel):
@@ -436,6 +438,14 @@ class SubtaskSchema(BaseModel):
     tokens_used: int = 0
 
 
+class WorkflowRecipeInfo(BaseModel):
+    id: str
+    name: str
+    category: str
+    description: str = ""
+    tool_names: list[str] = Field(default_factory=list)
+
+
 class WorkflowResponse(BaseModel):
     id: str
     repo_id: Optional[str] = None
@@ -451,6 +461,8 @@ class WorkflowResponse(BaseModel):
     log: list[dict] = Field(default_factory=list)
     token_budget: int = 0
     total_tokens_used: int = 0
+    recipe_ids: list[str] = Field(default_factory=list)
+    recipes: list[WorkflowRecipeInfo] = Field(default_factory=list)
     created_at: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None

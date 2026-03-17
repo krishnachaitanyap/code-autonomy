@@ -3,10 +3,12 @@
 import { Suspense, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import {
-  testing, jira, repos, workflows as workflowsApi,
+  testing, jira, repos, workflows as workflowsApi, migrations,
   type TestRun, type TestProject, type TestEvidence, type JiraRun, type Repo,
-  type ReferenceLearnResult, type Workflow, type WorkflowSubtask,
+  type ReferenceLearnResult, type Workflow, type WorkflowSubtask, type MigrationRecipe,
 } from '@/lib/api';
+import RecipePicker from '@/components/RecipePicker';
+import WorkflowDiagram from '@/components/WorkflowDiagram';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -59,6 +61,7 @@ type UnifiedRun = {
   current_step?: number;
   token_budget?: number;
   total_tokens_used?: number;
+  recipes?: { id: string; name: string; category: string; description: string; tool_names: string[] }[];
 };
 
 function testToUnified(r: TestRun): UnifiedRun {
@@ -99,6 +102,7 @@ function workflowToUnified(w: Workflow): UnifiedRun {
     current_step: w.current_step, project_id: w.project_id || undefined,
     repo_id: w.repo_id || undefined,
     token_budget: w.token_budget, total_tokens_used: w.total_tokens_used,
+    recipes: w.recipes || [],
   };
 }
 
@@ -199,6 +203,7 @@ function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [showNewRun, setShowNewRun] = useState(false);
   const [activeTab, setActiveTab] = useState<DetailTab>('activity');
+  const [diagramCollapsed, setDiagramCollapsed] = useState(false);
   const [runFilter, setRunFilter] = useState<RunFilter>('all');
 
   // New run form
@@ -224,6 +229,10 @@ function AgentsPage() {
   const [refMavenDeps, setRefMavenDeps] = useState('');
   const [learningRef, setLearningRef] = useState(false);
   const [refLearnResult, setRefLearnResult] = useState<ReferenceLearnResult | null>(null);
+
+  // Recipe selector state
+  const [availableRecipes, setAvailableRecipes] = useState<MigrationRecipe[]>([]);
+  const [selectedRecipeIds, setSelectedRecipeIds] = useState<string[]>([]);
 
   const terminalRef = useRef<HTMLDivElement>(null);
 
@@ -268,6 +277,13 @@ function AgentsPage() {
 
   // Load initial data
   useEffect(() => { loadData(); }, [projectFilter]);
+
+  // Load available recipes
+  useEffect(() => {
+    migrations.listRecipes()
+      .then((r) => setAvailableRecipes(Array.isArray(r) ? r : []))
+      .catch(() => setAvailableRecipes([]));
+  }, []);
 
   // Polling: refresh selected run every 2s while running/paused(workflow)
   useEffect(() => {
@@ -359,8 +375,11 @@ function AgentsPage() {
       try {
         const fresh = workflowToUnified(await workflowsApi.get(run.id));
         setSelectedRun(fresh);
+        // Auto-expand diagram for running/paused workflows
+        setDiagramCollapsed(fresh.status !== 'running' && fresh.status !== 'paused');
       } catch {
         setSelectedRun(run);
+        setDiagramCollapsed(run.status !== 'running' && run.status !== 'paused');
       }
     } else {
       setSelectedRun(run);
@@ -390,6 +409,7 @@ function AgentsPage() {
           mode: newWorkflow.mode,
           branch,
           token_budget: newWorkflow.token_budget || undefined,
+          recipe_ids: selectedRecipeIds.length > 0 ? selectedRecipeIds : undefined,
         });
         created = workflowToUnified(r);
       } else {
@@ -581,6 +601,13 @@ function AgentsPage() {
                   />
                 </div>
               </div>
+              {/* Recipe selector */}
+              <RecipePicker
+                recipes={availableRecipes}
+                selectedIds={selectedRecipeIds}
+                onChange={setSelectedRecipeIds}
+                accent="teal"
+              />
             </div>
           ) : newRunKind === 'test' ? (
             <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
@@ -992,25 +1019,161 @@ function AgentsPage() {
                     </div>
                   )}
 
-                  {/* Workflow subtask steps */}
+                  {/* Workflow recipes & tools */}
+                  {run.kind === 'workflow' && run.recipes && run.recipes.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {run.recipes.map((recipe) => {
+                        const catMeta: Record<string, string> = {
+                          java: 'bg-red-50 text-red-700 ring-red-200', dependencies: 'bg-purple-50 text-purple-700 ring-purple-200',
+                          docker: 'bg-blue-50 text-blue-700 ring-blue-200', k8s: 'bg-orange-50 text-orange-700 ring-orange-200',
+                          cicd: 'bg-green-50 text-green-700 ring-green-200', config: 'bg-teal-50 text-teal-700 ring-teal-200',
+                          custom: 'bg-indigo-50 text-indigo-700 ring-indigo-200',
+                        };
+                        const style = catMeta[recipe.category] || 'bg-gray-50 text-gray-700 ring-gray-200';
+                        return (
+                          <span
+                            key={recipe.id}
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium ring-1 ${style}`}
+                            title={recipe.description}
+                          >
+                            <svg className="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                            </svg>
+                            {recipe.name}
+                            {recipe.tool_names.length > 0 && (
+                              <span className="opacity-60">
+                                ({recipe.tool_names.length} tool{recipe.tool_names.length !== 1 ? 's' : ''})
+                              </span>
+                            )}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Workflow subtask mini-flow */}
                   {run.kind === 'workflow' && run.subtasks && run.subtasks.length > 0 && (
-                    <div className="mt-2">
-                      <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
-                        <span>Step {(run.current_step || 0) + 1}/{run.subtasks.length}: {run.subtasks[run.current_step || 0]?.title}</span>
+                    <div className="mt-3">
+                      {/* Step progress label */}
+                      <div className="flex items-center justify-between text-xs text-gray-500 mb-2">
+                        <span className="font-medium">
+                          Step {(run.current_step || 0) + 1}/{run.subtasks.length}
+                          {run.subtasks[run.current_step || 0] && (
+                            <span className="text-gray-400 font-normal">: {run.subtasks[run.current_step || 0].title}</span>
+                          )}
+                        </span>
                         {(run.total_tokens_used || 0) > 0 && (
-                          <span className="text-gray-400 font-mono">
-                            {run.total_tokens_used?.toLocaleString()} tokens
-                            {(run.token_budget || 0) > 0 && ` / ${run.token_budget?.toLocaleString()}`}
+                          <span className="text-gray-400 font-mono text-[10px]">
+                            {run.total_tokens_used?.toLocaleString()}t
                           </span>
                         )}
                       </div>
-                      <div className="flex gap-1 flex-wrap">
-                        {run.subtasks.map((st, idx) => (
-                          <span key={idx} className={`text-xs ${subtaskStatusColor(st.status)}`} title={st.title}>
-                            {subtaskStatusIcon(st.status)}
-                          </span>
-                        ))}
+                      {/* Compact horizontal flow nodes */}
+                      <div className="flex items-center gap-0.5">
+                        {run.subtasks.map((st, idx) => {
+                          const isActive = st.status === 'running';
+                          const typeIcon = st.type === 'discovery' ? '\uD83D\uDD0D' : st.type === 'agent' ? '\uD83E\uDD16' : st.type === 'test' ? '\uD83E\uDDEA' : st.type === 'coverage' ? '\uD83D\uDCCA' : st.type === 'command' ? '\u26A1' : '\uD83D\uDCCC';
+                          return (
+                            <div key={idx} className="flex items-center">
+                              {idx > 0 && (
+                                <div className={`w-3 h-0.5 ${
+                                  st.status === 'completed' ? 'bg-green-300' :
+                                  st.status === 'running' ? 'bg-blue-300' :
+                                  st.status === 'failed' ? 'bg-red-300' :
+                                  'bg-gray-200'
+                                }`} />
+                              )}
+                              <div
+                                className={`relative w-8 h-8 rounded-lg flex items-center justify-center text-xs border transition-all ${
+                                  isActive
+                                    ? 'border-blue-400 bg-blue-50 ring-2 ring-blue-200 shadow-sm'
+                                    : st.status === 'completed'
+                                    ? 'border-green-300 bg-green-50'
+                                    : st.status === 'failed'
+                                    ? 'border-red-300 bg-red-50'
+                                    : st.status === 'skipped'
+                                    ? 'border-gray-200 bg-gray-50'
+                                    : 'border-gray-200 bg-gray-50/50'
+                                }`}
+                                title={`${st.title} (${st.type}) — ${st.status}`}
+                              >
+                                {isActive && (
+                                  <div className="absolute inset-0 rounded-lg border border-blue-400 border-t-transparent animate-spin" />
+                                )}
+                                <span className="text-sm leading-none">{typeIcon}</span>
+                                {/* Status dot */}
+                                <div className={`absolute -top-1 -right-1 w-3 h-3 rounded-full border border-white flex items-center justify-center ${
+                                  st.status === 'completed' ? 'bg-green-500' :
+                                  st.status === 'failed' ? 'bg-red-500' :
+                                  st.status === 'running' ? 'bg-blue-500' :
+                                  'bg-gray-300'
+                                }`}>
+                                  {st.status === 'completed' && (
+                                    <svg className="w-2 h-2 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                                    </svg>
+                                  )}
+                                  {st.status === 'failed' && (
+                                    <svg className="w-2 h-2 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                  )}
+                                </div>
+                                {/* Checkpoint flag */}
+                                {st.checkpoint && st.status !== 'completed' && (
+                                  <div className="absolute -bottom-0.5 -left-0.5 w-2.5 h-2.5 rounded-full bg-amber-400 border border-white" />
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
+                      {/* Expand to full diagram when this run is selected */}
+                      {selectedRun?.id === run.id && !diagramCollapsed && (
+                        <div className="mt-3 border-t border-gray-100 pt-3" onClick={(e) => e.stopPropagation()}>
+                          <WorkflowDiagram
+                            subtasks={run.subtasks}
+                            currentStep={run.current_step || 0}
+                            goal={run.goal}
+                            status={run.status}
+                            mode={run.mode}
+                            recipes={run.recipes}
+                          />
+                          {/* Checkpoint resume/cancel */}
+                          {run.status === 'paused' && (
+                            <div className="mt-3 flex items-center gap-3 p-2.5 bg-amber-50 border border-amber-200 rounded-lg">
+                              <span className="text-xs text-amber-700 font-medium">Paused at checkpoint</span>
+                              <div className="ml-auto flex gap-2">
+                                <button
+                                  onClick={() => handleResumeWorkflow(run)}
+                                  className="px-3 py-1.5 bg-teal-600 text-white rounded text-xs font-medium hover:bg-teal-700"
+                                >
+                                  Resume
+                                </button>
+                                <button
+                                  onClick={() => handleCancel(run)}
+                                  className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded text-xs hover:bg-gray-50"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {/* Toggle expand/collapse for selected workflow */}
+                      {selectedRun?.id === run.id && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setDiagramCollapsed(!diagramCollapsed); }}
+                          className="mt-2 flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-600"
+                        >
+                          <svg className={`w-3 h-3 transition-transform ${diagramCollapsed ? '' : 'rotate-180'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                          {diagramCollapsed ? 'Show details' : 'Collapse'}
+                        </button>
+                      )}
                     </div>
                   )}
 
@@ -1152,82 +1315,6 @@ function AgentsPage() {
                     {selectedRun.kind === 'jira' ? 'Stories' : 'Artifacts'}
                   </button>
                 </div>
-
-                {/* Workflow Subtask Stepper + Checkpoint Banner */}
-                {selectedRun.kind === 'workflow' && activeTab === 'activity' && selectedRun.subtasks && selectedRun.subtasks.length > 0 && (
-                  <div className="border-b border-gray-200">
-                    {/* Subtask stepper */}
-                    <div className="px-4 py-3 space-y-1.5">
-                      {selectedRun.subtasks.map((st, idx) => (
-                        <div key={idx} className="flex items-center gap-2">
-                          <span className={`text-sm font-medium w-5 text-center ${subtaskStatusColor(st.status)}`}>
-                            {subtaskStatusIcon(st.status)}
-                          </span>
-                          <span className={`text-xs ${
-                            st.status === 'running' ? 'text-blue-700 font-medium'
-                              : st.status === 'completed' ? 'text-gray-700'
-                              : st.status === 'failed' ? 'text-red-700'
-                              : 'text-gray-400'
-                          }`}>
-                            {st.title}
-                          </span>
-                          {st.checkpoint && st.status !== 'completed' && (
-                            <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">checkpoint</span>
-                          )}
-                          {st.model_used && (
-                            <span className="text-xs bg-gray-100 text-gray-500 px-1 py-0.5 rounded font-mono">{st.model_used}</span>
-                          )}
-                          {(st.attempts || 1) > 1 && (
-                            <span className="text-xs bg-orange-100 text-orange-700 px-1 py-0.5 rounded">attempt {st.attempts}</span>
-                          )}
-                          {st.result_summary && st.status === 'completed' && (
-                            <span className="text-xs text-gray-400 truncate max-w-[200px]">{st.result_summary}</span>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Checkpoint banner when paused */}
-                    {selectedRun.status === 'paused' && (
-                      <div className="mx-4 mb-3 bg-amber-50 border border-amber-200 rounded-lg p-3">
-                        <div className="flex items-center gap-2 mb-2">
-                          <span className="text-amber-600 font-medium text-sm">Paused at checkpoint</span>
-                        </div>
-                        {(() => {
-                          const lastCompleted = selectedRun.subtasks?.filter(s => s.status === 'completed').slice(-1)[0];
-                          return lastCompleted ? (
-                            <div className="text-xs text-amber-800 mb-2">
-                              <p className="font-medium">After: {lastCompleted.title}</p>
-                              {lastCompleted.result_summary && (
-                                <p className="mt-1 text-amber-700">{lastCompleted.result_summary}</p>
-                              )}
-                              {lastCompleted.files_changed.length > 0 && (
-                                <p className="mt-1 text-amber-600">
-                                  Files: {lastCompleted.files_changed.slice(0, 5).join(', ')}
-                                  {lastCompleted.files_changed.length > 5 && ` +${lastCompleted.files_changed.length - 5} more`}
-                                </p>
-                              )}
-                            </div>
-                          ) : null;
-                        })()}
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => handleResumeWorkflow(selectedRun)}
-                            className="px-3 py-1.5 bg-teal-600 text-white rounded text-xs font-medium hover:bg-teal-700"
-                          >
-                            Resume Workflow
-                          </button>
-                          <button
-                            onClick={() => handleCancel(selectedRun)}
-                            className="px-3 py-1.5 border border-gray-300 text-gray-700 rounded text-xs hover:bg-gray-50"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
 
                 {/* Activity Terminal */}
                 {activeTab === 'activity' && (

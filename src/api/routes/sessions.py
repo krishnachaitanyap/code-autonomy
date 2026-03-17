@@ -131,6 +131,7 @@ async def create_session(body: SessionCreate):
                     progress_callback=progress_callback,
                     conversation_context=body.context or None,
                     session_id=session_id,
+                    recipe_ids=body.recipe_ids or None,
                 )
             elif body.mode == "plan":
                 agent_service.run_plan(
@@ -139,6 +140,7 @@ async def create_session(body: SessionCreate):
                     progress_callback=progress_callback,
                     conversation_context=body.context or None,
                     session_id=session_id,
+                    recipe_ids=body.recipe_ids or None,
                 )
             elif body.mode == "ask":
                 agent_service.run_ask(
@@ -147,6 +149,7 @@ async def create_session(body: SessionCreate):
                     progress_callback=progress_callback,
                     conversation_context=body.context or None,
                     session_id=session_id,
+                    recipe_ids=body.recipe_ids or None,
                 )
         except Exception as exc:
             logger.exception("Session %s failed: %s", session_id, exc)
