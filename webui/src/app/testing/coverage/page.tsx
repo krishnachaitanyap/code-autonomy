@@ -6,6 +6,7 @@ import { testing, repos, type TestProject, type CoverageReport, type StrategyBre
 import StrategyCard from '@/components/testing/StrategyCard';
 import StrategySummaryBar from '@/components/testing/StrategySummaryBar';
 import MissingStrategiesBanner from '@/components/testing/MissingStrategiesBanner';
+import BranchSelect from '@/components/BranchSelect';
 
 export default function CoveragePageWrapper() {
   return (
@@ -26,10 +27,8 @@ function CoveragePage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [runningTests, setRunningTests] = useState(false);
 
-  // Branch selector state
+  // Branch selector state (managed by BranchSelect component)
   const [branch, setBranch] = useState('main');
-  const [branchList, setBranchList] = useState<string[]>([]);
-  const [loadingBranches, setLoadingBranches] = useState(false);
 
   // SonarQube project key
   const [sonarProjectKey, setSonarProjectKey] = useState('');
@@ -51,32 +50,12 @@ function CoveragePage() {
     load();
   }, []);
 
-  // Load branches when project selection changes
-  useEffect(() => {
-    if (!selectedProjectId) {
-      setBranchList([]);
-      setBranch('main');
-      return;
-    }
+  // Resolve repo ID for BranchSelect
+  const coverageBranchRepoId = (() => {
+    if (!selectedProjectId) return '';
     const proj = projects.find((p) => p.id === selectedProjectId);
-    const repoId = proj?.repo_id || selectedProjectId;
-    setBranchList([]);
-    setBranch('main');
-    setLoadingBranches(true);
-    repos.branches(repoId)
-      .then((r) => {
-        const list = r.branches || [];
-        setBranchList(list);
-        if (list.length > 0) {
-          setBranch(list.includes('main') ? 'main' : list[0]);
-        }
-      })
-      .catch(() => {
-        setBranchList([]);
-        setBranch('main');
-      })
-      .finally(() => setLoadingBranches(false));
-  }, [selectedProjectId, projects]);
+    return proj?.repo_id || selectedProjectId;
+  })();
 
   useEffect(() => {
     if (selectedProjectId) {
@@ -148,22 +127,12 @@ function CoveragePage() {
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
-          <select
+          <BranchSelect
+            repoId={coverageBranchRepoId}
             value={branch}
-            onChange={(e) => setBranch(e.target.value)}
-            className="px-3 py-2 border border-gray-300 rounded-md text-sm"
-            disabled={loadingBranches || branchList.length === 0}
-          >
-            {loadingBranches ? (
-              <option>Loading...</option>
-            ) : branchList.length === 0 ? (
-              <option value="main">main</option>
-            ) : (
-              branchList.map((b) => (
-                <option key={b} value={b}>{b}</option>
-              ))
-            )}
-          </select>
+            onChange={setBranch}
+            size="sm"
+          />
           <input
             type="text"
             placeholder="SonarQube project key (optional)"

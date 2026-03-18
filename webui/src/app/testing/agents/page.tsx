@@ -10,6 +10,7 @@ import {
 import RecipePicker from '@/components/RecipePicker';
 import ModelSelector from '@/components/ModelSelector';
 import WorkflowDiagram from '@/components/WorkflowDiagram';
+import BranchSelect from '@/components/BranchSelect';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -218,10 +219,8 @@ function AgentsPage() {
   const [newJiraRun, setNewJiraRun] = useState({ repo_id: '', jira_project: '' });
   const [newWorkflow, setNewWorkflow] = useState({ goal: '', project_id: projectFilter, mode: 'testing' as 'testing' | 'engineering', token_budget: 0 });
 
-  // Branch selector state
+  // Branch selector state (managed by BranchSelect component)
   const [branch, setBranch] = useState('main');
-  const [branchList, setBranchList] = useState<string[]>([]);
-  const [loadingBranches, setLoadingBranches] = useState(false);
 
   // Reference repo learning state
   const [showRefRepo, setShowRefRepo] = useState(false);
@@ -240,44 +239,20 @@ function AgentsPage() {
 
   const terminalRef = useRef<HTMLDivElement>(null);
 
-  // Load branches when project/repo selection changes
-  useEffect(() => {
+  // Resolve repo ID from current project/repo selection (for BranchSelect)
+  const branchRepoId = (() => {
     const selectedId = newRunKind === 'test' ? newTestRun.project_id : newRunKind === 'workflow' ? newWorkflow.project_id : newJiraRun.repo_id;
-    if (!selectedId) {
-      setBranchList([]);
-      setBranch('main');
-      return;
+    if (!selectedId) return '';
+    // Check repos first, then match via projects
+    const directRepo = repoList.find((r) => r.id === selectedId);
+    if (directRepo) return directRepo.id;
+    const proj = projects.find((p) => p.id === selectedId);
+    if (proj) {
+      const matchedRepo = repoList.find((r) => r.url === proj.repo_url);
+      if (matchedRepo) return matchedRepo.id;
     }
-    // Find repo ID: check repos first, then match via projects
-    let repoId = repoList.find((r) => r.id === selectedId)?.id;
-    if (!repoId) {
-      const proj = projects.find((p) => p.id === selectedId);
-      if (proj) {
-        const matchedRepo = repoList.find((r) => r.url === proj.repo_url);
-        repoId = matchedRepo?.id;
-      }
-    }
-    if (!repoId) {
-      // selectedId might be a repo_id directly (from repos in the dropdown)
-      repoId = selectedId;
-    }
-    setBranchList([]);
-    setBranch('main');
-    setLoadingBranches(true);
-    repos.branches(repoId)
-      .then((r) => {
-        const list = r.branches || [];
-        setBranchList(list);
-        if (list.length > 0) {
-          setBranch(list.includes('main') ? 'main' : list[0]);
-        }
-      })
-      .catch(() => {
-        setBranchList([]);
-        setBranch('main');
-      })
-      .finally(() => setLoadingBranches(false));
-  }, [newTestRun.project_id, newJiraRun.repo_id, newWorkflow.project_id, newRunKind, repoList, projects]);
+    return selectedId; // might be a repo_id directly
+  })();
 
   // Load initial data
   useEffect(() => { loadData(); }, [projectFilter]);
@@ -547,22 +522,13 @@ function AgentsPage() {
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Branch</label>
-                  <select
+                  <BranchSelect
+                    repoId={branchRepoId}
                     value={branch}
-                    onChange={(e) => setBranch(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
-                    disabled={loadingBranches || branchList.length === 0}
-                  >
-                    {loadingBranches ? (
-                      <option>Loading...</option>
-                    ) : branchList.length === 0 ? (
-                      <option value="main">main</option>
-                    ) : (
-                      branchList.map((b) => (
-                        <option key={b} value={b}>{b}</option>
-                      ))
-                    )}
-                  </select>
+                    onChange={setBranch}
+                    size="sm"
+                    className="w-full"
+                  />
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Mode</label>
@@ -642,22 +608,13 @@ function AgentsPage() {
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Branch</label>
-                <select
+                <BranchSelect
+                  repoId={branchRepoId}
                   value={branch}
-                  onChange={(e) => setBranch(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
-                  disabled={loadingBranches || branchList.length === 0}
-                >
-                  {loadingBranches ? (
-                    <option>Loading...</option>
-                  ) : branchList.length === 0 ? (
-                    <option value="main">main</option>
-                  ) : (
-                    branchList.map((b) => (
-                      <option key={b} value={b}>{b}</option>
-                    ))
-                  )}
-                </select>
+                  onChange={setBranch}
+                  size="sm"
+                  className="w-full"
+                />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Type</label>
@@ -726,22 +683,13 @@ function AgentsPage() {
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Branch</label>
-                <select
+                <BranchSelect
+                  repoId={branchRepoId}
                   value={branch}
-                  onChange={(e) => setBranch(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
-                  disabled={loadingBranches || branchList.length === 0}
-                >
-                  {loadingBranches ? (
-                    <option>Loading...</option>
-                  ) : branchList.length === 0 ? (
-                    <option value="main">main</option>
-                  ) : (
-                    branchList.map((b) => (
-                      <option key={b} value={b}>{b}</option>
-                    ))
-                  )}
-                </select>
+                  onChange={setBranch}
+                  size="sm"
+                  className="w-full"
+                />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">JIRA Project Key</label>

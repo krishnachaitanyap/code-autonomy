@@ -323,6 +323,7 @@ export default function ChatPage() {
   const [activityLog, setActivityLog] = useState<ActivityEntry[]>([]);
   const [loadingRepos, setLoadingRepos] = useState(true);
   const [branchList, setBranchList] = useState<string[]>([]);
+  const [currentBranch, setCurrentBranch] = useState('');
   const [branchSearch, setBranchSearch] = useState('');
   const [branchDropdownOpen, setBranchDropdownOpen] = useState(false);
   const [loadingBranches, setLoadingBranches] = useState(false);
@@ -467,25 +468,34 @@ export default function ChatPage() {
       setMessages(loadMessages(selectedRepoId));
       // Reset branch state for new repo
       setBranchList([]);
+      setCurrentBranch('');
       setBranch('main');
       setLoadingBranches(true);
       repos.branches(selectedRepoId)
         .then((r) => {
           const list = r.branches || [];
+          const active = r.current_branch || '';
           setBranchList(list);
-          // Auto-select default branch
-          if (list.length > 0) {
-            setBranch(list.includes('main') ? 'main' : list[0]);
+          setCurrentBranch(active);
+          // Auto-select: prefer workspace's current branch, then 'main', then first
+          if (active && list.includes(active)) {
+            setBranch(active);
+          } else if (list.includes('main')) {
+            setBranch('main');
+          } else if (list.length > 0) {
+            setBranch(list[0]);
           }
         })
         .catch(() => {
           setBranchList([]);
+          setCurrentBranch('');
           setBranch('main');
         })
         .finally(() => setLoadingBranches(false));
     } else {
       setMessages([]);
       setBranchList([]);
+      setCurrentBranch('');
       setBranch('main');
     }
   }, [selectedRepoId]);
@@ -871,7 +881,7 @@ export default function ChatPage() {
             <svg className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
             </svg>
-            <span className="truncate max-w-[120px]">{branch || 'main'}</span>
+            <span className="truncate max-w-[120px]">{branch || 'main'}{branch === currentBranch && currentBranch ? ' \u2190' : ''}</span>
             {loadingBranches ? (
               <svg className="w-3 h-3 animate-spin text-gray-400 ml-auto flex-shrink-0" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -913,7 +923,7 @@ export default function ChatPage() {
                       type="button"
                       onClick={() => { setBranch(b); setBranchDropdownOpen(false); }}
                       className={`w-full text-left px-3 py-1.5 text-sm hover:bg-indigo-50 flex items-center gap-2 ${
-                        b === branch ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-700'
+                        b === branch ? 'bg-indigo-50 text-indigo-700 font-medium' : b === currentBranch ? 'bg-green-50 text-green-700' : 'text-gray-700'
                       }`}
                     >
                       {b === branch && (
@@ -921,7 +931,9 @@ export default function ChatPage() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
                         </svg>
                       )}
-                      <span className={`truncate ${b === branch ? '' : 'ml-5'}`}>{b}</span>
+                      <span className={`truncate ${b === branch ? '' : 'ml-5'}`}>
+                        {b}{b === currentBranch ? ' \u2190 workspace' : ''}
+                      </span>
                     </button>
                   ))}
                 {branchSearch && !branchList.some((b) => b.toLowerCase().includes(branchSearch.toLowerCase())) && (

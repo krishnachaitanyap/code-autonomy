@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { sessions, repos, type Session, type Repo } from '@/lib/api';
+import BranchSelect from '@/components/BranchSelect';
 
 export default function SessionsPage() {
   const [sessionList, setSessionList] = useState<Session[]>([]);
@@ -15,6 +16,7 @@ export default function SessionsPage() {
   const [showForm, setShowForm] = useState(false);
   const [newRepoId, setNewRepoId] = useState('');
   const [newMode, setNewMode] = useState('agent');
+  const [newBranch, setNewBranch] = useState('main');
   const [newRequirements, setNewRequirements] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -50,6 +52,7 @@ export default function SessionsPage() {
       const session = await sessions.create({
         repo_id: newRepoId,
         mode: newMode,
+        branch: newBranch,
         requirements: newRequirements,
       });
       setShowForm(false);
@@ -118,6 +121,16 @@ export default function SessionsPage() {
               <option value="plan">Plan</option>
               <option value="ask">Ask</option>
             </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Branch
+            </label>
+            <BranchSelect
+              repoId={newRepoId}
+              value={newBranch}
+              onChange={setNewBranch}
+            />
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">

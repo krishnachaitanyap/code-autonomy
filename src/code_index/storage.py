@@ -251,7 +251,7 @@ def _save_code_index(code_index: CodeIndex, cache_path: Path) -> None:
         logger.warning("Could not save embeddings: %s", exc)
 
 
-def _load_code_index(repo_id: str, cache_path: Path) -> Optional[CodeIndex]:
+def _load_code_index(repo_id: str, cache_path: Path, config: Optional[dict] = None) -> Optional[CodeIndex]:
     """Load CodeIndex from disk cache. Returns None if not found or corrupt."""
     json_path = cache_path / f"{repo_id}.json"
     if not json_path.exists():
@@ -268,9 +268,18 @@ def _load_code_index(repo_id: str, cache_path: Path) -> Optional[CodeIndex]:
         class_hierarchy = ClassHierarchy.from_dict(data.get("class_hierarchy", {}))
         property_index = PropertyIndex.from_dict(data.get("property_index", {}))
 
+        # Build expected model key for cache invalidation
+        expected_model = ""
+        if config:
+            ai_cfg = config.get("ai", {})
+            provider = ai_cfg.get("embedding_provider", "openai")
+            default_model = "all-MiniLM-L6-v2" if provider == "local" else "text-embedding-3-small"
+            model = ai_cfg.get("embedding_model", default_model)
+            expected_model = f"{provider}:{model}"
+
         embeddings = EntityEmbeddings()
         emb_path = cache_path / f"{repo_id}_embeddings.pkl"
-        embeddings.load(str(emb_path))  # best-effort
+        embeddings.load(str(emb_path), expected_model=expected_model)  # best-effort
 
         return CodeIndex(
             repo_id=data["repo_id"],
@@ -310,7 +319,7 @@ def build_or_load_code_index(
     print(f"[code-index] repo_id={repo_id}, cache_path={cache_path}, max_age_hours={max_age_hours}")
 
     if not force_rebuild:
-        cached = _load_code_index(repo_id, cache_path)
+        cached = _load_code_index(repo_id, cache_path, config=config)
         if cached:
             age_hours = (time.time() - cached.indexed_at) / 3600
             if max_age_hours <= 0 or age_hours <= max_age_hours:

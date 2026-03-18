@@ -4,6 +4,7 @@ Handles clone, checkout, commit, and push via subprocess (no GitPython dependenc
 """
 
 import logging
+import os
 import re
 import subprocess
 from datetime import datetime
@@ -12,13 +13,16 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Env overrides to suppress credential prompts (Windows CredentialHelperSelector, etc.)
+_GIT_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""}
+
 
 def _git(repo_dir: str, *args: str, timeout: int = 300) -> subprocess.CompletedProcess:
     """Run a git command in *repo_dir*."""
     cmd = ["git"] + list(args)
     logger.debug("git cmd: %s (cwd=%s)", " ".join(args), repo_dir)
     result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout, cwd=repo_dir,
+        cmd, capture_output=True, text=True, timeout=timeout, cwd=repo_dir, env=_GIT_ENV,
     )
     if result.returncode != 0:
         logger.error("git failed (exit %d): %s", result.returncode, result.stderr.strip())
@@ -170,6 +174,15 @@ def list_remote_branches(repo_url: str, auth_token: Optional[str] = None) -> lis
     except Exception as exc:
         logger.warning("Failed to list remote branches for %s: %s", repo_url, exc)
         return []
+
+
+def get_current_branch(repo_dir: str) -> str:
+    """Get the currently checked-out branch in the workspace. Returns '' if detached or error."""
+    r = _git(repo_dir, "rev-parse", "--abbrev-ref", "HEAD")
+    if r.returncode == 0:
+        branch = r.stdout.strip()
+        return branch if branch != "HEAD" else ""  # "HEAD" means detached
+    return ""
 
 
 def get_default_branch(repo_dir: str) -> str:

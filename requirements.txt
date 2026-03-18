@@ -21,14 +21,14 @@ requests>=2.31.0
 # Activity indicators (spinner, progress, status)
 rich>=13.7.0
 
-# Optional: similarity search (pip install sentence-transformers)
-# sentence-transformers>=2.2.0
+# Local embedding model for offline semantic search
+sentence-transformers>=2.2.0
 
 # Optional: Java call graph + symbol extraction (pip install javalang)
 # javalang>=0.13.0
 
-# Optional: BM25 keyword search for hybrid retrieval (pip install rank-bm25)
-# rank-bm25>=0.2.2
+# BM25 keyword search for hybrid retrieval
+rank-bm25>=0.2.2
 
 # Optional: AWS OpenSearch knowledge backend
 # opensearch-py>=2.4.0

@@ -120,7 +120,7 @@ export const repos = {
   symbols: (id: string, filePath?: string) =>
     request<any[]>(`/repos/${id}/symbols${filePath ? `?file_path=${filePath}` : ''}`),
   branches: (id: string) =>
-    request<{ branches: string[] }>(`/repos/${id}/branches`),
+    request<{ branches: string[]; current_branch?: string }>(`/repos/${id}/branches`),
   generateSkills: (id: string) =>
     request<{ content: string }>(`/repos/${id}/skills/generate`, { method: 'POST' }),
   getClaudeMd: (id: string) =>

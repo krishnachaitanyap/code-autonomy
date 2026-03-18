@@ -1,7 +1,9 @@
 """API routes for repository management."""
 
+import asyncio
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -14,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["repos"])
 repo_service = RepoService()
+_indexing_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="repo-index")
 
 
 def _default_nickname(url: str, local_path: str) -> str:
@@ -28,6 +31,36 @@ def _default_nickname(url: str, local_path: str) -> str:
     # Take the last path segment
     name = name.rsplit("/", 1)[-1]
     return name
+
+
+def _index_repo_background(repo_id: str, local_path: str, repo_url: str) -> None:
+    """Background: build consciousness index and auto-generate SKILLS.md / CLAUDE.md."""
+    try:
+        skills_path = Path(local_path) / "SKILLS.md"
+        claude_path = Path(local_path) / "CLAUDE.md"
+        needs_skills = not skills_path.is_file()
+        needs_claude = not claude_path.is_file()
+
+        if not needs_skills and not needs_claude:
+            return
+
+        from src.agent.knowledge_generator import generate_skills_markdown, generate_claude_md
+        from src.services.config_service import ConfigService
+
+        config = ConfigService().load_config()
+        consciousness = repo_service.build_consciousness(local_path, config, repo_url)
+
+        if needs_skills:
+            content = generate_skills_markdown(consciousness, repo_path=local_path)
+            skills_path.write_text(content, encoding="utf-8")
+            logger.info("Auto-generated SKILLS.md for repo %s", repo_id)
+
+        if needs_claude:
+            content = generate_claude_md(consciousness, repo_path=local_path)
+            claude_path.write_text(content, encoding="utf-8")
+            logger.info("Auto-generated CLAUDE.md for repo %s", repo_id)
+    except Exception as exc:
+        logger.warning("Background indexing failed for repo %s: %s", repo_id, exc)
 
 
 class SkillsBody(BaseModel):
@@ -80,34 +113,16 @@ async def register_repo(body: RepoCreate):
             RepoRepository(db).update(repo.id, nickname=nickname)
             repo.nickname = nickname
 
-    # Auto-generate SKILLS.md and CLAUDE.md if local path exists
+    # Auto-generate SKILLS.md and CLAUDE.md in background (non-blocking)
     if repo.local_path and os.path.isdir(repo.local_path):
-        skills_path = Path(repo.local_path) / "SKILLS.md"
-        claude_path = Path(repo.local_path) / "CLAUDE.md"
-        needs_skills = not skills_path.is_file()
-        needs_claude = not claude_path.is_file()
-
-        if needs_skills or needs_claude:
-            try:
-                from src.agent.knowledge_generator import generate_skills_markdown, generate_claude_md
-                from src.services.config_service import ConfigService
-
-                config = ConfigService().load_config()
-                consciousness = repo_service.build_consciousness(
-                    repo.local_path, config, repo.url,
-                )
-
-                if needs_skills:
-                    content = generate_skills_markdown(consciousness, repo_path=repo.local_path)
-                    skills_path.write_text(content, encoding="utf-8")
-                    logger.info("Auto-generated SKILLS.md for repo %s", repo.id)
-
-                if needs_claude:
-                    content = generate_claude_md(consciousness, repo_path=repo.local_path)
-                    claude_path.write_text(content, encoding="utf-8")
-                    logger.info("Auto-generated CLAUDE.md for repo %s", repo.id)
-            except Exception as exc:
-                logger.warning("Failed to auto-generate knowledge files for repo %s: %s", repo.id, exc)
+        repo_id = repo.id
+        local_path = repo.local_path
+        repo_url = repo.url
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(
+            _indexing_executor,
+            lambda: _index_repo_background(repo_id, local_path, repo_url),
+        )
 
     return RepoResponse(
         id=repo.id, url=repo.url, local_path=repo.local_path,
@@ -138,6 +153,9 @@ async def list_repo_branches(repo_id: str):
     if repo is None:
         raise HTTPException(status_code=404, detail="Repository not found")
 
+    branches: list[str] = []
+
+    # Try platform REST API first
     try:
         from src.platform.platform_client import get_platform_client
         from src.services.config_service import ConfigService
@@ -145,18 +163,27 @@ async def list_repo_branches(repo_id: str):
         config = ConfigService().load_config()
         client = get_platform_client(repo.platform, repo.url, config=config)
         branches = client.list_branches(repo.url)
-
-        # Fallback to local git if REST returns empty and local path exists
-        if not branches and repo.local_path:
-            from src.platform.git_ops import list_branches
-
-            branches = list_branches(repo.local_path)
-    except HTTPException:
-        raise
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not list branches: {exc}")
+        logger.warning("Platform branch listing failed for %s: %s", repo_id, exc)
 
-    return {"branches": branches}
+    # Fallback to local git if REST returned empty and local path exists
+    if not branches and repo.local_path:
+        try:
+            from src.platform.git_ops import list_branches
+            branches = list_branches(repo.local_path)
+        except Exception as exc:
+            logger.warning("Local git branch listing failed for %s: %s", repo_id, exc)
+
+    # Detect the currently checked-out branch in the workspace
+    current_branch = ""
+    if repo.local_path:
+        try:
+            from src.platform.git_ops import get_current_branch
+            current_branch = get_current_branch(repo.local_path)
+        except Exception:
+            pass
+
+    return {"branches": branches, "current_branch": current_branch}
 
 
 @router.delete("/{repo_id}", status_code=204)

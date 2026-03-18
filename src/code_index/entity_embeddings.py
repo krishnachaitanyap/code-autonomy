@@ -4,10 +4,13 @@ Per-entity embeddings with caching, sliding-window chunking, and BM25 hybrid ret
 Chunks each symbol as ``signature + docstring + body``, with sliding-window
 chunking for large methods (>1000 chars).  Optionally prepends import context.
 
-Uses OpenAI embeddings API via litellm (``text-embedding-3-small``) for vector
-search, and BM25 for keyword search, fused via Reciprocal Rank Fusion (RRF).
+Supports multiple embedding providers controlled by ``embedding_provider`` config:
+- ``local``: sentence-transformers (offline, no API key needed)
+- ``openai``: OpenAI API via litellm (default)
+- ``azure``: Azure OpenAI via LangChain
 
-Caches embeddings as pickle with SHA-256 invalidation per entity.
+BM25 keyword search is fused with vector search via Reciprocal Rank Fusion (RRF).
+Caches embeddings as pickle with provider:model invalidation key.
 """
 
 import hashlib
@@ -21,8 +24,9 @@ from src.code_index.symbol_table import SymbolTable
 
 logger = logging.getLogger(__name__)
 
-# OpenAI embedding model — small, fast, cheap ($0.02/1M tokens)
-_DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+# Default embedding models per provider
+_DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"  # OpenAI default
+_DEFAULT_LOCAL_MODEL = "all-MiniLM-L6-v2"  # sentence-transformers default
 _BATCH_SIZE = 2048  # max texts per API call
 _MAX_CONCURRENT_BATCHES = 5  # max parallel API calls
 
@@ -30,6 +34,19 @@ _MAX_CONCURRENT_BATCHES = 5  # max parallel API calls
 _CHUNK_SIZE = 800        # chars per embedding chunk
 _CHUNK_OVERLAP = 200     # overlap between consecutive chunks
 _SMALL_BODY_LIMIT = 1000  # body <= this: single chunk (original behavior)
+
+
+# Singleton cache for local sentence-transformer models
+_local_model_cache: dict[str, object] = {}
+
+
+def _get_local_model(model_name: str):
+    """Load a sentence-transformers model once and cache it."""
+    if model_name not in _local_model_cache:
+        from sentence_transformers import SentenceTransformer
+        logger.info("Loading local embedding model: %s", model_name)
+        _local_model_cache[model_name] = SentenceTransformer(model_name)
+    return _local_model_cache[model_name]
 
 
 def _sliding_window_chunks(text: str, chunk_size: int, overlap: int) -> list[str]:
@@ -71,6 +88,7 @@ class EntityEmbeddings:
         self._vectors = None  # numpy array, shape (n, dim)
         self._chunk_indices: list[int] = []  # chunk index per embedding (0 for single-chunk)
         self._config: dict = {}
+        self._embedding_model_name: str = ""  # "provider:model" for cache invalidation
 
         # BM25 index
         self._bm25 = None  # BM25Okapi instance
@@ -125,6 +143,14 @@ class EntityEmbeddings:
             import_map: Optional import map for prepending import context.
         """
         self._config = config or {}
+        ai_cfg = self._config.get("ai", self._config) if isinstance(
+            self._config.get("ai"), dict
+        ) else self._config
+        provider = ai_cfg.get("embedding_provider", "openai")
+        model = ai_cfg.get("embedding_model",
+                           _DEFAULT_LOCAL_MODEL if provider == "local" else _DEFAULT_EMBEDDING_MODEL)
+        self._embedding_model_name = f"{provider}:{model}"
+
         ci_cfg = self._config.get("code_index", {})
         repo = Path(repo_path)
 
@@ -338,24 +364,40 @@ class EntityEmbeddings:
             "chunk_indices": self._chunk_indices,
             "bm25_fqns": self._bm25_fqns,
             "bm25_corpus": self._bm25_corpus,
+            "embedding_model": self._embedding_model_name,
         }
         path = Path(cache_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
             pickle.dump(data, f)
 
-    def load(self, cache_path: str) -> bool:
-        """Load embeddings from a pickle file. Returns True if successful."""
+    def load(self, cache_path: str, expected_model: str = "") -> bool:
+        """Load embeddings from a pickle file. Returns True if successful.
+
+        Args:
+            cache_path: Path to the pickle file.
+            expected_model: Expected "provider:model" key. If set and the cached
+                model differs, returns False to trigger a rebuild.
+        """
         path = Path(cache_path)
         if not path.exists():
             return False
         try:
             with open(path, "rb") as f:
                 data = pickle.load(f)
+
+            # Cache invalidation: reject if provider/model changed
+            cached_model = data.get("embedding_model", "")
+            if expected_model and cached_model and cached_model != expected_model:
+                logger.info("Embedding cache model mismatch: cached=%s, expected=%s — rebuilding",
+                            cached_model, expected_model)
+                return False
+
             self._fqns = data["fqns"]
             self._texts = data["texts"]
             self._digests = data["digests"]
             self._vectors = data["vectors"]
+            self._embedding_model_name = cached_model
             # Backward-compatible: old caches won't have these keys
             self._chunk_indices = data.get("chunk_indices", [0] * len(self._fqns))
             self._bm25_fqns = data.get("bm25_fqns", [])
@@ -371,6 +413,18 @@ class EntityEmbeddings:
         except Exception:
             return False
 
+    def _embed_texts_local(self, texts: list[str], model_name: str):
+        """Embed texts using a local sentence-transformers model. Returns numpy array."""
+        import numpy as np
+
+        model = _get_local_model(model_name)
+        vectors = model.encode(
+            texts, batch_size=256,
+            show_progress_bar=len(texts) > 500,
+            normalize_embeddings=True,
+        )
+        return np.array(vectors, dtype=np.float32)
+
     def _embed_single_batch(self, texts, model, api_key):
         """Embed a single batch of texts. Returns numpy array (n, dim)."""
         import numpy as np
@@ -381,7 +435,7 @@ class EntityEmbeddings:
         return np.array(batch_vecs, dtype=np.float32)
 
     def _embed_texts(self, texts: list[str]):
-        """Call embeddings API. Uses Azure OpenAI when provider=azure, else litellm."""
+        """Route embedding calls by provider config: local, azure, or openai (default)."""
         import numpy as np
         from src.llm_client import _is_azure_provider, _resolve_api_key
 
@@ -389,16 +443,22 @@ class EntityEmbeddings:
             self._config.get("ai"), dict
         ) else self._config
 
+        provider = ai_cfg.get("embedding_provider", "openai")
+        model = ai_cfg.get("embedding_model",
+                           _DEFAULT_LOCAL_MODEL if provider == "local" else _DEFAULT_EMBEDDING_MODEL)
+
+        # --- Local sentence-transformers path ---
+        if provider == "local":
+            return self._embed_texts_local(texts, model)
+
         # --- Azure OpenAI path ---
-        if _is_azure_provider(ai_cfg):
+        if provider == "azure" or _is_azure_provider(ai_cfg):
             return self._embed_texts_azure(texts)
 
         # --- Standard OpenAI / litellm path ---
         api_key = _resolve_api_key(ai_cfg)
         if not api_key:
             raise ValueError("No API key available for embeddings")
-
-        model = ai_cfg.get("embedding_model", _DEFAULT_EMBEDDING_MODEL)
 
         # Split into batches
         batches = [(i, texts[i : i + _BATCH_SIZE]) for i in range(0, len(texts), _BATCH_SIZE)]

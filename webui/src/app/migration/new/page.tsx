@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { repos, migrations, type Repo, type DatabaseConnectionConfig } from '@/lib/api';
+import BranchSelect from '@/components/BranchSelect';
 
 type WizardStep = 1 | 2 | 3 | 4;
 
@@ -536,12 +537,10 @@ export default function NewMigrationWizard() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Branch</label>
-                <input
-                  type="text"
+                <BranchSelect
+                  repoId={form.source_mode === 'existing' ? form.source_repo_id : ''}
                   value={form.source_branch}
-                  onChange={e => setForm({ ...form, source_branch: e.target.value })}
-                  placeholder="main"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  onChange={(b) => setForm({ ...form, source_branch: b })}
                 />
               </div>
             </>
@@ -606,12 +605,10 @@ export default function NewMigrationWizard() {
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Branch</label>
-            <input
-              type="text"
+            <BranchSelect
+              repoId=""
               value={form.reference_branch}
-              onChange={e => setForm({ ...form, reference_branch: e.target.value })}
-              placeholder="main"
-              className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              onChange={(b) => setForm({ ...form, reference_branch: b })}
             />
           </div>
 
