@@ -316,12 +316,13 @@ def _seed_default_tools(engine) -> None:
                 "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
             ), {"id": _uuid(), **tool_def})
 
-    # Seed default recipes that bundle tools
-    _seed_default_recipes(conn)
+        # Seed default recipes that bundle tools (inside same connection)
+        _seed_default_recipes(conn)
 
 
 def _seed_default_recipes(conn) -> None:
     """Seed built-in recipes that reference default tools. Skips if they already exist."""
+    from sqlalchemy import text
     from src.data.models import _uuid
 
     DEFAULT_RECIPES = [
