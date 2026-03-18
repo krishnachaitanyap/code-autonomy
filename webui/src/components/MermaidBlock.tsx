@@ -174,7 +174,16 @@ export default function MermaidBlock({ code }: { code: string }) {
   useEffect(() => {
     const id = `mermaid-${++_id}`;
     let cancelled = false;
-    mermaid.render(id, code)
+
+    // Render into a temporary off-screen container so mermaid's error SVGs
+    // (bomb icons + "Syntax error in text") never appear in the visible DOM.
+    const tempContainer = document.createElement('div');
+    tempContainer.style.position = 'absolute';
+    tempContainer.style.left = '-9999px';
+    tempContainer.style.top = '-9999px';
+    document.body.appendChild(tempContainer);
+
+    mermaid.render(id, code, tempContainer)
       .then(({ svg }) => {
         if (!cancelled) {
           setSvgContent(svg);
@@ -183,6 +192,11 @@ export default function MermaidBlock({ code }: { code: string }) {
       })
       .catch((err) => {
         if (!cancelled) setError(String(err));
+      })
+      .finally(() => {
+        // Clean up the temp container and any error elements mermaid injected
+        tempContainer.remove();
+        document.getElementById(`d${id}`)?.remove();
       });
     return () => { cancelled = true; };
   }, [code]);
@@ -208,14 +222,14 @@ export default function MermaidBlock({ code }: { code: string }) {
 
   if (error) {
     return (
-      <div className="my-2 rounded-lg overflow-hidden border border-red-200 bg-red-50">
-        <div className="flex items-center justify-between px-3 py-1.5 bg-red-100 border-b border-red-200">
-          <span className="text-[10px] font-mono text-red-500">mermaid (render error)</span>
-          <button onClick={handleCopy} className="text-[10px] text-red-400 hover:text-red-600">
-            {copied ? 'Copied!' : 'Copy'}
+      <div className="my-2 rounded-lg overflow-hidden border border-amber-200 bg-amber-50">
+        <div className="flex items-center justify-between px-3 py-1.5 bg-amber-100 border-b border-amber-200">
+          <span className="text-[10px] font-mono text-amber-600">mermaid — could not render diagram</span>
+          <button onClick={handleCopy} className="text-[10px] text-amber-500 hover:text-amber-700">
+            {copied ? 'Copied!' : 'Copy Source'}
           </button>
         </div>
-        <pre className="p-3 text-xs font-mono overflow-x-auto text-red-700 whitespace-pre-wrap">{code}</pre>
+        <pre className="p-3 text-xs font-mono overflow-x-auto text-gray-700 whitespace-pre-wrap">{code}</pre>
       </div>
     );
   }
