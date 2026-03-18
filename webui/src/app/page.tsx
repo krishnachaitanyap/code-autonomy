@@ -214,7 +214,7 @@ export default function Dashboard() {
               <p className="text-xs text-gray-500 mt-0.5">Gap analysis & suggestions</p>
             </Link>
             <Link
-              href="/migration"
+              href="/recipes"
               data-tour="recipes"
               className="bg-white rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow group"
             >
@@ -222,7 +222,7 @@ export default function Dashboard() {
                 {'\u{1F4D1}'}
               </div>
               <p className="font-medium text-gray-900 text-sm">Recipes</p>
-              <p className="text-xs text-gray-500 mt-0.5">Migration recipes & roadmaps</p>
+              <p className="text-xs text-gray-500 mt-0.5">Browse & manage all recipes</p>
             </Link>
             <Link
               href="/tools"
