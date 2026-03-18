@@ -155,6 +155,90 @@ def _seed_default_tools(engine) -> None:
             "timeout_seconds": 120,
             "is_active": True,
         },
+        {
+            "name": "JISI_downstream_detector",
+            "description": "Detects downstream dependencies (REST, SOAP, MQ, DB) in a Java/JISI repo or file by scanning code patterns, config keys, and call chains",
+            "tool_type": "analyzer",
+            "enabled_for_migration": True,
+            "enabled_for_chat": True,
+            "enabled_for_testing": True,
+            "goal": (
+                "Scan a repository or specific file to identify all downstream dependencies — "
+                "REST calls, SOAP/RPC invocations, MQ messaging, and database access. "
+                "Follow service/factory chains from controllers through to remote/data modules. "
+                "Produce a structured downstream inventory with evidence links and confidence ratings."
+            ),
+            "agent_instructions": (
+                "You are a JISI downstream dependency detector. Given a repo path or file path, "
+                "systematically scan for all external downstream calls.\n\n"
+                "## Detection Rules\n\n"
+                "### A) REST Downstream\n"
+                "Search for these patterns:\n"
+                "- `RESTProxy.getInstance(...).invoke(...)` calls\n"
+                "- `ChannelUtil.getChannelProperty(...)` + service key references\n"
+                "- Service URL keys in app.properties (e.g. lines containing REST endpoint URLs)\n"
+                "- Config keys matching `*.rest.url` in app.properties\n\n"
+                "### B) SOAP Downstream\n"
+                "Search for these patterns:\n"
+                "- `RPCProxy.getInstance(...)` calls\n"
+                "- SOAP port types (`*PortType` classes/interfaces)\n"
+                "- `SoapFault`, `BindingProvider` references\n"
+                "- `*.stub.url` / `*.stub.class` keys in app.properties\n\n"
+                "### C) MQ Downstream\n"
+                "Search for these patterns:\n"
+                "- `com.cig.jisi.mq.ConnectionFactory` usage\n"
+                "- `Poster`, `QueueManager`, `TextMessage`, `MQException` references\n"
+                "- Properties matching `jisi.audit.mq.*` pattern\n\n"
+                "### D) DB Downstream\n"
+                "Search for these patterns:\n"
+                "- Direct JDBC: `PreparedStatement`, SQL string literals\n"
+                "- Dynamic table names via properties\n"
+                "- Config keys matching `*.ds.name`, schema/table properties\n\n"
+                "## Execution Steps\n\n"
+                "1. **Scan app.properties** first — extract all URL keys, stub keys, MQ keys, "
+                "and datasource keys. This is the primary config source.\n"
+                "2. **Scan Java source files** for the code patterns listed above. "
+                "For each match, record the file path, line number, class name, and method.\n"
+                "3. **Follow call chains**: trace from Controller → Invoker → Service → "
+                "Remote/DAO → External/DB → Response. Map each downstream call to its "
+                "config key where possible.\n"
+                "4. **Classify confidence**:\n"
+                "   - **High**: Direct pattern match with config key resolved\n"
+                "   - **Medium**: Pattern match but config key unresolved or indirect\n"
+                "   - **Low**: Inferred from imports/types only, no direct invocation found\n\n"
+                "## Output Format (strict)\n\n"
+                "### Executive Summary\n"
+                "Provide counts by type: REST, SOAP, MQ, DB.\n"
+                "Provide confidence split: High/Medium/Low counts.\n\n"
+                "### Downstream Inventory Table\n"
+                "Return a markdown table with these columns:\n"
+                "| Type | Caller (class.method) | Target system/client | "
+                "Endpoint/Operation/Queue/Table | Protocol | Config key | "
+                "Evidence link (file:line) | Confidence | Notes |\n\n"
+                "### Endpoint Trace Sections\n"
+                "For at least 2 key endpoints, provide a full call-chain trace:\n"
+                "```\n"
+                "Client → Controller → Invoker → Service → Remote/DAO → External/DB → Response\n"
+                "```\n\n"
+                "### Open Gaps\n"
+                "List anything unresolved — mark as Unknown.\n\n"
+                "## Quality Constraints\n"
+                "- Do NOT infer unknown endpoints/queues/tables — only report what is evidenced.\n"
+                "- No generic statements; every row must have evidence line links.\n"
+                "- Deduplicate equivalent downstreams called from multiple places.\n"
+                "- Separate internal module calls from real external downstream dependencies.\n"
+                "- If a file path is given (not full repo), focus on that file's execution path "
+                "and trace which downstreams it may invoke."
+            ),
+            "allowed_tools": '["Read", "Glob", "Grep", "ListDir", "FindFiles", "Bash"]',
+            "parameters": "{}",
+            "tags": '["jisi", "downstream", "dependency", "analysis", "java", "default"]',
+            "prerequisites": "[]",
+            "max_turns": 30,
+            "model": "",
+            "timeout_seconds": 300,
+            "is_active": True,
+        },
     ]
 
     with engine.begin() as conn:
