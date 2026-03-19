@@ -247,7 +247,52 @@ def load_config(config_path: str = "config.ini") -> dict:
             "timeout": get_int("sonarqube", "timeout", 30),
             "project_key_pattern": get("sonarqube", "project_key_pattern", ""),
         },
+        "tool_credentials": _load_tool_credential_profiles(parser),
     }
+
+
+def _load_tool_credential_profiles(parser: configparser.ConfigParser) -> dict:
+    """Load all [tool_cred_*] sections from config.ini as credential profiles.
+
+    Each profile is keyed by its suffix (e.g. ``kerberos_prod`` from
+    ``[tool_cred_kerberos_prod]``) and contains auth_type-specific fields
+    with env var fallback following the existing JIRA/Splunk pattern.
+    """
+    profiles: dict = {}
+    prefix = "tool_cred_"
+    for section in parser.sections():
+        if not section.startswith(prefix):
+            continue
+        profile_name = section[len(prefix):]
+        if not profile_name:
+            continue
+
+        def _get(key: str, fallback: str = "") -> str:
+            try:
+                return parser.get(section, key, fallback=fallback).strip()
+            except (configparser.NoSectionError, configparser.NoOptionError):
+                return fallback
+
+        auth_type = _get("auth_type", "none")
+        profile: dict = {"auth_type": auth_type}
+
+        # Env var prefix: PROFILE_NAME_UPPER (e.g. KERBEROS_PROD)
+        env_prefix = profile_name.upper()
+
+        # Collect all fields with env var fallback
+        field_keys = [
+            "realm", "kdc", "principal", "keytab_path",
+            "username", "password", "token", "base_url",
+        ]
+        for key in field_keys:
+            val = _get(key)
+            if not val:
+                val = os.environ.get(f"{env_prefix}_{key.upper()}", "")
+            if val:
+                profile[key] = val
+
+        profiles[profile_name] = profile
+    return profiles
 
 
 def _parse_reference_pr_from_content(content: str) -> tuple[str, str]:

@@ -97,6 +97,7 @@ class ToolsService:
                 max_turns=original.max_turns,
                 model=original.model,
                 model_config_id=original.model_config_id,
+                credential_config=original.credential_config,
                 timeout_seconds=original.timeout_seconds,
                 is_active=True,
             )

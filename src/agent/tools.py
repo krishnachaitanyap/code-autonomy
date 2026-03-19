@@ -293,6 +293,7 @@ def run_command(
             return f"Error: Command not in allowlist. Allowed prefixes: {allowed}"
 
     try:
+        env = _build_tool_env(os.environ, agent_config)
         result = subprocess.run(
             command,
             shell=True,
@@ -300,7 +301,7 @@ def run_command(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env={**os.environ, "TERM": "dumb"},
+            env=env,
         )
         output = ""
         if result.stdout:
@@ -315,6 +316,80 @@ def run_command(
         return f"Error: Command timed out after {timeout}s"
     except Exception as e:
         return f"Error running command: {e}"
+
+
+# ===================================================================
+# Credential injection helpers
+# ===================================================================
+
+def _build_tool_env(base_env: dict, agent_config: Optional[dict] = None) -> dict:
+    """Build subprocess env dict, injecting credential vars when active."""
+    env = {**base_env, "TERM": "dumb"}
+    if not agent_config:
+        return env
+
+    active_creds = agent_config.get("_active_tool_credentials")
+    if active_creds:
+        from src.agent.credentials import build_authenticated_env
+        env = build_authenticated_env(active_creds, env)
+    return env
+
+
+def _inject_active_credentials(agent_config: dict) -> None:
+    """Resolve current tool's credential_config and inject into agent_config.
+
+    For Kerberos auth, also ensures a valid ticket is obtained before execution.
+    Sets ``agent_config["_active_tool_credentials"]`` for _build_tool_env().
+    """
+    cred_config = agent_config.get("_current_tool_credential_config", {})
+    if not cred_config or cred_config.get("auth_type", "none") == "none":
+        agent_config.pop("_active_tool_credentials", None)
+        return
+
+    from src.agent.credentials import resolve_tool_credentials, ensure_kerberos_ticket
+
+    resolved = resolve_tool_credentials(cred_config, agent_config)
+    agent_config["_active_tool_credentials"] = resolved
+
+    if resolved.get("auth_type") == "kerberos":
+        ok, msg = ensure_kerberos_ticket(resolved)
+        if not ok:
+            import logging
+            logging.getLogger(__name__).warning("Kerberos ticket acquisition failed: %s", msg)
+
+
+def _build_splunk_cfg(agent_config: Optional[dict] = None) -> dict:
+    """Build Splunk config dict, merging custom tool credentials when available.
+
+    Supports two config sources:
+    1. Traditional: agent_config["splunk_config"] from config.ini [splunk] section
+    2. Custom tool: agent_config["_current_tool_credential_config"] with auth_type=basic
+
+    When a custom tool provides credentials, they override the config.ini values
+    for username/password/base_url.
+    """
+    cfg = agent_config or {}
+    splunk_config = dict(cfg.get("splunk_config", {}))
+    opensearch_config = cfg.get("opensearch_config", {})
+    ai_config = cfg.get("ai_config", {})
+
+    # Merge credentials from custom tool credential_config if available
+    cred_config = cfg.get("_current_tool_credential_config", {})
+    if cred_config and cred_config.get("auth_type") in ("basic", "bearer"):
+        from src.agent.credentials import resolve_tool_credentials
+        resolved = resolve_tool_credentials(cred_config, cfg)
+        if resolved.get("username"):
+            splunk_config["username"] = resolved["username"]
+        if resolved.get("password"):
+            splunk_config["password"] = resolved["password"]
+        if resolved.get("base_url"):
+            splunk_config["base_url"] = resolved["base_url"]
+
+    return {
+        "splunk": splunk_config,
+        "opensearch": opensearch_config,
+        "ai": ai_config,
+    }
 
 
 # ===================================================================
@@ -478,6 +553,43 @@ _GCC_CONTEXT_SCHEMA = _tool("gcc_context",
 
 GCC_TOOLS = [_GCC_COMMIT_SCHEMA, _GCC_BRANCH_SCHEMA, _GCC_MERGE_SCHEMA, _GCC_CONTEXT_SCHEMA]
 
+# --- MCP (Model Context Protocol) tool schemas ---
+
+_MCP_CONNECT_SCHEMA = _tool("mcp_connect",
+    "Connect to an MCP (Model Context Protocol) server and list its available tools. "
+    "Supports two transport modes:\n"
+    "- **stdio**: Launch a local process (e.g. `npx -y @modelcontextprotocol/server-filesystem /path`)\n"
+    "- **sse**: Connect to an HTTP+SSE endpoint (e.g. `http://localhost:3000/sse`)\n\n"
+    "Returns the list of tools exposed by the MCP server with their descriptions and parameters.",
+    {"transport": {"type": "string", "enum": ["stdio", "sse"],
+                   "description": "Transport type: 'stdio' for local process, 'sse' for HTTP+SSE endpoint"},
+     "command": {"type": "string",
+                 "description": "For stdio: the command to launch (e.g. 'npx -y @modelcontextprotocol/server-filesystem /tmp'). "
+                 "For sse: the endpoint URL (e.g. 'http://localhost:3000/sse')"},
+     "server_name": {"type": "string",
+                     "description": "A short name to reference this server later in mcp_call (e.g. 'filesystem', 'db')"}},
+    required=["transport", "command", "server_name"])
+
+_MCP_CALL_SCHEMA = _tool("mcp_call",
+    "Call a tool on a previously connected MCP server. "
+    "Use mcp_connect first to see available tools and their parameters.",
+    {"server_name": {"type": "string",
+                     "description": "Name of the MCP server (as given in mcp_connect)"},
+     "tool_name": {"type": "string",
+                   "description": "Name of the tool to call on the MCP server"},
+     "arguments": {"type": "object",
+                   "description": "Arguments to pass to the MCP tool (as key-value pairs)"}},
+    required=["server_name", "tool_name"])
+
+MCP_TOOLS = [_MCP_CONNECT_SCHEMA, _MCP_CALL_SCHEMA]
+
+
+def _mcp_enabled(agent_config: Optional[dict] = None) -> bool:
+    """Check if MCP tools are enabled in agent config."""
+    if agent_config is None:
+        return False
+    return bool(agent_config.get("mcp_enabled", True))  # enabled by default
+
 
 def _gcc_enabled(agent_config: Optional[dict] = None) -> bool:
     """Check if GCC is enabled in agent config."""
@@ -538,6 +650,8 @@ def build_agent_tools(agent_config: Optional[dict] = None, code_index: Optional[
     if _certs_enabled(agent_config):
         from src.certs import CERTS_TOOLS
         tools.extend(CERTS_TOOLS)
+    if _mcp_enabled(agent_config):
+        tools.extend(MCP_TOOLS)
     return tools
 
 
@@ -559,6 +673,8 @@ def build_plan_tools(agent_config: Optional[dict] = None, code_index: Optional["
     if _certs_enabled(agent_config):
         from src.certs import CERTS_TOOLS
         tools.extend(CERTS_TOOLS)
+    if _mcp_enabled(agent_config):
+        tools.extend(MCP_TOOLS)
     return tools
 
 
@@ -579,6 +695,8 @@ def build_ask_tools(agent_config: Optional[dict] = None, code_index: Optional["C
     if _certs_enabled(agent_config):
         from src.certs import CERTS_TOOLS
         tools.extend(CERTS_TOOLS)
+    if _mcp_enabled(agent_config):
+        tools.extend(MCP_TOOLS)
     return tools
 
 
@@ -681,6 +799,8 @@ def execute_tool(
 
     # --- Execution tools ---
     if tool_name == "run_command":
+        if agent_config:
+            _inject_active_credentials(agent_config)
         return run_command(repo, args.get("command", ""), args.get("timeout", 120), agent_config)
 
     # --- Code index tools ---
@@ -691,13 +811,14 @@ def execute_tool(
 
     # --- Splunk tools ---
     if tool_name in ("splunk_discover", "splunk_search", "splunk_stats", "splunk_saved_search", "splunk_ask"):
-        splunk_cfg = {
-            "splunk": (agent_config or {}).get("splunk_config", {}),
-            "opensearch": (agent_config or {}).get("opensearch_config", {}),
-            "ai": (agent_config or {}).get("ai_config", {}),
-        }
+        splunk_cfg = _build_splunk_cfg(agent_config)
         from src.splunk import execute_splunk_tool
         return execute_splunk_tool(splunk_cfg, tool_name, args)
+
+    # --- MCP tools ---
+    if tool_name in ("mcp_connect", "mcp_call"):
+        from src.agent.mcp_client import execute_mcp_tool
+        return execute_mcp_tool(tool_name, args, agent_config)
 
     # --- Certificate inspection tools ---
     if tool_name in ("cert_find", "cert_list", "cert_details"):

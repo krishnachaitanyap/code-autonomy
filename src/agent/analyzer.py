@@ -441,6 +441,27 @@ _CERTS_PROMPT_SECTION = """
 - cert_details(keystore_path, alias, password?, storetype?): Full cert info with expiry status"""
 
 
+_MCP_PROMPT_SECTION = """
+
+## MCP tools (Model Context Protocol — connect to external tool servers)
+
+### Workflow:
+1. Call `mcp_connect(transport, command, server_name)` to connect to an MCP server
+   - **stdio**: `mcp_connect(transport="stdio", command="npx -y @modelcontextprotocol/server-filesystem /path", server_name="fs")`
+   - **sse**: `mcp_connect(transport="sse", command="http://localhost:3000/sse", server_name="myserver")`
+2. Read the returned tool list to see what tools the server offers
+3. Call `mcp_call(server_name, tool_name, arguments)` to invoke a tool
+
+### When to use:
+- The user asks to connect to an MCP server or use MCP tools
+- The user references an external tool server by URL or command
+- Integration with external services that expose MCP-compatible APIs
+
+### Tools:
+- mcp_connect(transport, command, server_name): Connect and list tools
+- mcp_call(server_name, tool_name, arguments?): Call a tool on a connected server"""
+
+
 # ---------------------------------------------------------------------------
 # Shared context builder
 # ---------------------------------------------------------------------------
@@ -659,8 +680,15 @@ def generate_changes_with_agent(
     # Build recipe context from selected recipes
     _recipe_ctx = ""
     if recipe_ids:
-        from src.agent.recipe_context import build_recipe_context
+        from src.agent.recipe_context import build_recipe_context, _load_recipes, _load_tools
         _recipe_ctx = build_recipe_context(recipe_ids)
+        # Extract credential_config from recipe tools for execution layer
+        for _recipe in _load_recipes(recipe_ids):
+            for _tool in _load_tools(_recipe.get("tool_ids") or []):
+                _cc = _tool.get("credential_config", {})
+                if _cc and _cc.get("auth_type", "none") != "none":
+                    agent_cfg["_current_tool_credential_config"] = _cc
+                    break
 
     # Build shared context
     user_msg, _knowledge_ctx = _build_agent_context(
@@ -700,6 +728,8 @@ def generate_changes_with_agent(
         system_prompt += _SPLUNK_PROMPT_SECTION
     if agent_cfg.get("certs_enabled"):
         system_prompt += _CERTS_PROMPT_SECTION
+    if agent_cfg.get("mcp_enabled", True):
+        system_prompt += _MCP_PROMPT_SECTION
 
     if conversation_context:
         context_lines = []
@@ -1546,8 +1576,15 @@ def generate_plan_with_agent(
     # Build recipe context from selected recipes
     _recipe_ctx = ""
     if recipe_ids:
-        from src.agent.recipe_context import build_recipe_context
+        from src.agent.recipe_context import build_recipe_context, _load_recipes, _load_tools
         _recipe_ctx = build_recipe_context(recipe_ids)
+        # Extract credential_config from recipe tools for execution layer
+        for _recipe in _load_recipes(recipe_ids):
+            for _tool in _load_tools(_recipe.get("tool_ids") or []):
+                _cc = _tool.get("credential_config", {})
+                if _cc and _cc.get("auth_type", "none") != "none":
+                    agent_cfg["_current_tool_credential_config"] = _cc
+                    break
 
     # Build shared context
     user_msg, _knowledge_ctx = _build_agent_context(
@@ -1577,6 +1614,8 @@ def generate_plan_with_agent(
         system_prompt += _SPLUNK_PROMPT_SECTION
     if agent_cfg.get("certs_enabled"):
         system_prompt += _CERTS_PROMPT_SECTION
+    if agent_cfg.get("mcp_enabled", True):
+        system_prompt += _MCP_PROMPT_SECTION
 
     if conversation_context:
         context_lines = []
@@ -2225,8 +2264,15 @@ def generate_answer_with_agent(
     # Build recipe context from selected recipes
     _recipe_ctx = ""
     if recipe_ids:
-        from src.agent.recipe_context import build_recipe_context
+        from src.agent.recipe_context import build_recipe_context, _load_recipes, _load_tools
         _recipe_ctx = build_recipe_context(recipe_ids)
+        # Extract credential_config from recipe tools for execution layer
+        for _recipe in _load_recipes(recipe_ids):
+            for _tool in _load_tools(_recipe.get("tool_ids") or []):
+                _cc = _tool.get("credential_config", {})
+                if _cc and _cc.get("auth_type", "none") != "none":
+                    agent_cfg["_current_tool_credential_config"] = _cc
+                    break
     recipe_section = f"\n{_recipe_ctx}\n" if _recipe_ctx else ""
 
     user_msg = (
@@ -2262,6 +2308,8 @@ def generate_answer_with_agent(
         system_prompt += _SPLUNK_PROMPT_SECTION
     if agent_cfg.get("certs_enabled"):
         system_prompt += _CERTS_PROMPT_SECTION
+    if agent_cfg.get("mcp_enabled", True):
+        system_prompt += _MCP_PROMPT_SECTION
 
     if conversation_context:
         context_lines = []

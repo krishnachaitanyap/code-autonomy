@@ -127,6 +127,7 @@ class AgentService:
             result["splunk_config"] = splunk_cfg
             result["opensearch_config"] = opensearch_cfg
             result["ai_config"] = config.get("ai", {})
+        result["tool_credentials"] = config.get("tool_credentials", {})
         return result
 
     def _create_session(self, repo_id: str, mode: str, requirements: str) -> Optional[str]:

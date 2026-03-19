@@ -99,6 +99,13 @@ def init_db(url: str = "") -> None:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE custom_tools ADD COLUMN model_config_id VARCHAR(64) REFERENCES model_configs(id)"))
 
+    # Migrate custom_tools: add credential_config column
+    if 'custom_tools' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('custom_tools')]
+        if 'credential_config' not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE custom_tools ADD COLUMN credential_config JSON DEFAULT '{}'"))
+
     # Seed default tools
     _seed_default_tools(engine)
 
@@ -315,6 +322,49 @@ def _seed_default_tools(engine) -> None:
             "timeout_seconds": 600,
             "is_active": True,
         },
+        {
+            "name": "Splunk",
+            "description": "Query production Splunk logs, metrics, and saved searches using SPL or natural language",
+            "tool_type": "analyzer",
+            "enabled_for_migration": False,
+            "enabled_for_chat": True,
+            "enabled_for_testing": False,
+            "goal": (
+                "Query Splunk to answer questions about production logs, metrics, errors, "
+                "performance, and system behavior. Supports SPL queries, saved searches, "
+                "and natural language questions that are auto-translated to SPL."
+            ),
+            "agent_instructions": (
+                "You are a Splunk query specialist with access to production log data.\n\n"
+                "## Available Sub-Tools\n"
+                "When this tool is active, you have access to these Splunk tools:\n"
+                "- **splunk_ask(question)** — One-shot pipeline: discovers metadata, generates SPL, "
+                "executes, returns results. Best for quick answers.\n"
+                "- **splunk_discover(query)** — Search OpenSearch for relevant Splunk indexes, "
+                "fields, sourcetypes. ALWAYS call this first before writing custom SPL.\n"
+                "- **splunk_search(spl)** — Run an SPL query. Use metadata from splunk_discover.\n"
+                "- **splunk_stats(spl, chart_type?)** — Run SPL aggregation for charts.\n"
+                "- **splunk_saved_search(name?)** — List or run saved searches.\n\n"
+                "## Workflow\n"
+                "1. For simple questions, use splunk_ask for a quick one-shot answer\n"
+                "2. For complex queries, first splunk_discover to find indexes/fields, "
+                "then splunk_search or splunk_stats with precise SPL\n"
+                "3. Always use exact index/sourcetype/field names from discover results\n"
+                "4. For charts, use splunk_stats with timechart/stats/chart commands\n\n"
+                "## Authentication\n"
+                "Credentials are configured via the tool's Authentication section. "
+                "Supports Splunk username/password via direct entry or config profile."
+            ),
+            "allowed_tools": '["Read", "Grep"]',
+            "parameters": '{}',
+            "credential_config": '{"auth_type": "basic"}',
+            "tags": '["splunk", "logs", "monitoring", "observability", "default"]',
+            "prerequisites": "[]",
+            "max_turns": 15,
+            "model": "",
+            "timeout_seconds": 120,
+            "is_active": False,
+        },
     ]
 
     with engine.begin() as conn:
@@ -340,19 +390,25 @@ def _seed_default_tools(engine) -> None:
                 })
                 continue
             from src.data.models import _uuid
+            insert_data = {"id": _uuid(), **tool_def}
+            # Ensure credential_config has a default value
+            if "credential_config" not in insert_data:
+                insert_data["credential_config"] = "{}"
             conn.execute(text(
                 "INSERT INTO custom_tools "
                 "(id, name, description, tool_type, "
                 "enabled_for_migration, enabled_for_chat, enabled_for_testing, "
                 "goal, agent_instructions, allowed_tools, parameters, "
+                "credential_config, "
                 "tags, prerequisites, max_turns, model, timeout_seconds, is_active, "
                 "created_at, updated_at) "
                 "VALUES (:id, :name, :description, :tool_type, "
                 ":enabled_for_migration, :enabled_for_chat, :enabled_for_testing, "
                 ":goal, :agent_instructions, :allowed_tools, :parameters, "
+                ":credential_config, "
                 ":tags, :prerequisites, :max_turns, :model, :timeout_seconds, :is_active, "
                 "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
-            ), {"id": _uuid(), **tool_def})
+            ), insert_data)
 
         # Seed default recipes that bundle tools (inside same connection)
         _seed_default_recipes(conn)

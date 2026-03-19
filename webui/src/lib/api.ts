@@ -738,6 +738,8 @@ export interface CustomTool {
   goal: string;
   allowed_tools: string[];
   parameters: Record<string, any>;
+  credential_config: Record<string, any>;
+  credentials_set: boolean;
   tags: string[];
   prerequisites: string[];
   max_turns: number;
@@ -786,6 +788,7 @@ export const tools = {
     max_turns?: number;
     model?: string;
     model_config_id?: string | null;
+    credential_config?: Record<string, any>;
     timeout_seconds?: number;
   }) =>
     request<CustomTool>('/tools', { method: 'POST', body: JSON.stringify(data) }),
@@ -795,6 +798,8 @@ export const tools = {
     request<void>(`/tools/${id}`, { method: 'DELETE' }),
   duplicate: (id: string) =>
     request<CustomTool>(`/tools/${id}/duplicate`, { method: 'POST' }),
+  testCredentials: (id: string) =>
+    request<{ status: string; detail?: string }>(`/tools/${id}/test-credentials`, { method: 'POST' }),
 };
 
 // ---------------------------------------------------------------------------

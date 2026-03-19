@@ -635,6 +635,8 @@ class CustomTool(Base):
     # e.g. ["Read", "Edit", "Bash", "Grep"]
     parameters = Column(JSON, nullable=False, default=dict)
     # custom parameters the tool accepts
+    credential_config = Column(JSON, nullable=False, default=dict)
+    # credential configuration: {auth_type, config_section, username, password, token, ...}
     tags = Column(JSON, nullable=False, default=list)
     prerequisites = Column(JSON, nullable=False, default=list)
     # other custom_tool IDs that must run first

@@ -26,6 +26,19 @@ const PROVIDER_COLORS: Record<string, string> = {
 
 type FilterTab = 'all' | 'migration' | 'chat' | 'testing';
 
+const AUTH_TYPES = ['none', 'basic', 'bearer', 'kerberos'] as const;
+type AuthType = typeof AUTH_TYPES[number];
+type CredSource = 'direct' | 'profile';
+
+const CONNECTION_TYPES = [
+  { value: '', label: 'None' },
+  { value: 'database', label: 'Database' },
+  { value: 'rest_api', label: 'REST API' },
+  { value: 'mcp_server', label: 'MCP Server' },
+] as const;
+
+const DB_ENGINES = ['postgresql', 'mysql', 'oracle', 'sqlserver', 'db2', 'other'] as const;
+
 const EMPTY_FORM = {
   name: '',
   description: '',
@@ -37,6 +50,7 @@ const EMPTY_FORM = {
   goal: '',
   allowed_tools: ['Read', 'Edit', 'Bash', 'Grep'] as string[],
   parameters: {} as Record<string, any>,
+  credential_config: { auth_type: 'none' } as Record<string, any>,
   tags: [] as string[],
   prerequisites: [] as string[],
   max_turns: 20,
@@ -60,6 +74,9 @@ export default function ToolsPage() {
   const [modelList, setModelList] = useState<ModelConfig[]>([]);
   const [collapsedBuiltinCats, setCollapsedBuiltinCats] = useState<Set<string>>(new Set());
   const [tagInput, setTagInput] = useState('');
+  const [credSource, setCredSource] = useState<CredSource>('direct');
+  const [credTestResult, setCredTestResult] = useState<{ status: string; detail?: string } | null>(null);
+  const [credTesting, setCredTesting] = useState(false);
 
   const loadTools = useCallback(async () => {
     try {
@@ -90,11 +107,14 @@ export default function ToolsPage() {
     setForm({ ...EMPTY_FORM });
     setTagInput('');
     setError('');
+    setCredSource('direct');
+    setCredTestResult(null);
     setShowForm(true);
   };
 
   const openEdit = (tool: CustomTool) => {
     setEditingTool(tool);
+    const cc = tool.credential_config || { auth_type: 'none' };
     setForm({
       name: tool.name,
       description: tool.description,
@@ -106,6 +126,7 @@ export default function ToolsPage() {
       goal: tool.goal,
       allowed_tools: tool.allowed_tools || [],
       parameters: tool.parameters || {},
+      credential_config: cc,
       tags: tool.tags || [],
       prerequisites: tool.prerequisites || [],
       max_turns: tool.max_turns,
@@ -115,6 +136,8 @@ export default function ToolsPage() {
     });
     setTagInput('');
     setError('');
+    setCredSource(cc.config_section ? 'profile' : 'direct');
+    setCredTestResult(null);
     setShowForm(true);
   };
 
@@ -130,10 +153,20 @@ export default function ToolsPage() {
     setSaving(true);
     setError('');
     try {
+      // Build credential_config for submission — strip empty secret fields
+      // to avoid overwriting stored secrets with empty strings
+      const credConfig = { ...form.credential_config };
+      for (const secretField of ['password', 'token', 'keytab_path']) {
+        if (credConfig[secretField] === '') {
+          delete credConfig[secretField];
+        }
+      }
+      const payload = { ...form, credential_config: credConfig };
+
       if (editingTool) {
-        await tools.update(editingTool.id, form);
+        await tools.update(editingTool.id, payload);
       } else {
-        await tools.create(form);
+        await tools.create(payload);
       }
       setShowForm(false);
       setEditingTool(null);
@@ -191,6 +224,24 @@ export default function ToolsPage() {
         ? form.allowed_tools.filter(t => t !== tool)
         : [...form.allowed_tools, tool],
     });
+  };
+
+  const updateCredConfig = (updates: Record<string, any>) => {
+    setForm({ ...form, credential_config: { ...form.credential_config, ...updates } });
+  };
+
+  const handleTestCredentials = async () => {
+    if (!editingTool) return;
+    setCredTesting(true);
+    setCredTestResult(null);
+    try {
+      const result = await tools.testCredentials(editingTool.id);
+      setCredTestResult(result);
+    } catch (err: any) {
+      setCredTestResult({ status: 'error', detail: err.message || 'Test failed' });
+    } finally {
+      setCredTesting(false);
+    }
   };
 
   const typeColor = (type: string) =>
@@ -271,6 +322,7 @@ export default function ToolsPage() {
                 plan: { label: 'Plan', color: 'bg-amber-100 text-amber-700', icon: 'map' },
                 gcc: { label: 'GCC', color: 'bg-cyan-100 text-cyan-700', icon: 'git' },
                 code_index: { label: 'Code Index', color: 'bg-indigo-100 text-indigo-700', icon: 'search' },
+                mcp: { label: 'MCP', color: 'bg-rose-100 text-rose-700', icon: 'plug' },
               };
 
               // Group by category
@@ -280,7 +332,7 @@ export default function ToolsPage() {
                 groups[t.category].push(t);
               });
 
-              const categoryOrder = ['read', 'write', 'execution', 'memory', 'completion', 'plan', 'gcc', 'code_index'];
+              const categoryOrder = ['read', 'write', 'execution', 'memory', 'completion', 'plan', 'gcc', 'code_index', 'mcp'];
               const sortedCategories = Object.keys(groups).sort(
                 (a, b) => (categoryOrder.indexOf(a) === -1 ? 99 : categoryOrder.indexOf(a)) -
                            (categoryOrder.indexOf(b) === -1 ? 99 : categoryOrder.indexOf(b))
@@ -512,6 +564,26 @@ export default function ToolsPage() {
                           <div className="text-gray-700 font-medium">{tool.timeout_seconds}s</div>
                         </div>
                       </div>
+                      {tool.credentials_set && (
+                        <div>
+                          <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Connection & Auth</label>
+                          <div className="flex flex-wrap gap-1">
+                            {tool.credential_config?.connection_type && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 text-blue-700 rounded text-[10px] font-medium">
+                                {tool.credential_config.connection_type === 'database' && `DB: ${tool.credential_config.host || '?'}:${tool.credential_config.port || '?'}/${tool.credential_config.database || '?'}`}
+                                {tool.credential_config.connection_type === 'rest_api' && `API: ${tool.credential_config.base_url || '?'}`}
+                                {tool.credential_config.connection_type === 'mcp_server' && `MCP: ${tool.credential_config.mcp_server_name || '?'} (${tool.credential_config.mcp_transport || 'stdio'})`}
+                              </span>
+                            )}
+                            {tool.credential_config?.auth_type && tool.credential_config.auth_type !== 'none' && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-50 text-amber-700 rounded text-[10px] font-medium">
+                                {tool.credential_config.auth_type}
+                                {tool.credential_config?.config_section && ` (profile: ${tool.credential_config.config_section})`}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )}
                       {(tool.tags || []).length > 0 && (
                         <div>
                           <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1">Tags</label>
@@ -763,6 +835,417 @@ export default function ToolsPage() {
                     className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                 </div>
+              </div>
+
+              {/* Connection & Authentication */}
+              <div className="border border-gray-200 rounded-lg p-4 space-y-4">
+                <label className="block text-sm font-semibold text-gray-800">Connection & Authentication</label>
+
+                {/* Connection Type */}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Connection Type</label>
+                  <select
+                    value={form.credential_config.connection_type || ''}
+                    onChange={e => updateCredConfig({ connection_type: e.target.value || undefined })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    {CONNECTION_TYPES.map(ct => (
+                      <option key={ct.value} value={ct.value}>{ct.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Database connection fields */}
+                {form.credential_config.connection_type === 'database' && (
+                  <div className="space-y-2 bg-gray-50 rounded-md p-3">
+                    <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Database Connection</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Host</label>
+                        <input
+                          type="text"
+                          value={form.credential_config.host || ''}
+                          onChange={e => updateCredConfig({ host: e.target.value })}
+                          placeholder="db.example.com"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Port</label>
+                        <input
+                          type="text"
+                          value={form.credential_config.port || ''}
+                          onChange={e => updateCredConfig({ port: e.target.value })}
+                          placeholder="5432"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Database</label>
+                        <input
+                          type="text"
+                          value={form.credential_config.database || ''}
+                          onChange={e => updateCredConfig({ database: e.target.value })}
+                          placeholder="mydb"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Schema</label>
+                        <input
+                          type="text"
+                          value={form.credential_config.schema || ''}
+                          onChange={e => updateCredConfig({ schema: e.target.value })}
+                          placeholder="public"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Service Name <span className="text-gray-400 font-normal">(Oracle)</span></label>
+                        <input
+                          type="text"
+                          value={form.credential_config.service_name || ''}
+                          onChange={e => updateCredConfig({ service_name: e.target.value })}
+                          placeholder="ORCL"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      </div>
+                      <div className="flex items-end pb-1">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={form.credential_config.ssl_enabled === 'true'}
+                            onChange={e => updateCredConfig({ ssl_enabled: e.target.checked ? 'true' : '' })}
+                            className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                          />
+                          <span className="text-sm text-gray-700">SSL / TLS</span>
+                        </label>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        Extra Parameters <span className="text-gray-400 font-normal">(JDBC params, connection string options)</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={form.credential_config.extra_params || ''}
+                        onChange={e => updateCredConfig({ extra_params: e.target.value })}
+                        placeholder="e.g. ?sslmode=require&connect_timeout=10"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* REST API connection fields */}
+                {form.credential_config.connection_type === 'rest_api' && (
+                  <div className="space-y-2 bg-gray-50 rounded-md p-3">
+                    <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider">REST API Endpoint</label>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Base URL</label>
+                      <input
+                        type="text"
+                        value={form.credential_config.base_url || ''}
+                        onChange={e => updateCredConfig({ base_url: e.target.value })}
+                        placeholder="https://api.internal.example.com"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* MCP Server connection fields */}
+                {form.credential_config.connection_type === 'mcp_server' && (
+                  <div className="space-y-2 bg-gray-50 rounded-md p-3">
+                    <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider">MCP Server</label>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Transport</label>
+                      <div className="flex gap-3">
+                        <label className="flex items-center gap-1.5 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="mcp_transport"
+                            checked={(form.credential_config.mcp_transport || 'stdio') === 'stdio'}
+                            onChange={() => updateCredConfig({ mcp_transport: 'stdio' })}
+                            className="text-indigo-600 focus:ring-indigo-500"
+                          />
+                          <span className="text-sm text-gray-700">stdio (local process)</span>
+                        </label>
+                        <label className="flex items-center gap-1.5 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="mcp_transport"
+                            checked={form.credential_config.mcp_transport === 'sse'}
+                            onChange={() => updateCredConfig({ mcp_transport: 'sse' })}
+                            className="text-indigo-600 focus:ring-indigo-500"
+                          />
+                          <span className="text-sm text-gray-700">SSE (HTTP endpoint)</span>
+                        </label>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">
+                        {form.credential_config.mcp_transport === 'sse' ? 'Endpoint URL' : 'Command'}
+                      </label>
+                      <input
+                        type="text"
+                        value={form.credential_config.mcp_command || ''}
+                        onChange={e => updateCredConfig({ mcp_command: e.target.value })}
+                        placeholder={form.credential_config.mcp_transport === 'sse'
+                          ? 'http://localhost:3000/sse'
+                          : 'npx -y @modelcontextprotocol/server-filesystem /path'}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Server Name</label>
+                      <input
+                        type="text"
+                        value={form.credential_config.mcp_server_name || ''}
+                        onChange={e => updateCredConfig({ mcp_server_name: e.target.value })}
+                        placeholder="e.g. filesystem, db-tools"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      />
+                      <p className="text-[10px] text-gray-400 mt-1">
+                        Short name used to reference this server in mcp_call
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Divider between connection and auth */}
+                {form.credential_config.connection_type && (
+                  <div className="border-t border-gray-200 pt-3">
+                    <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Authentication</label>
+                  </div>
+                )}
+
+                {!form.credential_config.connection_type && (
+                  <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Authentication</label>
+                )}
+
+                {/* Auth type selector */}
+                <div className="flex gap-3">
+                  {AUTH_TYPES.map(at => (
+                    <label key={at} className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="auth_type"
+                        checked={(form.credential_config.auth_type || 'none') === at}
+                        onChange={() => {
+                          // Preserve connection fields when changing auth type
+                          const connFields: Record<string, any> = {};
+                          for (const k of ['connection_type', 'host', 'port', 'database', 'schema', 'service_name', 'ssl_enabled', 'extra_params', 'base_url', 'mcp_transport', 'mcp_command', 'mcp_server_name']) {
+                            if (form.credential_config[k]) connFields[k] = form.credential_config[k];
+                          }
+                          if (at === 'none') {
+                            setForm({ ...form, credential_config: { auth_type: 'none', ...connFields } });
+                          } else {
+                            updateCredConfig({ auth_type: at });
+                          }
+                        }}
+                        className="text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <span className="text-sm text-gray-700 capitalize">{at}</span>
+                    </label>
+                  ))}
+                </div>
+
+                {form.credential_config.auth_type && form.credential_config.auth_type !== 'none' && (
+                  <>
+                    {/* Credential source toggle */}
+                    <div className="flex gap-3">
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="cred_source"
+                          checked={credSource === 'direct'}
+                          onChange={() => {
+                            setCredSource('direct');
+                            const cc = { ...form.credential_config };
+                            delete cc.config_section;
+                            setForm({ ...form, credential_config: cc });
+                          }}
+                          className="text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <span className="text-sm text-gray-700">Enter directly</span>
+                      </label>
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="cred_source"
+                          checked={credSource === 'profile'}
+                          onChange={() => setCredSource('profile')}
+                          className="text-indigo-600 focus:ring-indigo-500"
+                        />
+                        <span className="text-sm text-gray-700">Config profile reference</span>
+                      </label>
+                    </div>
+
+                    {/* Config profile reference */}
+                    {credSource === 'profile' && (
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 mb-1">Profile Name</label>
+                        <input
+                          type="text"
+                          value={form.credential_config.config_section || ''}
+                          onChange={e => updateCredConfig({ config_section: e.target.value })}
+                          placeholder="e.g. kerberos_prod"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                        <p className="text-[10px] text-gray-400 mt-1">
+                          References [tool_cred_{form.credential_config.config_section || '<name>'}] in config.ini
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Direct entry fields */}
+                    {credSource === 'direct' && (
+                      <div className="space-y-2">
+                        {/* Basic auth fields */}
+                        {form.credential_config.auth_type === 'basic' && (
+                          <>
+                            {/* Only show Base URL if not already set via REST API connection */}
+                            {form.credential_config.connection_type !== 'rest_api' && (
+                              <div>
+                                <label className="block text-xs font-medium text-gray-600 mb-1">Base URL</label>
+                                <input
+                                  type="text"
+                                  value={form.credential_config.base_url || ''}
+                                  onChange={e => updateCredConfig({ base_url: e.target.value })}
+                                  placeholder="https://api.internal.com"
+                                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                            )}
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="block text-xs font-medium text-gray-600 mb-1">Username</label>
+                                <input
+                                  type="text"
+                                  value={form.credential_config.username || ''}
+                                  onChange={e => updateCredConfig({ username: e.target.value })}
+                                  placeholder="svc-user"
+                                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-gray-600 mb-1">Password</label>
+                                <input
+                                  type="password"
+                                  value={form.credential_config.password || ''}
+                                  onChange={e => updateCredConfig({ password: e.target.value })}
+                                  placeholder={editingTool?.credential_config?.password_set ? '••••••••' : ''}
+                                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                            </div>
+                          </>
+                        )}
+
+                        {/* Bearer auth fields */}
+                        {form.credential_config.auth_type === 'bearer' && (
+                          <>
+                            {form.credential_config.connection_type !== 'rest_api' && (
+                              <div>
+                                <label className="block text-xs font-medium text-gray-600 mb-1">Base URL</label>
+                                <input
+                                  type="text"
+                                  value={form.credential_config.base_url || ''}
+                                  onChange={e => updateCredConfig({ base_url: e.target.value })}
+                                  placeholder="https://api.example.com"
+                                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                            )}
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">Token</label>
+                              <input
+                                type="password"
+                                value={form.credential_config.token || ''}
+                                onChange={e => updateCredConfig({ token: e.target.value })}
+                                placeholder={editingTool?.credential_config?.token_set ? '••••••••' : ''}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                              />
+                            </div>
+                          </>
+                        )}
+
+                        {/* Kerberos auth fields */}
+                        {form.credential_config.auth_type === 'kerberos' && (
+                          <>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="block text-xs font-medium text-gray-600 mb-1">Realm</label>
+                                <input
+                                  type="text"
+                                  value={form.credential_config.realm || ''}
+                                  onChange={e => updateCredConfig({ realm: e.target.value })}
+                                  placeholder="CORP.EXAMPLE.COM"
+                                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-gray-600 mb-1">KDC</label>
+                                <input
+                                  type="text"
+                                  value={form.credential_config.kdc || ''}
+                                  onChange={e => updateCredConfig({ kdc: e.target.value })}
+                                  placeholder="kdc.corp.example.com"
+                                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              </div>
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">Principal</label>
+                              <input
+                                type="text"
+                                value={form.credential_config.principal || ''}
+                                onChange={e => updateCredConfig({ principal: e.target.value })}
+                                placeholder="svc@CORP.EXAMPLE.COM"
+                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">Keytab Path</label>
+                              <input
+                                type="text"
+                                value={form.credential_config.keytab_path || ''}
+                                onChange={e => updateCredConfig({ keytab_path: e.target.value })}
+                                placeholder={editingTool?.credential_config?.keytab_path_set ? '(set) /etc/keytabs/...' : '/etc/keytabs/svc.keytab'}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                              />
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Test Credentials button */}
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={handleTestCredentials}
+                        disabled={credTesting || !editingTool}
+                        className="px-3 py-1.5 text-xs font-medium text-indigo-600 bg-indigo-50 rounded-md hover:bg-indigo-100 disabled:opacity-50 transition-colors"
+                      >
+                        {credTesting ? 'Testing...' : 'Test Credentials'}
+                      </button>
+                      {!editingTool && (
+                        <span className="text-[10px] text-gray-400">Save first to test</span>
+                      )}
+                      {credTestResult && (
+                        <span className={`text-xs ${credTestResult.status === 'ok' ? 'text-green-600' : 'text-red-600'}`}>
+                          {credTestResult.status === 'ok' ? '\u2713' : '\u2717'} {credTestResult.detail}
+                        </span>
+                      )}
+                    </div>
+                  </>
+                )}
               </div>
 
               {/* Tags */}

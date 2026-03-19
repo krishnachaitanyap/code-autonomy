@@ -164,6 +164,8 @@ def _load_tools(tool_ids: list[str]) -> list[dict]:
                         "provider": mc.provider,
                         "model": mc.model,
                     }
+                # Carry credential_config for execution layer (never in LLM prompt)
+                entry["credential_config"] = tool.credential_config or {}
                 tools.append(entry)
             else:
                 logger.warning("Tool not found: %s", tool_id)

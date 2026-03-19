@@ -683,6 +683,7 @@ class CustomToolCreate(BaseModel):
     goal: str = ""
     allowed_tools: list[str] = Field(default_factory=list)
     parameters: dict = Field(default_factory=dict)
+    credential_config: dict = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
     prerequisites: list[str] = Field(default_factory=list)
     max_turns: int = 20
@@ -702,6 +703,7 @@ class CustomToolUpdate(BaseModel):
     goal: str | None = None
     allowed_tools: list[str] | None = None
     parameters: dict | None = None
+    credential_config: dict | None = None
     tags: list[str] | None = None
     prerequisites: list[str] | None = None
     max_turns: int | None = None
@@ -731,6 +733,8 @@ class CustomToolResponse(BaseModel):
     goal: str = ""
     allowed_tools: list[str] = Field(default_factory=list)
     parameters: dict = Field(default_factory=dict)
+    credential_config: dict = Field(default_factory=dict)  # sanitized — secrets stripped
+    credentials_set: bool = False
     tags: list[str] = Field(default_factory=list)
     prerequisites: list[str] = Field(default_factory=list)
     max_turns: int = 20
