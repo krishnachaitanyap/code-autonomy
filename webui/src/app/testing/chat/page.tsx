@@ -1022,14 +1022,6 @@ export default function ChatPage() {
       </div>
 
       {/* ---- Main Content ---- */}
-      {!selectedRepoId && messages.length === 0 ? (
-        <div className="flex-1 flex items-center justify-center text-gray-400">
-          <div className="text-center">
-            <p className="text-lg mb-2">Ready to chat</p>
-            <p className="text-sm">Select a repo for code questions, or go repo-free for tools like Splunk, MCP, and recipes.</p>
-          </div>
-        </div>
-      ) : (
         <div className="flex flex-1 overflow-hidden mt-3 gap-3">
           {/* ---- Left: Conversation ---- */}
           <div className="flex flex-col flex-1 min-w-0">
@@ -1041,11 +1033,17 @@ export default function ChatPage() {
                     {MODE_META[mode].label} Mode
                   </div>
                   <h3 className="text-lg font-medium text-gray-700 mb-1">
-                    {mode === 'ask' ? 'Ask anything about this codebase' :
-                     mode === 'plan' ? 'Describe changes you want planned' :
-                     'Describe what you want done — from simple tasks to complex goals'}
+                    {!selectedRepoId
+                      ? 'Tool-only mode — no repository context'
+                      : mode === 'ask' ? 'Ask anything about this codebase'
+                      : mode === 'plan' ? 'Describe changes you want planned'
+                      : 'Describe what you want done — from simple tasks to complex goals'}
                   </h3>
-                  <p className="text-sm text-gray-400 mb-6">{MODE_META[mode].desc}</p>
+                  <p className="text-sm text-gray-400 mb-6">
+                    {!selectedRepoId
+                      ? 'Query Splunk, connect to MCP servers, run recipes — no codebase needed'
+                      : MODE_META[mode].desc}
+                  </p>
                   <div className="flex flex-wrap justify-center gap-2 max-w-lg mx-auto">
                     {quickActions[mode].map((action) => (
                       <button
@@ -1424,7 +1422,6 @@ export default function ChatPage() {
             </div>
           )}
         </div>
-      )}
     </div>
   );
 }
