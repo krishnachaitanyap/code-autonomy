@@ -804,8 +804,8 @@ export default function ChatPage() {
     }
   }
 
-  // --- quick actions per mode ---
-  const quickActions: Record<Mode, string[]> = {
+  // --- quick actions per mode (context-aware: repo vs tool-only) ---
+  const repoQuickActions: Record<Mode, string[]> = {
     ask: [
       'How does the API routing work?',
       'What testing framework is used?',
@@ -824,6 +824,30 @@ export default function ChatPage() {
       'Achieve 80% test coverage for REST endpoints',
       'Add input validation and error handling across all API routes',
     ],
+  };
+  const toolOnlyQuickActions: Record<Mode, string[]> = {
+    ask: [
+      'What is the error rate for order-service in the last 24h?',
+      'Show me the top 5 slowest endpoints from Splunk',
+      'Connect to the filesystem MCP server',
+      'List available Splunk saved searches',
+    ],
+    plan: [
+      'Plan a Splunk dashboard for monitoring API latency',
+      'Design an alerting strategy for production errors',
+      'Plan MCP server integration for our CI/CD pipeline',
+    ],
+    agent: [
+      'Query Splunk for all 500 errors in the last hour',
+      'Connect to MCP server and list available tools',
+      'Run a Splunk search for deployment events today',
+      'Check production error trends for the last 7 days',
+    ],
+  };
+  const quickActions: Record<Mode, string[]> = {
+    ask: selectedRepoId ? repoQuickActions.ask : toolOnlyQuickActions.ask,
+    plan: selectedRepoId ? repoQuickActions.plan : toolOnlyQuickActions.plan,
+    agent: selectedRepoId ? repoQuickActions.agent : toolOnlyQuickActions.agent,
   };
 
   const selectedRepo = repoList.find((r) => r.id === selectedRepoId);
