@@ -8,6 +8,8 @@ import {
   type ReferenceLearnResult, type Workflow, type WorkflowSubtask, type MigrationRecipe,
 } from '@/lib/api';
 import RecipePicker from '@/components/RecipePicker';
+import RecipeSuggestions from '@/components/RecipeSuggestions';
+import { suggestRecipes } from '@/lib/recipeMatch';
 import ModelSelector from '@/components/ModelSelector';
 import WorkflowDiagram from '@/components/WorkflowDiagram';
 import BranchSelect from '@/components/BranchSelect';
@@ -217,7 +219,7 @@ function AgentsPage() {
     target_scope: '',
   });
   const [newJiraRun, setNewJiraRun] = useState({ repo_id: '', jira_project: '' });
-  const [newWorkflow, setNewWorkflow] = useState({ goal: '', project_id: projectFilter, mode: 'testing' as 'testing' | 'engineering', token_budget: 0 });
+  const [newWorkflow, setNewWorkflow] = useState({ goal: '', project_id: projectFilter, mode: 'testing' as 'testing' | 'engineering', token_budget: 0, auto_advance: false });
 
   // Branch selector state (managed by BranchSelect component)
   const [branch, setBranch] = useState('main');
@@ -233,6 +235,12 @@ function AgentsPage() {
   // Recipe selector state
   const [availableRecipes, setAvailableRecipes] = useState<MigrationRecipe[]>([]);
   const [selectedRecipeIds, setSelectedRecipeIds] = useState<string[]>([]);
+  const [autoSuggestEnabled, setAutoSuggestEnabled] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    const stored = localStorage.getItem('recipe-auto-suggest');
+    return stored === null ? true : stored === 'true';
+  });
+  const [autoSuggestedIds, setAutoSuggestedIds] = useState<string[]>([]);
 
   const [selectedModelId, setSelectedModelId] = useState('');
   const [modelOverrides, setModelOverrides] = useState<Record<string, any>>({});
@@ -263,6 +271,24 @@ function AgentsPage() {
       .then((r) => setAvailableRecipes(Array.isArray(r) ? r : []))
       .catch(() => setAvailableRecipes([]));
   }, []);
+
+  // --- Auto-suggest recipes based on workflow goal ---
+  useEffect(() => {
+    if (!autoSuggestEnabled || availableRecipes.length === 0 || newRunKind !== 'workflow') {
+      return;
+    }
+    const timer = setTimeout(() => {
+      const matches = suggestRecipes(newWorkflow.goal, availableRecipes);
+      const matchedIds = matches.map(m => m.recipe.id);
+      setAutoSuggestedIds(matchedIds);
+      setSelectedRecipeIds(prev => {
+        const manualIds = prev.filter(id => !autoSuggestedIds.includes(id));
+        return Array.from(new Set([...manualIds, ...matchedIds]));
+      });
+    }, 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newWorkflow.goal, autoSuggestEnabled, availableRecipes, newRunKind]);
 
   // Polling: refresh selected run every 2s while running/paused(workflow)
   useEffect(() => {
@@ -386,6 +412,7 @@ function AgentsPage() {
           goal: newWorkflow.goal,
           project_id: newWorkflow.project_id,
           mode: newWorkflow.mode,
+          auto_advance: newWorkflow.auto_advance || undefined,
           branch,
           token_budget: newWorkflow.token_budget || undefined,
           recipe_ids: selectedRecipeIds.length > 0 ? selectedRecipeIds : undefined,
@@ -571,7 +598,42 @@ function AgentsPage() {
                     className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
                   />
                 </div>
+                <div className="flex items-end pb-1">
+                  <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={newWorkflow.auto_advance}
+                      onChange={(e) => setNewWorkflow({ ...newWorkflow, auto_advance: e.target.checked })}
+                      className="rounded border-gray-300 text-teal-600 focus:ring-teal-500"
+                    />
+                    Auto-advance
+                    <span className="text-[10px] text-gray-400 font-normal">(skip review checkpoints)</span>
+                  </label>
+                </div>
               </div>
+              {/* Auto-suggest banner */}
+              <RecipeSuggestions
+                suggestedIds={autoSuggestedIds}
+                recipes={availableRecipes}
+                selectedIds={selectedRecipeIds}
+                onToggle={(id) => {
+                  setSelectedRecipeIds(prev =>
+                    prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+                  );
+                  if (selectedRecipeIds.includes(id)) {
+                    setAutoSuggestedIds(prev => prev.filter(x => x !== id));
+                  }
+                }}
+                enabled={autoSuggestEnabled}
+                onToggleEnabled={(on) => {
+                  setAutoSuggestEnabled(on);
+                  localStorage.setItem('recipe-auto-suggest', String(on));
+                  if (!on) {
+                    setSelectedRecipeIds(prev => prev.filter(id => !autoSuggestedIds.includes(id)));
+                    setAutoSuggestedIds([]);
+                  }
+                }}
+              />
               {/* Recipe selector */}
               <RecipePicker
                 recipes={availableRecipes}

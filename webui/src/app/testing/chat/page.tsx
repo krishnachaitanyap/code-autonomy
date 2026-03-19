@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { repos, sessions, workflows as workflowsApi, migrations, type Repo, type Session, type Workflow, type WorkflowSubtask, type MigrationRecipe } from '@/lib/api';
 import RecipePicker from '@/components/RecipePicker';
+import RecipeSuggestions from '@/components/RecipeSuggestions';
+import { suggestRecipes } from '@/lib/recipeMatch';
 import MermaidBlock from '@/components/MermaidBlock';
 import { useSessionStream, type WSMessage } from '@/lib/websocket';
 import StructuredResult, { tryParseStructured } from '@/components/StructuredResult';
@@ -331,6 +333,12 @@ export default function ChatPage() {
   const [activeWorkflow, setActiveWorkflow] = useState<Workflow | null>(null);
   const [availableRecipes, setAvailableRecipes] = useState<MigrationRecipe[]>([]);
   const [selectedRecipeIds, setSelectedRecipeIds] = useState<string[]>([]);
+  const [autoSuggestEnabled, setAutoSuggestEnabled] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    const stored = localStorage.getItem('recipe-auto-suggest');
+    return stored === null ? true : stored === 'true';
+  });
+  const [autoSuggestedIds, setAutoSuggestedIds] = useState<string[]>([]);
   const [selectedModelId, setSelectedModelId] = useState('');
   const [modelOverrides, setModelOverrides] = useState<Record<string, any>>({});
 
@@ -339,6 +347,25 @@ export default function ChatPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const branchRef = useRef<HTMLDivElement>(null);
   const workflowPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // --- Auto-suggest recipes based on prompt ---
+  useEffect(() => {
+    if (!autoSuggestEnabled || availableRecipes.length === 0) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      const matches = suggestRecipes(input, availableRecipes);
+      const matchedIds = matches.map(m => m.recipe.id);
+      setAutoSuggestedIds(matchedIds);
+      // Add new suggestions to selection (union with manual picks)
+      setSelectedRecipeIds(prev => {
+        const manualIds = prev.filter(id => !autoSuggestedIds.includes(id));
+        return Array.from(new Set([...manualIds, ...matchedIds]));
+      });
+    }, 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [input, autoSuggestEnabled, availableRecipes]);
 
   // WebSocket streaming
   const { messages: wsMessages, connected: wsConnected, reconnecting: wsReconnecting, disconnect: wsDisconnect, clearMessages: wsClearMessages } = useSessionStream(wsSessionId);
@@ -678,6 +705,7 @@ export default function ChatPage() {
           repo_id: selectedRepoId,
           goal: text,
           mode: 'engineering',
+          auto_advance: true,
           branch: branch || undefined,
           config_overrides: Object.keys(modelOverrides).length > 0 ? modelOverrides : undefined,
         });
@@ -1168,6 +1196,33 @@ export default function ChatPage() {
                 ))}
               </div>
             )}
+
+            {/* Auto-suggest banner */}
+            <RecipeSuggestions
+              suggestedIds={autoSuggestedIds}
+              recipes={availableRecipes}
+              selectedIds={selectedRecipeIds}
+              onToggle={(id) => {
+                // Toggle in selectedRecipeIds
+                setSelectedRecipeIds(prev =>
+                  prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+                );
+                // If unselecting, also remove from autoSuggestedIds
+                if (selectedRecipeIds.includes(id)) {
+                  setAutoSuggestedIds(prev => prev.filter(x => x !== id));
+                }
+              }}
+              enabled={autoSuggestEnabled}
+              onToggleEnabled={(on) => {
+                setAutoSuggestEnabled(on);
+                localStorage.setItem('recipe-auto-suggest', String(on));
+                if (!on) {
+                  // Remove auto-suggested selections, keep manual ones
+                  setSelectedRecipeIds(prev => prev.filter(id => !autoSuggestedIds.includes(id)));
+                  setAutoSuggestedIds([]);
+                }
+              }}
+            />
 
             {/* Recipe selector */}
             <div className="pt-2">
