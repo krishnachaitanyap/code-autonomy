@@ -680,7 +680,7 @@ export default function ChatPage() {
   async function handleSend(e?: React.FormEvent) {
     e?.preventDefault();
     const text = input.trim();
-    if (!text || !selectedRepoId || sending) return;
+    if (!text || sending) return;
 
     setInput('');
     setSending(true);
@@ -702,7 +702,7 @@ export default function ChatPage() {
     if (mode === 'agent') {
       try {
         const wf = await workflowsApi.create({
-          repo_id: selectedRepoId,
+          repo_id: selectedRepoId || undefined,
           goal: text,
           mode: 'engineering',
           auto_advance: true,
@@ -751,7 +751,7 @@ export default function ChatPage() {
 
     try {
       const s = await sessions.create({
-        repo_id: selectedRepoId,
+        repo_id: selectedRepoId || null,
         mode,
         requirements: text,
         branch: branch || undefined,
@@ -891,7 +891,7 @@ export default function ChatPage() {
           className="px-3 py-1.5 border border-gray-300 rounded-md text-sm bg-white max-w-[260px] truncate"
           disabled={loadingRepos}
         >
-          <option value="">Select repo...</option>
+          <option value="">No repository (tool-only)</option>
           {repoList.map((r) => (
             <option key={r.id} value={r.id}>
               {r.nickname || r.url || r.local_path || r.id}
@@ -1022,11 +1022,11 @@ export default function ChatPage() {
       </div>
 
       {/* ---- Main Content ---- */}
-      {!selectedRepoId ? (
+      {!selectedRepoId && messages.length === 0 ? (
         <div className="flex-1 flex items-center justify-center text-gray-400">
           <div className="text-center">
-            <p className="text-lg mb-2">Select a repository to start</p>
-            <p className="text-sm">Choose a repo and branch above, then ask questions or run agents.</p>
+            <p className="text-lg mb-2">Ready to chat</p>
+            <p className="text-sm">Select a repo for code questions, or go repo-free for tools like Splunk, MCP, and recipes.</p>
           </div>
         </div>
       ) : (
