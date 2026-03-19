@@ -60,6 +60,31 @@ def build_recipe_context(recipe_ids: list[str]) -> str:
     return "\n".join(sections).strip()
 
 
+def get_recipe_max_turns(recipe_ids: list[str]) -> int:
+    """Return the maximum ``max_turns`` from tools attached to the given recipes.
+
+    This lets the orchestrator boost its turn budget when recipes require deep
+    exploration (e.g. JISI downstream detector needs 75 turns for 15-20 file
+    deep call-chain traversal).
+
+    Returns 0 if no recipes/tools found or none have ``max_turns`` set.
+    """
+    if not recipe_ids:
+        return 0
+
+    recipes = _load_recipes(recipe_ids)
+    max_val = 0
+    for recipe in recipes:
+        tool_ids = recipe.get("tool_ids") or []
+        if tool_ids:
+            tools = _load_tools(tool_ids)
+            for tool in tools:
+                t = tool.get("max_turns", 0)
+                if t > max_val:
+                    max_val = t
+    return max_val
+
+
 def _load_recipes(recipe_ids: list[str]) -> list[dict]:
     """Load recipes by ID — checks custom DB recipes first, then built-in."""
     results: list[dict] = []
@@ -129,6 +154,7 @@ def _load_tools(tool_ids: list[str]) -> list[dict]:
                     "tool_type": tool.tool_type or "agent",
                     "goal": tool.goal or "",
                     "agent_instructions": tool.agent_instructions or "",
+                    "max_turns": tool.max_turns or 0,
                 }
                 # Resolve model from linked ModelConfig (always current)
                 if tool.model_config_id and tool.model_config:

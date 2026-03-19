@@ -171,6 +171,25 @@ def _seed_default_tools(engine) -> None:
             "agent_instructions": (
                 "You are a JISI downstream dependency detector. Given a repo path or file path, "
                 "systematically scan for all external downstream calls.\n\n"
+                "## CRITICAL: Deep Call-Chain Traversal Strategy\n\n"
+                "JISI call chains can be 15-20+ files deep (Controller → Invoker → Service → "
+                "Factory → Helper → Remote/DAO → External). You MUST follow these chains to "
+                "their full depth. Use these strategies to maximize coverage within your budget:\n\n"
+                "### Efficiency Rules\n"
+                "1. **Grep-first, read-second**: Use Grep to find ALL occurrences of a pattern "
+                "across the entire repo before reading individual files. This discovers the full "
+                "call graph in one turn instead of reading files one by one.\n"
+                "2. **Batch tool calls**: In each turn, invoke MULTIPLE tools simultaneously — "
+                "e.g., grep for RESTProxy AND RPCProxy AND ConnectionFactory in parallel.\n"
+                "3. **Follow imports aggressively**: When you find a class reference like "
+                "`FooService.doSomething()`, immediately grep for `class FooService` to find "
+                "the implementation, then grep inside that file for further downstream calls.\n"
+                "4. **Chain tracking**: Maintain a mental map of the call chain. Do NOT stop "
+                "at intermediate layers. If file A calls B, B calls C, C calls D... keep going "
+                "until you reach the actual external call (REST/SOAP/MQ/DB pattern).\n"
+                "5. **Do NOT wrap up early**: You have a large turn budget. Use it. Keep tracing "
+                "call chains even past the midpoint of your budget. Only compile the final "
+                "output when you are confident you have traced ALL chains to their endpoints.\n\n"
                 "## Detection Rules\n\n"
                 "### A) REST Downstream\n"
                 "Search for these patterns:\n"
@@ -197,12 +216,17 @@ def _seed_default_tools(engine) -> None:
                 "## Execution Steps\n\n"
                 "1. **Scan app.properties** first — extract all URL keys, stub keys, MQ keys, "
                 "and datasource keys. This is the primary config source.\n"
-                "2. **Scan Java source files** for the code patterns listed above. "
+                "2. **Broad grep sweep**: Run grep for ALL detection patterns (REST, SOAP, MQ, DB) "
+                "across the entire Java source tree in parallel. This gives you the full set of "
+                "files that contain downstream markers.\n"
+                "3. **Scan Java source files** for the code patterns listed above. "
                 "For each match, record the file path, line number, class name, and method.\n"
-                "3. **Follow call chains**: trace from Controller → Invoker → Service → "
-                "Remote/DAO → External/DB → Response. Map each downstream call to its "
-                "config key where possible.\n"
-                "4. **Classify confidence**:\n"
+                "4. **Follow call chains to full depth**: trace from Controller → Invoker → "
+                "Service → Factory → Helper → Remote/DAO → External/DB → Response. "
+                "Do NOT stop at intermediate layers. If a method delegates to another class, "
+                "grep for that class and continue. Map each downstream call to its "
+                "config key where possible. Chains can be 15-20 files deep — follow them all.\n"
+                "5. **Classify confidence**:\n"
                 "   - **High**: Direct pattern match with config key resolved\n"
                 "   - **Medium**: Pattern match but config key unresolved or indirect\n"
                 "   - **Low**: Inferred from imports/types only, no direct invocation found\n\n"
@@ -286,9 +310,9 @@ def _seed_default_tools(engine) -> None:
             "parameters": '{"output_format": {"type": "string", "enum": ["markdown", "mermaid", "both"], "default": "both", "description": "Output format: markdown (text tables), mermaid (diagrams), or both"}}',
             "tags": '["jisi", "downstream", "dependency", "analysis", "java", "default"]',
             "prerequisites": "[]",
-            "max_turns": 30,
+            "max_turns": 75,
             "model": "",
-            "timeout_seconds": 300,
+            "timeout_seconds": 600,
             "is_active": True,
         },
     ]
@@ -300,6 +324,20 @@ def _seed_default_tools(engine) -> None:
                 {"name": tool_def["name"]},
             ).fetchone()
             if existing:
+                # Update existing default tools with latest instructions/limits
+                conn.execute(text(
+                    "UPDATE custom_tools SET "
+                    "agent_instructions = :agent_instructions, "
+                    "max_turns = :max_turns, "
+                    "timeout_seconds = :timeout_seconds, "
+                    "updated_at = CURRENT_TIMESTAMP "
+                    "WHERE name = :name"
+                ), {
+                    "name": tool_def["name"],
+                    "agent_instructions": tool_def["agent_instructions"],
+                    "max_turns": tool_def["max_turns"],
+                    "timeout_seconds": tool_def["timeout_seconds"],
+                })
                 continue
             from src.data.models import _uuid
             conn.execute(text(

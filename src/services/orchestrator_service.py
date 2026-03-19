@@ -156,10 +156,17 @@ class OrchestratorService:
         repo_context: dict,
         config: dict,
         usage_stats: Optional["LLMUsageStats"] = None,
+        auto_advance: bool = False,
     ) -> list[dict]:
         """Use the LLM to decompose a goal into 3-8 ordered subtasks."""
 
-        system_prompt = """You are a senior software architect. Decompose the following goal into 3-8 concrete, ordered subtasks.
+        checkpoint_guidance = (
+            "- Set checkpoint: false for ALL subtasks (auto-advance mode is enabled, the workflow will run without pausing)."
+            if auto_advance
+            else "- Use checkpoint sparingly — only set checkpoint: true for a single critical review point (e.g. after major code generation, before destructive operations). Most subtasks should have checkpoint: false."
+        )
+
+        system_prompt = f"""You are a senior software architect. Decompose the following goal into 3-8 concrete, ordered subtasks.
 
 Each subtask must have:
 - title: short name (5-10 words)
@@ -176,7 +183,7 @@ Types:
 
 Rules:
 - Start with discovery/exploration when the goal requires understanding the codebase
-- Place checkpoints after significant code generation and before test execution
+{checkpoint_guidance}
 - For testing goals: include test generation, execution, and coverage analysis
 - For engineering goals: include implementation, testing, and verification
 
@@ -424,6 +431,7 @@ Output ONLY a JSON array of subtask objects. No markdown, no explanation."""
                 goal = wf.goal
                 mode = wf.mode
                 token_budget = wf.token_budget or 0
+                auto_advance = wf_config.get("auto_advance", False)
 
             if not subtasks:
                 with get_session() as db:
@@ -555,8 +563,8 @@ Output ONLY a JSON array of subtask objects. No markdown, no explanation."""
                         wf.total_tokens_used = workflow_usage.total_tokens
                         db.flush()
 
-                # Checkpoint: pause for user review
-                if subtask.get("checkpoint") and result.success and i < len(subtasks) - 1:
+                # Checkpoint: pause for user review (skipped when auto_advance)
+                if subtask.get("checkpoint") and result.success and i < len(subtasks) - 1 and not auto_advance:
                     with get_session() as db:
                         wf = db.get(Workflow, workflow_id)
                         if wf:
@@ -745,8 +753,9 @@ Output ONLY a JSON array of subtask objects. No markdown, no explanation."""
                 )
 
             agent_cfg = config.get("agent", {})
+            base_max_turns = int(agent_cfg.get("max_turns", 30))
             agent_config = {
-                "max_turns": int(agent_cfg.get("max_turns", 30)),
+                "max_turns": base_max_turns,
                 "smart_summarization": agent_cfg.get("smart_summarization", True),
                 "truncation_limit": int(agent_cfg.get("truncation_limit", 30000)),
                 "skip_tests": agent_cfg.get("skip_tests", False),
@@ -774,6 +783,18 @@ Output ONLY a JSON array of subtask objects. No markdown, no explanation."""
 
             # Pass recipe_ids from workflow config if available
             recipe_ids = wf_config.get("recipe_ids") or None
+
+            # Boost max_turns if attached recipe tools require more turns
+            # (e.g. JISI downstream detector needs 75 turns for deep call chains)
+            if recipe_ids:
+                try:
+                    from src.agent.recipe_context import get_recipe_max_turns
+                    tool_max = get_recipe_max_turns(recipe_ids)
+                    if tool_max > agent_config["max_turns"]:
+                        agent_config["max_turns"] = tool_max
+                        logger.info("Boosted max_turns to %d from recipe tool config", tool_max)
+                except Exception:
+                    pass
 
             result = generate_changes_with_agent(
                 requirements,

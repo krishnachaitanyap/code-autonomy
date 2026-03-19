@@ -197,6 +197,16 @@ class AgentService:
         ai_cfg = config["ai"]
         agent_config = self._build_agent_config(config)
 
+        # Boost max_turns if recipe tools require more (e.g. deep call-chain analysis)
+        if recipe_ids:
+            try:
+                from src.agent.recipe_context import get_recipe_max_turns
+                tool_max = get_recipe_max_turns(recipe_ids)
+                if tool_max > agent_config["max_turns"]:
+                    agent_config["max_turns"] = tool_max
+            except Exception:
+                pass
+
         # Create session record only if caller didn't provide one
         if not session_id:
             session_id = self._create_session(repo_id, "agent", requirements)
@@ -285,6 +295,17 @@ class AgentService:
             "truncation_limit": int(agent_cfg.get("truncation_limit", 30000)),
             "certs_enabled": agent_cfg.get("certs_enabled", True),
         }
+
+        # Boost max_turns if recipe tools require more (e.g. deep call-chain analysis)
+        if recipe_ids:
+            try:
+                from src.agent.recipe_context import get_recipe_max_turns
+                tool_max = get_recipe_max_turns(recipe_ids)
+                if tool_max > agent_config["max_turns"]:
+                    agent_config["max_turns"] = tool_max
+                    agent_config["plan_max_turns"] = max(agent_config["plan_max_turns"], tool_max)
+            except Exception:
+                pass
 
         if not session_id:
             session_id = self._create_session(repo_id, "plan", requirements)
@@ -385,6 +406,17 @@ class AgentService:
             agent_config["splunk_config"] = splunk_cfg
             agent_config["opensearch_config"] = opensearch_cfg
             agent_config["ai_config"] = config.get("ai", {})
+
+        # Boost max_turns if recipe tools require more (e.g. deep call-chain analysis)
+        if recipe_ids:
+            try:
+                from src.agent.recipe_context import get_recipe_max_turns
+                tool_max = get_recipe_max_turns(recipe_ids)
+                if tool_max > agent_config["max_turns"]:
+                    agent_config["max_turns"] = tool_max
+                    agent_config["ask_max_turns"] = max(agent_config["ask_max_turns"], tool_max)
+            except Exception:
+                pass
 
         if not session_id:
             session_id = self._create_session(repo_id, "ask", question)
