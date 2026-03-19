@@ -376,8 +376,9 @@ export default function ChatPage() {
       // Add assistant message from WS complete event
       const resultContent = latest.data.summary || 'Done.';
       setMessages(prev => {
-        // Guard: skip if an assistant message for this session already exists
-        if (wsSessionId && prev.some(m => m.role === 'assistant' && m.sessionId === wsSessionId && m.status)) {
+        // Guard: skip if a non-partial assistant message for this session already exists
+        // (partial messages from earlier runs of the same session are allowed — "Explore Deeper" resumes them)
+        if (wsSessionId && prev.some(m => m.role === 'assistant' && m.sessionId === wsSessionId && m.status && !m.partial)) {
           return prev;
         }
         return [
@@ -620,10 +621,10 @@ export default function ChatPage() {
             detail: `${s.status === 'completed' ? 'Completed' : 'Failed'} (${s.turns_used} turns)`,
           }]);
 
-          // Add assistant message (skip if WS already added one for this session)
+          // Add assistant message (skip if WS already added a non-partial one for this session)
           const isPartial = s.status === 'failed' && !!s.result_summary;
           setMessages((prev) => {
-            if (prev.some(m => m.role === 'assistant' && m.sessionId === s.id && m.status)) {
+            if (prev.some(m => m.role === 'assistant' && m.sessionId === s.id && m.status && !m.partial)) {
               return prev;
             }
             return [
@@ -1079,6 +1080,13 @@ export default function ChatPage() {
                           onClick={async () => {
                             try {
                               setSending(true);
+                              // Mark the old partial message as no longer explorable
+                              // and clear its partial flag so dedup won't block the resumed result
+                              setMessages(prev => prev.map(m =>
+                                m.id === msg.id
+                                  ? { ...m, canExploreDeeper: false, partial: false }
+                                  : m
+                              ));
                               setActivityLog([{
                                 timestamp: new Date().toISOString(),
                                 type: 'status',
