@@ -56,13 +56,16 @@ async def create_session(body: SessionCreate):
 
     init_db()
 
-    # Verify repo exists
-    with get_session() as db:
-        repo = RepoRepository(db).get_by_id(body.repo_id)
-        if repo is None:
-            raise HTTPException(status_code=404, detail="Repository not found")
-        repo_path = repo.local_path
-        repo_url = repo.url
+    # Resolve repo context (optional — None = workspace-free session)
+    repo_path = ""
+    repo_url = ""
+    if body.repo_id:
+        with get_session() as db:
+            repo = RepoRepository(db).get_by_id(body.repo_id)
+            if repo is None:
+                raise HTTPException(status_code=404, detail="Repository not found")
+            repo_path = repo.local_path
+            repo_url = repo.url
 
     # Load config
     try:
@@ -84,7 +87,7 @@ async def create_session(body: SessionCreate):
         )
 
     # Create session record immediately
-    session_id = agent_service._create_session(body.repo_id, body.mode, body.requirements)
+    session_id = agent_service._create_session(body.repo_id or "__workspace_free__", body.mode, body.requirements)
     if session_id is None:
         raise HTTPException(status_code=500, detail="Could not create session")
 
@@ -95,34 +98,41 @@ async def create_session(body: SessionCreate):
     # Run agent in background thread
     def _run():
         try:
-            # Auto-clone if local_path is missing or doesn't exist
+            # Resolve workspace path
             resolved_path = repo_path
-            if not repo_path or not os.path.isdir(repo_path):
-                logger.info(
-                    "Session %s: repo_path missing/invalid (%r), auto-cloning...",
-                    session_id, repo_path,
-                )
-                if progress_callback:
-                    progress_callback({
-                        "type": "turn",
-                        "data": {
-                            "turn": 0, "tool": "clone",
-                            "detail": f"Cloning repository ({body.branch or 'main'})...",
-                        },
-                    })
-                resolved_path = repo_service.ensure_local_clone(
-                    body.repo_id, branch=body.branch or "main", config=config,
-                )
-                logger.info("Session %s: clone resolved to %s", session_id, resolved_path)
-                if progress_callback:
-                    progress_callback({
-                        "type": "turn",
-                        "data": {
-                            "turn": 0, "tool": "clone",
-                            "detail": "Clone complete",
-                            "result": resolved_path,
-                        },
-                    })
+            if body.repo_id:
+                # Auto-clone if local_path is missing or doesn't exist
+                if not repo_path or not os.path.isdir(repo_path):
+                    logger.info(
+                        "Session %s: repo_path missing/invalid (%r), auto-cloning...",
+                        session_id, repo_path,
+                    )
+                    if progress_callback:
+                        progress_callback({
+                            "type": "turn",
+                            "data": {
+                                "turn": 0, "tool": "clone",
+                                "detail": f"Cloning repository ({body.branch or 'main'})...",
+                            },
+                        })
+                    resolved_path = repo_service.ensure_local_clone(
+                        body.repo_id, branch=body.branch or "main", config=config,
+                    )
+                    logger.info("Session %s: clone resolved to %s", session_id, resolved_path)
+                    if progress_callback:
+                        progress_callback({
+                            "type": "turn",
+                            "data": {
+                                "turn": 0, "tool": "clone",
+                                "detail": "Clone complete",
+                                "result": resolved_path,
+                            },
+                        })
+            else:
+                # Workspace-free session — use a temp directory
+                import tempfile
+                resolved_path = tempfile.mkdtemp(prefix="ca_workspace_")
+                logger.info("Session %s: workspace-free mode, using %s", session_id, resolved_path)
 
             if body.mode == "agent":
                 agent_service.run_agent(
@@ -132,6 +142,7 @@ async def create_session(body: SessionCreate):
                     conversation_context=body.context or None,
                     session_id=session_id,
                     recipe_ids=body.recipe_ids or None,
+                    workspace_free=not body.repo_id,
                 )
             elif body.mode == "plan":
                 agent_service.run_plan(
@@ -150,6 +161,7 @@ async def create_session(body: SessionCreate):
                     conversation_context=body.context or None,
                     session_id=session_id,
                     recipe_ids=body.recipe_ids or None,
+                    workspace_free=not body.repo_id,
                 )
         except Exception as exc:
             logger.exception("Session %s failed: %s", session_id, exc)

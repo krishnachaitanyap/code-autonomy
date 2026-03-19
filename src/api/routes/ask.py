@@ -30,12 +30,15 @@ async def ask_question(body: AskRequest):
     from src.data.repositories import RepoRepository
 
     init_db()
-    with get_session() as db:
-        repo = RepoRepository(db).get_by_id(body.repo_id)
-        if repo is None:
-            raise HTTPException(status_code=404, detail="Repository not found")
-        repo_path = repo.local_path
-        repo_url = repo.url
+    repo_path = ""
+    repo_url = ""
+    if body.repo_id:
+        with get_session() as db:
+            repo = RepoRepository(db).get_by_id(body.repo_id)
+            if repo is None:
+                raise HTTPException(status_code=404, detail="Repository not found")
+            repo_path = repo.local_path
+            repo_url = repo.url
 
     try:
         from src.services.config_service import ConfigService
@@ -54,11 +57,14 @@ async def ask_question(body: AskRequest):
         )
 
     # Auto-clone if local_path is missing or doesn't exist
-    if not repo_path or not os.path.isdir(repo_path):
+    if body.repo_id and (not repo_path or not os.path.isdir(repo_path)):
         try:
             repo_path = repo_service.ensure_local_clone(body.repo_id, config=config)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+    elif not body.repo_id:
+        import tempfile
+        repo_path = tempfile.mkdtemp(prefix="ca_ask_")
 
     def _run():
         return agent_service.run_ask(
@@ -66,6 +72,7 @@ async def ask_question(body: AskRequest):
             question=body.question,
             config=config,
             repo_url=repo_url,
+            workspace_free=not body.repo_id,
         )
 
     try:

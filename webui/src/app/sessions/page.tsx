@@ -50,7 +50,7 @@ export default function SessionsPage() {
     setSubmitting(true);
     try {
       const session = await sessions.create({
-        repo_id: newRepoId,
+        repo_id: newRepoId || null,
         mode: newMode,
         branch: newBranch,
         requirements: newRequirements,
@@ -97,10 +97,9 @@ export default function SessionsPage() {
             <select
               value={newRepoId}
               onChange={(e) => setNewRepoId(e.target.value)}
-              required
               className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
             >
-              <option value="">Select a repo...</option>
+              <option value="">No repository (tool-only)</option>
               {repoList.map((r) => (
                 <option key={r.id} value={r.id}>
                   {r.nickname || r.url || r.local_path}

@@ -23,12 +23,12 @@ export default function AskPage() {
   }, []);
 
   async function submitQuestion(q: string) {
-    if (!selectedRepo || !q.trim()) return;
+    if (!q.trim()) return;
 
     setLoading(true);
     setError('');
     try {
-      const result = await ask.question(selectedRepo, q);
+      const result = await ask.question(selectedRepo || null, q);
       setHistory((prev) => [
         { question: q, answer: result.answer, sources: result.sources, success: result.success },
         ...prev,
@@ -58,10 +58,9 @@ export default function AskPage() {
           <select
             value={selectedRepo}
             onChange={(e) => setSelectedRepo(e.target.value)}
-            required
             className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
           >
-            <option value="">Select a repo...</option>
+            <option value="">No repository (tool-only)</option>
             {repoList.map((r) => (
               <option key={r.id} value={r.id}>
                 {r.nickname || r.url || r.local_path}

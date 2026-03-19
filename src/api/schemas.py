@@ -45,7 +45,7 @@ class SymbolResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class SessionCreate(BaseModel):
-    repo_id: str
+    repo_id: Optional[str] = None  # None = workspace-free session (tool/recipe only)
     mode: str = "agent"  # agent | plan | ask
     requirements: str = ""
     branch: str = ""  # empty = use current/default branch
@@ -56,7 +56,7 @@ class SessionCreate(BaseModel):
 
 class SessionResponse(BaseModel):
     id: str
-    repo_id: str
+    repo_id: Optional[str] = None
     mode: str
     status: str
     requirements: str = ""
@@ -170,7 +170,7 @@ class UsageStatsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class AskRequest(BaseModel):
-    repo_id: str
+    repo_id: Optional[str] = None  # None = no repo context (tool-only questions)
     question: str
 
 

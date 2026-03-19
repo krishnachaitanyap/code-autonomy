@@ -189,12 +189,14 @@ class AgentService:
         conversation_context: Optional[list[dict]] = None,
         session_id: Optional[str] = None,
         recipe_ids: Optional[list[str]] = None,
+        workspace_free: bool = False,
     ) -> "AgentResult":
         """Run agent mode — full agentic loop with exploration, editing, and testing."""
         from src.agent.analyzer import generate_changes_with_agent
 
-        self._checkout_branch(repo_path, branch)
-        repo_id = compute_repo_id(repo_path, repo_url)
+        if not workspace_free:
+            self._checkout_branch(repo_path, branch)
+        repo_id = compute_repo_id(repo_path, repo_url) if not workspace_free else "__workspace_free__"
         ai_cfg = config["ai"]
         agent_config = self._build_agent_config(config)
 
@@ -212,11 +214,16 @@ class AgentService:
         if not session_id:
             session_id = self._create_session(repo_id, "agent", requirements)
 
-        # Build consciousness and code index (cached)
-        consciousness = self._get_cached_consciousness(repo_id, repo_path, config, repo_url)
-        code_index = self._get_cached_code_index(repo_id, repo_path, config, repo_url, consciousness)
-        repo_knowledge = self._get_cached_repo_knowledge(repo_id, repo_path)
-        build_tool = consciousness.conventions.get("build_tool") if consciousness else None
+        # Build consciousness and code index (cached); skip for workspace-free sessions
+        consciousness = None
+        code_index = None
+        repo_knowledge = None
+        build_tool = None
+        if not workspace_free:
+            consciousness = self._get_cached_consciousness(repo_id, repo_path, config, repo_url)
+            code_index = self._get_cached_code_index(repo_id, repo_path, config, repo_url, consciousness)
+            repo_knowledge = self._get_cached_repo_knowledge(repo_id, repo_path)
+            build_tool = consciousness.conventions.get("build_tool") if consciousness else None
 
         from src.agent.activity import set_progress_callback, clear_progress_callback
 
@@ -379,12 +386,14 @@ class AgentService:
         conversation_context: Optional[list[dict]] = None,
         session_id: Optional[str] = None,
         recipe_ids: Optional[list[str]] = None,
+        workspace_free: bool = False,
     ) -> "AskResult":
         """Run ask mode — answer a question about the codebase."""
         from src.agent.analyzer import generate_answer_with_agent
 
-        self._checkout_branch(repo_path, branch)
-        repo_id = compute_repo_id(repo_path, repo_url)
+        if not workspace_free:
+            self._checkout_branch(repo_path, branch)
+        repo_id = compute_repo_id(repo_path, repo_url) if not workspace_free else "__workspace_free__"
         ai_cfg = config["ai"]
         agent_cfg = config.get("agent", {})
         splunk_cfg = config.get("splunk", {})
@@ -422,13 +431,15 @@ class AgentService:
         if not session_id:
             session_id = self._create_session(repo_id, "ask", question)
 
-        # Build consciousness (cached); skip eager code_index in ask mode
-        consciousness = self._get_cached_consciousness(repo_id, repo_path, config, repo_url)
-
-        # Only use code_index if already cached — don't build it for simple questions
-        code_index = repo_cache.get(repo_id, "code_index", TTL_CODE_INDEX)
-
-        repo_knowledge = self._get_cached_repo_knowledge(repo_id, repo_path)
+        # Build consciousness (cached); skip for workspace-free sessions
+        consciousness = None
+        code_index = None
+        repo_knowledge = None
+        if not workspace_free:
+            consciousness = self._get_cached_consciousness(repo_id, repo_path, config, repo_url)
+            # Only use code_index if already cached — don't build it for simple questions
+            code_index = repo_cache.get(repo_id, "code_index", TTL_CODE_INDEX)
+            repo_knowledge = self._get_cached_repo_knowledge(repo_id, repo_path)
 
         from src.agent.activity import set_progress_callback, clear_progress_callback
 

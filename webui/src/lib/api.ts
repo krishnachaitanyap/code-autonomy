@@ -169,7 +169,7 @@ export const sessions = {
     return request<{ sessions: Session[]; total: number }>(`/sessions${query}`);
   },
   get: (id: string) => request<Session>(`/sessions/${id}`),
-  create: (data: { repo_id: string; mode: string; requirements: string; branch?: string; context?: Array<{role: string; content: string}>; recipe_ids?: string[]; config_overrides?: Record<string, any> }) =>
+  create: (data: { repo_id?: string | null; mode: string; requirements: string; branch?: string; context?: Array<{role: string; content: string}>; recipe_ids?: string[]; config_overrides?: Record<string, any> }) =>
     request<Session>('/sessions', { method: 'POST', body: JSON.stringify(data) }),
   cancel: (id: string) =>
     request<{ status: string }>(`/sessions/${id}/cancel`, { method: 'POST' }),
@@ -283,10 +283,10 @@ export const traces = {
 // ---------------------------------------------------------------------------
 
 export const ask = {
-  question: (repoId: string, question: string) =>
+  question: (repoId: string | null, question: string) =>
     request<{ success: boolean; answer: string; sources: string[]; turns_used: number }>('/ask', {
       method: 'POST',
-      body: JSON.stringify({ repo_id: repoId, question }),
+      body: JSON.stringify({ repo_id: repoId || undefined, question }),
     }),
 };
 
