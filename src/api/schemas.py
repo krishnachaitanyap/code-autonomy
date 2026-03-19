@@ -461,6 +461,7 @@ class WorkflowCreate(BaseModel):
     project_id: str = ""
     goal: str
     mode: str = "testing"  # testing | engineering
+    auto_advance: bool = False  # skip checkpoints — run all steps without pausing
     branch: str = ""
     token_budget: int = 0  # 0 = unlimited
     recipe_ids: list[str] = Field(default_factory=list)

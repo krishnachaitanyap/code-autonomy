@@ -124,6 +124,8 @@ async def create_workflow(data: WorkflowCreate):
     wf_config: dict = {}
     if data.branch:
         wf_config["branch"] = data.branch
+    if data.auto_advance:
+        wf_config["auto_advance"] = True
     if data.recipe_ids:
         wf_config["recipe_ids"] = data.recipe_ids
     if data.config_overrides:
@@ -153,7 +155,7 @@ async def create_workflow(data: WorkflowCreate):
             pass
 
     # Decompose goal into subtasks
-    subtasks = _service.decompose_goal(data.goal, data.mode, repo_context, config)
+    subtasks = _service.decompose_goal(data.goal, data.mode, repo_context, config, auto_advance=data.auto_advance)
 
     # Save subtasks to workflow
     from src.data.database import get_session

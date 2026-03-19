@@ -569,7 +569,7 @@ export const workflows = {
     return request<{ workflows: Workflow[]; total: number }>(`/workflows${query}`);
   },
   get: (id: string) => request<Workflow>(`/workflows/${id}`),
-  create: (data: { repo_id?: string; project_id?: string; goal: string; mode?: string; branch?: string; token_budget?: number; recipe_ids?: string[]; config_overrides?: Record<string, any> }) =>
+  create: (data: { repo_id?: string; project_id?: string; goal: string; mode?: string; auto_advance?: boolean; branch?: string; token_budget?: number; recipe_ids?: string[]; config_overrides?: Record<string, any> }) =>
     request<Workflow>('/workflows', { method: 'POST', body: JSON.stringify(data) }),
   resume: (id: string) => request<Workflow>(`/workflows/${id}/resume`, { method: 'POST' }),
   cancel: (id: string) => request<{ status: string }>(`/workflows/${id}/cancel`, { method: 'POST' }),
