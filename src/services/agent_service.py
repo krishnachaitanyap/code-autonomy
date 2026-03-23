@@ -128,9 +128,11 @@ class AgentService:
             result["opensearch_config"] = opensearch_cfg
             result["ai_config"] = config.get("ai", {})
         result["tool_credentials"] = config.get("tool_credentials", {})
+        result["artifact_repository"] = config.get("artifact_repository", {})
         return result
 
-    def _create_session(self, repo_id: str, mode: str, requirements: str) -> Optional[str]:
+    def _create_session(self, repo_id: str, mode: str, requirements: str,
+                        recipe_ids: Optional[list[str]] = None) -> Optional[str]:
         """Create a Session record in the database. Returns session_id or None."""
         try:
             from src.data.database import get_session, init_db
@@ -145,6 +147,7 @@ class AgentService:
                     mode=mode,
                     requirements=requirements[:2000],
                     session_id=session_id,
+                    recipe_ids=recipe_ids,
                 )
             return session_id
         except Exception as exc:
@@ -212,7 +215,7 @@ class AgentService:
 
         # Create session record only if caller didn't provide one
         if not session_id:
-            session_id = self._create_session(repo_id, "agent", requirements)
+            session_id = self._create_session(repo_id, "agent", requirements, recipe_ids=recipe_ids)
 
         # Build consciousness and code index (cached); skip for workspace-free sessions
         consciousness = None
@@ -259,8 +262,13 @@ class AgentService:
         finally:
             clear_progress_callback()
 
-        # Update session
-        status = "completed" if result.success else "failed"
+        # Update session — use "paused" for partial results so resume works cleanly
+        if result.success:
+            status = "completed"
+        elif result.partial:
+            status = "paused"
+        else:
+            status = "failed"
         self._update_session(
             session_id, status,
             result_summary=result.summary,
@@ -316,7 +324,7 @@ class AgentService:
                 pass
 
         if not session_id:
-            session_id = self._create_session(repo_id, "plan", requirements)
+            session_id = self._create_session(repo_id, "plan", requirements, recipe_ids=recipe_ids)
 
         # Build consciousness (cached); only use code_index if already cached (skip eager build)
         consciousness = self._get_cached_consciousness(repo_id, repo_path, config, repo_url)
@@ -358,7 +366,7 @@ class AgentService:
         finally:
             clear_progress_callback()
 
-        status = "completed" if result.success else "failed"
+        status = "completed" if result.success else ("paused" if getattr(result, "partial", False) else "failed")
         self._update_session(
             session_id, status,
             result_summary=result.summary,
@@ -429,7 +437,7 @@ class AgentService:
                 pass
 
         if not session_id:
-            session_id = self._create_session(repo_id, "ask", question)
+            session_id = self._create_session(repo_id, "ask", question, recipe_ids=recipe_ids)
 
         # Build consciousness (cached); skip for workspace-free sessions
         consciousness = None
@@ -474,7 +482,7 @@ class AgentService:
         finally:
             clear_progress_callback()
 
-        status = "completed" if result.success else "failed"
+        status = "completed" if result.success else ("paused" if getattr(result, "partial", False) else "failed")
         self._update_session(
             session_id, status,
             result_summary=result.answer if result.success else result.summary,

@@ -101,12 +101,14 @@ class SessionRepository:
         mode: str = "agent",
         requirements: str = "",
         session_id: Optional[str] = None,
+        recipe_ids: Optional[list[str]] = None,
     ) -> SessionModel:
         session = SessionModel(
             repo_id=repo_id,
             mode=mode,
             requirements=requirements,
             status="running",
+            recipe_ids=recipe_ids or [],
         )
         if session_id:
             session.id = session_id

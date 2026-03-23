@@ -92,7 +92,7 @@ class SessionService:
             result = SessionRepository(db).update_status(session_id, "failed", "Cancelled by user")
             return result is not None
 
-    def resume_session(self, session_id: str, config: dict) -> Optional[object]:
+    def resume_session(self, session_id: str, config: dict, extra_turns: int = 0) -> Optional[object]:
         """Resume a paused/failed session from its checkpoint.
 
         Dispatches to the correct agent mode (agent/plan/ask) based on the
@@ -101,6 +101,7 @@ class SessionService:
         Args:
             session_id: Session to resume.
             config: Full config dict.
+            extra_turns: Additional turns to add on top of max_turns (default 0).
 
         Returns:
             AgentResult / PlanResult or None if session not found or not resumable.
@@ -122,6 +123,7 @@ class SessionService:
             checkpoint = CheckpointRepository(db).get_latest_by_session(session_id)
             repo_id = session.repo_id
             session_mode = session.mode  # "agent" | "plan" | "ask"
+            recipe_ids = session.recipe_ids or []
 
         # Get repo path from database
         from src.data.database import get_session as get_db_session2
@@ -135,6 +137,15 @@ class SessionService:
             repo_path = repo.local_path
             repo_url = repo.url
 
+        # Boost max_turns if extra_turns requested
+        if extra_turns > 0:
+            agent_section = config.get("agent", {})
+            current_max = int(agent_section.get("max_turns", 50))
+            agent_section["max_turns"] = current_max + extra_turns
+            config["agent"] = agent_section
+            logger.info("Boosted max_turns by %d to %d for resumed session %s",
+                        extra_turns, current_max + extra_turns, session_id)
+
         agent_service = AgentService()
 
         if session_mode == "plan":
@@ -145,6 +156,7 @@ class SessionService:
                 repo_url=repo_url,
                 resume=True,
                 session_id=session_id,
+                recipe_ids=recipe_ids or None,
             )
         elif session_mode == "ask":
             return agent_service.run_ask(
@@ -154,6 +166,7 @@ class SessionService:
                 repo_url=repo_url,
                 resume=True,
                 session_id=session_id,
+                recipe_ids=recipe_ids or None,
             )
         else:
             # agent mode
@@ -164,4 +177,5 @@ class SessionService:
                 repo_url=repo_url,
                 resume=True,
                 session_id=session_id,
+                recipe_ids=recipe_ids or None,
             )

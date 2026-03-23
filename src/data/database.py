@@ -86,6 +86,13 @@ def init_db(url: str = "") -> None:
         if 'is_system' not in columns:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE model_configs ADD COLUMN is_system BOOLEAN DEFAULT 0"))
+    # Migrate sessions: add recipe_ids column
+    if 'sessions' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('sessions')]
+        if 'recipe_ids' not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE sessions ADD COLUMN recipe_ids JSON DEFAULT '[]'"))
+
     if 'repos' in inspector.get_table_names():
         columns = [c['name'] for c in inspector.get_columns('repos')]
         if 'nickname' not in columns:
@@ -323,6 +330,118 @@ def _seed_default_tools(engine) -> None:
             "is_active": True,
         },
         {
+            "name": "Skill_Extractor",
+            "description": "Learns framework contracts and repo conventions by downloading and inspecting dependency source code, then stores reusable skill documents",
+            "tool_type": "analyzer",
+            "enabled_for_migration": True,
+            "enabled_for_chat": True,
+            "enabled_for_testing": True,
+            "goal": (
+                "Download framework/library dependency sources, inspect their contracts "
+                "(abstract methods, annotations, lifecycle hooks, configuration patterns), "
+                "cross-reference with the target repo's conventions (test structure, naming, "
+                "config files), and produce a comprehensive skill document that enables "
+                "accurate code generation matching both framework rules and repo style."
+            ),
+            "agent_instructions": (
+                "You are a Skill Extractor. Your job is to learn how a framework or library "
+                "works by reading its actual source code, then combine that with the target "
+                "repo's conventions to produce a reusable skill document.\n\n"
+                "## EFFICIENCY RULES (read first)\n"
+                "- **list_dependencies first**: Always start with list_dependencies to get the "
+                "exact dependency coordinates and auto-detected frameworks. This saves turns.\n"
+                "- **Batch grep**: When scanning the repo, search for ALL framework-related "
+                "patterns in parallel (annotations, imports, base classes) in one turn. "
+                "Do NOT search one pattern per turn.\n"
+                "- **Read selectively**: After grep finds matches, read only the most representative "
+                "files (2-3 per pattern). Do not read every match.\n"
+                "- **Extract JARs efficiently**: List JAR contents once with `jar tf`, then extract "
+                "only the key classes (base classes, annotations, config processors).\n\n"
+                "## ANTI-HALLUCINATION RULES (critical)\n"
+                "- **Every claim needs a source citation**: file path + line number or class name.\n"
+                "- **If you cannot find the source, say so**: Write 'NOT VERIFIED — could not locate "
+                "source for <X>' rather than guessing.\n"
+                "- **Verify method signatures**: Copy-paste the actual signature from source code. "
+                "Do NOT reconstruct from memory or inference.\n"
+                "- **Verify annotations**: Read the actual annotation source to confirm attributes "
+                "and default values. Do NOT assume based on naming.\n"
+                "- **Test your claims**: Before publishing, re-read at least 2 repo files that use "
+                "the framework and confirm your skill document matches what they actually do.\n\n"
+                "## Step 0: Inventory and classify dependencies\n"
+                "Call **list_dependencies** to get all dependencies classified as:\n"
+                "- **INTERNAL/ENTERPRISE** — not in LLM training data, MUST download and inspect sources\n"
+                "- **WELL-KNOWN** — LLM already knows these (Spring, JUnit, etc.), skip source download\n\n"
+                "For well-known frameworks, you already know the API. Only document how THIS REPO "
+                "uses them (conventions, patterns, config). Do NOT waste turns downloading Spring sources.\n\n"
+                "For internal/enterprise frameworks, proceed to Steps 1-2 to download and inspect.\n\n"
+                "## Step 1: Download enterprise dependency sources\n"
+                "Call **download_dependencies** to fetch source JARs ONLY for internal dependencies.\n"
+                "If this fails, explain what artifact repository configuration is needed.\n"
+                "Skip this step entirely if all dependencies are well-known.\n\n"
+                "## Step 2: Deep-inspect enterprise framework source code\n"
+                "Only for INTERNAL dependencies. Find and extract key classes:\n"
+                "- For Maven: `~/.m2/repository/{groupId path}/{artifactId}/{version}/*-sources.jar`\n"
+                "- Run: `jar tf <sources.jar> | grep -E '(Base|Abstract|Service|Config|Annotation)'`\n"
+                "- Extract key classes: `jar xf <sources.jar> <class-path> -d /tmp/extracted/`\n"
+                "- Read and document:\n"
+                "  - **Abstract base classes**: every abstract method with full signature\n"
+                "  - **Annotations**: all attributes, defaults, retention, target\n"
+                "  - **Lifecycle interfaces**: init/destroy/callback hooks with execution order\n"
+                "  - **Configuration**: required properties, injection points, defaults\n"
+                "  - **Exception hierarchy**: what exceptions the framework throws and when\n"
+                "- For each finding, record: `Source: <jar-name>/<class-path>:<line>`\n\n"
+                "## Step 3: Batch-scan repo for framework usage\n"
+                "Run **parallel greps** in a single turn to find all framework usage:\n"
+                "- Imports: `grep -r 'import com.enterprise.framework'`\n"
+                "- Annotations: `grep -rn '@FrameworkAnnotation'`\n"
+                "- Base class extensions: `grep -rn 'extends ServiceBase'`\n"
+                "- Config references: `grep -rn 'framework.config.key'`\n"
+                "Then read the top 2-3 most representative files per category.\n\n"
+                "## Step 4: Cross-reference and verify\n"
+                "For each framework contract point found in Step 2:\n"
+                "1. Find at least one repo file that implements/uses it\n"
+                "2. Verify the repo's usage matches the framework's contract\n"
+                "3. Note any repo-specific patterns (wrappers, utilities, naming overrides)\n"
+                "4. If a contract point has zero usage in the repo, note it as 'UNUSED in this repo'\n\n"
+                "**Verification pass**: Re-read 2-3 repo files end-to-end and confirm every "
+                "claim in your skill document against the actual code. Fix any discrepancies.\n\n"
+                "## Step 5: Store in working memory\n"
+                "Use update_memory with key 'skill:<framework_name>'.\n\n"
+                "## Step 6: Publish to SKILLS.md\n"
+                "Use the **publish_skill** tool to persist to the repo's SKILLS.md.\n"
+                "This makes it visible in the Repos UI and auto-injected into future sessions.\n\n"
+                "**Structure the skill_content with these sections:**\n\n"
+                "### Contract\n"
+                "For each base class/interface/annotation, include:\n"
+                "- Full method signature (copy-pasted from source)\n"
+                "- Purpose and when it's called\n"
+                "- Source citation: `Source: <jar>/<path>:<line>`\n\n"
+                "### Repo Conventions\n"
+                "For each convention, include:\n"
+                "- The pattern with a repo file example: `Example: see src/.../OrderService.java:45`\n"
+                "- Package structure, naming rules, config locations\n\n"
+                "### Code Generation Guide\n"
+                "- Step-by-step recipe with a concrete template\n"
+                "- Based on an actual repo file as the canonical pattern\n"
+                "- Mark placeholders clearly: `<ServiceName>`, `<endpoint-path>`\n\n"
+                "### Pitfalls\n"
+                "- Only include pitfalls you found evidence for (missing config, wrong annotation usage)\n"
+                "- Cite the source where you discovered each pitfall\n\n"
+                "### Evidence Index\n"
+                "List all source files consulted with what was learned from each:\n"
+                "- `<jar>/<class>` — what contract points were extracted\n"
+                "- `<repo-file>` — what conventions were observed"
+            ),
+            "allowed_tools": '["Read", "Glob", "Grep", "ListDir", "FindFiles", "Bash", "list_dependencies", "download_dependencies", "publish_skill"]',
+            "parameters": '{"framework": {"type": "string", "description": "Framework or library name to extract skills for (e.g. SmartSpec, Spring Boot, jules)"}, "focus_area": {"type": "string", "description": "Optional: specific area to focus on (e.g. testing, configuration, service contracts)"}}',
+            "tags": '["skill", "framework", "dependency", "learning", "default"]',
+            "prerequisites": "[]",
+            "max_turns": 60,
+            "model": "",
+            "timeout_seconds": 600,
+            "is_active": True,
+        },
+        {
             "name": "Splunk",
             "description": "Query production Splunk logs, metrics, and saved searches using SPL or natural language",
             "tool_type": "analyzer",
@@ -378,6 +497,7 @@ def _seed_default_tools(engine) -> None:
                 conn.execute(text(
                     "UPDATE custom_tools SET "
                     "agent_instructions = :agent_instructions, "
+                    "allowed_tools = :allowed_tools, "
                     "max_turns = :max_turns, "
                     "timeout_seconds = :timeout_seconds, "
                     "updated_at = CURRENT_TIMESTAMP "
@@ -385,6 +505,7 @@ def _seed_default_tools(engine) -> None:
                 ), {
                     "name": tool_def["name"],
                     "agent_instructions": tool_def["agent_instructions"],
+                    "allowed_tools": tool_def.get("allowed_tools", "[]"),
                     "max_turns": tool_def["max_turns"],
                     "timeout_seconds": tool_def["timeout_seconds"],
                 })
@@ -420,6 +541,44 @@ def _seed_default_recipes(conn) -> None:
     from src.data.models import _uuid
 
     DEFAULT_RECIPES = [
+        {
+            "name": "Skill Extraction",
+            "category": "general",
+            "description": (
+                "Learn how a framework or library works by downloading its source code "
+                "from the enterprise artifact repository, inspecting contracts and conventions, "
+                "and storing a reusable skill document for future code generation."
+            ),
+            "priority": 70,
+            "tags": '["skill", "framework", "dependency", "learning", "artifact-repo"]',
+            "prerequisites": "[]",
+            "agent_instructions": (
+                "Use the @Skill_Extractor tool to learn a framework's contracts and conventions.\n\n"
+                "**Workflow:**\n"
+                "1. First, call download_dependencies to fetch dependency source JARs from the "
+                "configured enterprise artifact repository\n"
+                "2. Inspect the framework's source code — find abstract base classes, required "
+                "annotations, lifecycle hooks, and configuration patterns\n"
+                "3. Cross-reference with the target repo — how does this repo use the framework? "
+                "What naming conventions, test patterns, and configuration styles are used?\n"
+                "4. Store the skill in working memory via update_memory with key 'skill:<framework>'\n"
+                "5. **Publish to SKILLS.md** using the publish_skill tool — this persists the skill "
+                "to the repo's SKILLS.md file, making it visible in the Repos UI and automatically "
+                "injected into all future agent sessions. Existing skills are preserved.\n\n"
+                "**The skill document should enable accurate code generation** that matches both "
+                "the framework's rules AND the repo's conventions. Include:\n"
+                "- Required method signatures and their purposes\n"
+                "- Annotation usage patterns with examples from the repo\n"
+                "- Test structure and naming conventions\n"
+                "- Configuration file patterns\n"
+                "- Common pitfalls and framework-specific rules\n\n"
+                "**Prerequisites:** Artifact Repository must be configured in Settings > Config > "
+                "Artifact Repository with the enterprise Maven/npm registry URL and credentials."
+            ),
+            "source_framework": "",
+            "target_framework": "",
+            "tool_name": "Skill_Extractor",
+        },
         {
             "name": "JISI Downstream Analysis",
             "category": "java",

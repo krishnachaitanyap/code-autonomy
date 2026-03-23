@@ -82,6 +82,7 @@ class Session(Base):
     turns_used = Column(Integer, nullable=False, default=0)
     trace_id = Column(String(64), nullable=True)
     log = Column(JSON, nullable=False, default=list)
+    recipe_ids = Column(JSON, nullable=False, default=list)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     completed_at = Column(DateTime(timezone=True), nullable=True)
 

@@ -68,6 +68,10 @@ class SessionResponse(BaseModel):
     completed_at: Optional[str] = None
 
 
+class SessionResumeRequest(BaseModel):
+    extra_turns: int = Field(default=0, ge=0, le=200, description="Additional turns to add on top of the default max_turns")
+
+
 class SessionListResponse(BaseModel):
     sessions: list[SessionResponse]
     total: int

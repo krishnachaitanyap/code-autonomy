@@ -173,8 +173,11 @@ export const sessions = {
     request<Session>('/sessions', { method: 'POST', body: JSON.stringify(data) }),
   cancel: (id: string) =>
     request<{ status: string }>(`/sessions/${id}/cancel`, { method: 'POST' }),
-  resume: (id: string) =>
-    request<Session>(`/sessions/${id}/resume`, { method: 'POST' }),
+  resume: (id: string, extraTurns?: number) =>
+    request<Session>(`/sessions/${id}/resume`, {
+      method: 'POST',
+      body: extraTurns ? JSON.stringify({ extra_turns: extraTurns }) : undefined,
+    }),
 };
 
 // ---------------------------------------------------------------------------

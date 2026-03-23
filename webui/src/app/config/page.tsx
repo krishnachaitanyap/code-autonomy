@@ -28,6 +28,21 @@ export default function ConfigPage() {
   const [testingInline, setTestingInline] = useState(false);
   const [inlineTestResult, setInlineTestResult] = useState<{ status: string; response?: string; error?: string; latency_ms: number } | null>(null);
 
+  // Artifact Repository state
+  const [arEditing, setArEditing] = useState(false);
+  const [arForm, setArForm] = useState({
+    enabled: false,
+    maven_mirror_url: '', maven_mirror_id: 'enterprise',
+    maven_release_url: '', maven_snapshot_url: '',
+    maven_username: '', maven_password: '',
+    npm_registry_url: '', npm_auth_token: '',
+    gradle_plugin_url: '',
+    verify_ssl: true, ca_cert_path: '',
+  });
+  const [arSaving, setArSaving] = useState(false);
+  const [arTesting, setArTesting] = useState(false);
+  const [arTestResult, setArTestResult] = useState<string | null>(null);
+
   useEffect(() => {
     async function load() {
       try {
@@ -200,6 +215,75 @@ export default function ConfigPage() {
       endpoint: ec.endpoint || '', deployment_name: ec.deployment_name || '',
     });
     setShowAddModel(true);
+  }
+
+  function startEditArtifactRepo() {
+    const ar = configData.artifact_repository || {};
+    setArForm({
+      enabled: ar.enabled || false,
+      maven_mirror_url: ar.maven_mirror_url || '',
+      maven_mirror_id: ar.maven_mirror_id || 'enterprise',
+      maven_release_url: ar.maven_release_url || '',
+      maven_snapshot_url: ar.maven_snapshot_url || '',
+      maven_username: ar.maven_username || '',
+      maven_password: '', // redacted — don't prefill
+      npm_registry_url: ar.npm_registry_url || '',
+      npm_auth_token: '', // redacted — don't prefill
+      gradle_plugin_url: ar.gradle_plugin_url || '',
+      verify_ssl: ar.verify_ssl !== false,
+      ca_cert_path: ar.ca_cert_path || '',
+    });
+    setArEditing(true);
+    setArTestResult(null);
+  }
+
+  async function handleSaveArtifactRepo() {
+    setArSaving(true);
+    setError('');
+    try {
+      const updates: Record<string, any> = { ...arForm };
+      // Don't send empty password/token (preserve existing)
+      if (!updates.maven_password) delete updates.maven_password;
+      if (!updates.npm_auth_token) delete updates.npm_auth_token;
+      const result = await config.update({ artifact_repository: updates });
+      setConfigData(result.config);
+      setArEditing(false);
+      setSuccess('Artifact repository settings saved.');
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (err: any) {
+      setError(err.message || 'Failed to save artifact repository settings');
+    } finally {
+      setArSaving(false);
+    }
+  }
+
+  async function handleTestArtifactRepo() {
+    setArTesting(true);
+    setArTestResult(null);
+    try {
+      const url = arForm.maven_mirror_url || arForm.npm_registry_url;
+      if (!url) {
+        setArTestResult('No mirror/registry URL configured to test.');
+        return;
+      }
+      // Simple connectivity test — try to reach the URL
+      const resp = await fetch('/api/config/test-artifact-repo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, verify_ssl: arForm.verify_ssl }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        setArTestResult(data.message || 'Connection successful');
+      } else {
+        const data = await resp.json().catch(() => ({}));
+        setArTestResult(`Connection failed: ${data.detail || resp.statusText}`);
+      }
+    } catch (err: any) {
+      setArTestResult(`Connection test failed: ${err.message}`);
+    } finally {
+      setArTesting(false);
+    }
   }
 
   if (loading) return <p className="text-gray-500">Loading config...</p>;
@@ -499,6 +583,171 @@ export default function ConfigPage() {
                 {savingModel ? 'Saving...' : editingModel ? 'Update' : 'Add'}
               </button>
             </div>
+          </div>
+        )}
+      </div>
+
+      {/* Artifact Repository Section */}
+      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-200">
+          <h2 className="text-sm font-semibold text-gray-700">Artifact Repository</h2>
+          {!arEditing && (
+            <button
+              onClick={startEditArtifactRepo}
+              className="px-3 py-1 bg-indigo-600 text-white text-xs rounded-md hover:bg-indigo-700"
+            >
+              Edit
+            </button>
+          )}
+        </div>
+
+        {arEditing ? (
+          <div className="p-4 space-y-4">
+            {/* Enabled toggle */}
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox" id="ar_enabled"
+                checked={arForm.enabled}
+                onChange={e => setArForm(f => ({ ...f, enabled: e.target.checked }))}
+                className="h-4 w-4 text-indigo-600 border-gray-300 rounded"
+              />
+              <label htmlFor="ar_enabled" className="text-sm text-gray-700 font-medium">Enabled</label>
+            </div>
+
+            {/* Maven / Gradle */}
+            <div>
+              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Maven / Gradle</h4>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2">
+                  <label className="block text-xs text-gray-600 mb-1">Mirror URL</label>
+                  <input value={arForm.maven_mirror_url} onChange={e => setArForm(f => ({ ...f, maven_mirror_url: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-md text-sm" placeholder="https://artifactory.corp.example.com/maven-virtual" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Mirror ID</label>
+                  <input value={arForm.maven_mirror_id} onChange={e => setArForm(f => ({ ...f, maven_mirror_id: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-md text-sm" placeholder="enterprise" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Release URL</label>
+                  <input value={arForm.maven_release_url} onChange={e => setArForm(f => ({ ...f, maven_release_url: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-md text-sm" placeholder="(optional, if different from mirror)" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Snapshot URL</label>
+                  <input value={arForm.maven_snapshot_url} onChange={e => setArForm(f => ({ ...f, maven_snapshot_url: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-md text-sm" placeholder="(optional)" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Username</label>
+                  <input value={arForm.maven_username} onChange={e => setArForm(f => ({ ...f, maven_username: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-md text-sm" placeholder="svc-maven" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Password</label>
+                  <input type="password" value={arForm.maven_password} onChange={e => setArForm(f => ({ ...f, maven_password: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-md text-sm" placeholder="(leave empty to keep current)" />
+                </div>
+              </div>
+            </div>
+
+            {/* npm */}
+            <div>
+              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">npm</h4>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2">
+                  <label className="block text-xs text-gray-600 mb-1">Registry URL</label>
+                  <input value={arForm.npm_registry_url} onChange={e => setArForm(f => ({ ...f, npm_registry_url: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-md text-sm" placeholder="https://artifactory.corp.example.com/api/npm/npm-virtual" />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-xs text-gray-600 mb-1">Auth Token</label>
+                  <input type="password" value={arForm.npm_auth_token} onChange={e => setArForm(f => ({ ...f, npm_auth_token: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-md text-sm" placeholder="(leave empty to keep current)" />
+                </div>
+              </div>
+            </div>
+
+            {/* Advanced */}
+            <div>
+              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Advanced</h4>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2">
+                  <label className="block text-xs text-gray-600 mb-1">Gradle Plugin URL</label>
+                  <input value={arForm.gradle_plugin_url} onChange={e => setArForm(f => ({ ...f, gradle_plugin_url: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-md text-sm" placeholder="(optional, if different from Maven mirror)" />
+                </div>
+                <div className="flex items-center gap-2">
+                  <input type="checkbox" id="ar_verify_ssl" checked={arForm.verify_ssl}
+                    onChange={e => setArForm(f => ({ ...f, verify_ssl: e.target.checked }))}
+                    className="h-4 w-4 text-indigo-600 border-gray-300 rounded" />
+                  <label htmlFor="ar_verify_ssl" className="text-xs text-gray-600">Verify SSL</label>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">CA Cert Path</label>
+                  <input value={arForm.ca_cert_path} onChange={e => setArForm(f => ({ ...f, ca_cert_path: e.target.value }))}
+                    className="w-full px-3 py-2 border rounded-md text-sm" placeholder="/path/to/ca-bundle.crt" />
+                </div>
+              </div>
+            </div>
+
+            {/* Test result */}
+            {arTestResult && (
+              <div className={`text-xs px-3 py-2 rounded-md ${
+                arTestResult.includes('successful') ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-red-50 text-red-700 border border-red-200'
+              }`}>
+                {arTestResult}
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex justify-end gap-2">
+              <button onClick={() => { setArEditing(false); setArTestResult(null); }}
+                className="px-3 py-1.5 text-xs border border-gray-300 rounded-md text-gray-600 hover:bg-gray-50">Cancel</button>
+              <button onClick={handleTestArtifactRepo} disabled={arTesting}
+                className="px-3 py-1.5 text-xs border border-teal-300 text-teal-700 rounded-md hover:bg-teal-50 disabled:opacity-50">
+                {arTesting ? 'Testing...' : 'Test Connection'}
+              </button>
+              <button onClick={handleSaveArtifactRepo} disabled={arSaving}
+                className="px-3 py-1.5 text-xs bg-indigo-600 text-white rounded-md hover:bg-indigo-700 disabled:opacity-50">
+                {arSaving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="px-4 py-3">
+            {configData.artifact_repository ? (
+              <dl className="space-y-1">
+                <div className="flex">
+                  <dt className="text-sm text-gray-500 w-48 flex-shrink-0">enabled</dt>
+                  <dd className="text-sm text-gray-900 font-mono">{String(configData.artifact_repository.enabled || false)}</dd>
+                </div>
+                {configData.artifact_repository.maven_mirror_url && (
+                  <div className="flex">
+                    <dt className="text-sm text-gray-500 w-48 flex-shrink-0">maven_mirror_url</dt>
+                    <dd className="text-sm text-gray-900 font-mono truncate">{configData.artifact_repository.maven_mirror_url}</dd>
+                  </div>
+                )}
+                {configData.artifact_repository.npm_registry_url && (
+                  <div className="flex">
+                    <dt className="text-sm text-gray-500 w-48 flex-shrink-0">npm_registry_url</dt>
+                    <dd className="text-sm text-gray-900 font-mono truncate">{configData.artifact_repository.npm_registry_url}</dd>
+                  </div>
+                )}
+                {configData.artifact_repository.maven_username && (
+                  <div className="flex">
+                    <dt className="text-sm text-gray-500 w-48 flex-shrink-0">maven_username</dt>
+                    <dd className="text-sm text-gray-900 font-mono">{configData.artifact_repository.maven_username}</dd>
+                  </div>
+                )}
+                <div className="flex">
+                  <dt className="text-sm text-gray-500 w-48 flex-shrink-0">verify_ssl</dt>
+                  <dd className="text-sm text-gray-900 font-mono">{String(configData.artifact_repository.verify_ssl !== false)}</dd>
+                </div>
+              </dl>
+            ) : (
+              <p className="text-sm text-gray-400">Not configured. Click Edit to set up an enterprise artifact repository.</p>
+            )}
           </div>
         )}
       </div>

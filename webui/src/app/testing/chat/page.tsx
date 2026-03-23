@@ -1122,51 +1122,66 @@ export default function ChatPage() {
                     )}
                     {/* Explore Deeper — shown on partial results that can be explored further */}
                     {msg.role === 'assistant' && msg.canExploreDeeper && msg.sessionId && (
-                      <div className="mt-2 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 flex items-center justify-between gap-3">
-                        <p className="text-xs text-amber-800">
-                          Partial results — can dig deeper for a more complete answer.
-                        </p>
-                        <button
-                          onClick={async () => {
-                            try {
-                              setSending(true);
-                              // Mark the old partial message as no longer explorable
-                              // and clear its partial flag so dedup won't block the resumed result
-                              setMessages(prev => prev.map(m =>
-                                m.id === msg.id
-                                  ? { ...m, canExploreDeeper: false, partial: false }
-                                  : m
-                              ));
-                              setActivityLog([{
-                                timestamp: new Date().toISOString(),
-                                type: 'status',
-                                detail: 'Resuming from checkpoint...',
-                              }]);
-                              const s = await sessions.resume(msg.sessionId!);
-                              setCurrentSession(s);
-                              // Force WS reconnect: clear first so React sees a state change
-                              // even when resuming the same session ID
-                              wsClearMessages();
-                              setWsSessionId(null);
-                              setTimeout(() => setWsSessionId(s.id), 50);
-                              startPolling(s.id);
-                            } catch (err: any) {
-                              setSending(false);
-                              setMessages(prev => [...prev, {
-                                id: `error-${Date.now()}`,
-                                role: 'assistant',
-                                content: `Resume failed: ${err.message}`,
-                                mode,
-                                status: 'failed',
-                                timestamp: new Date().toISOString(),
-                              }]);
-                            }
-                          }}
-                          disabled={sending}
-                          className="shrink-0 px-3 py-1.5 bg-amber-600 text-white rounded-md text-xs font-medium hover:bg-amber-700 disabled:opacity-50"
-                        >
-                          {sending ? 'Exploring...' : 'Explore Deeper'}
-                        </button>
+                      <div className="mt-2 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-xs text-amber-800">
+                            Partial results — can dig deeper for a more complete answer.
+                          </p>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <label className="text-[10px] text-amber-700 whitespace-nowrap">Extra turns:</label>
+                            <input
+                              type="number"
+                              min="0"
+                              max="200"
+                              defaultValue={20}
+                              id={`extra-turns-${msg.id}`}
+                              className="w-16 px-1.5 py-1 text-xs border border-amber-300 rounded bg-white text-amber-900 focus:ring-amber-500 focus:border-amber-500"
+                            />
+                            <button
+                              onClick={async () => {
+                                try {
+                                  setSending(true);
+                                  const turnsInput = document.getElementById(`extra-turns-${msg.id}`) as HTMLInputElement;
+                                  const extraTurns = parseInt(turnsInput?.value || '20', 10);
+                                  // Mark the old partial message as no longer explorable
+                                  // and clear its partial flag so dedup won't block the resumed result
+                                  setMessages(prev => prev.map(m =>
+                                    m.id === msg.id
+                                      ? { ...m, canExploreDeeper: false, partial: false }
+                                      : m
+                                  ));
+                                  setActivityLog([{
+                                    timestamp: new Date().toISOString(),
+                                    type: 'status',
+                                    detail: `Resuming from checkpoint with ${extraTurns} extra turns...`,
+                                  }]);
+                                  const s = await sessions.resume(msg.sessionId!, extraTurns > 0 ? extraTurns : undefined);
+                                  setCurrentSession(s);
+                                  // Force WS reconnect: clear first so React sees a state change
+                                  // even when resuming the same session ID
+                                  wsClearMessages();
+                                  setWsSessionId(null);
+                                  setTimeout(() => setWsSessionId(s.id), 50);
+                                  startPolling(s.id);
+                                } catch (err: any) {
+                                  setSending(false);
+                                  setMessages(prev => [...prev, {
+                                    id: `error-${Date.now()}`,
+                                    role: 'assistant',
+                                    content: `Resume failed: ${err.message}`,
+                                    mode,
+                                    status: 'failed',
+                                    timestamp: new Date().toISOString(),
+                                  }]);
+                                }
+                              }}
+                              disabled={sending}
+                              className="shrink-0 px-3 py-1.5 bg-amber-600 text-white rounded-md text-xs font-medium hover:bg-amber-700 disabled:opacity-50"
+                            >
+                              {sending ? 'Exploring...' : 'Explore Deeper'}
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     )}
                   </div>

@@ -26,6 +26,13 @@ async def get_config():
             if gh.get("auth_token"):
                 gh["auth_token"] = "***"
             safe_config["github_config"] = gh
+        if "artifact_repository" in safe_config:
+            ar = dict(safe_config["artifact_repository"])
+            if ar.get("maven_password"):
+                ar["maven_password"] = "***"
+            if ar.get("npm_auth_token"):
+                ar["npm_auth_token"] = "***"
+            safe_config["artifact_repository"] = ar
         return ConfigResponse(config=safe_config)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Config file not found")

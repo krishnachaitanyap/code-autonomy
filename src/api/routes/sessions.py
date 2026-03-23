@@ -8,7 +8,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
-from src.api.schemas import SessionCreate, SessionListResponse, SessionResponse
+from src.api.schemas import SessionCreate, SessionListResponse, SessionResponse, SessionResumeRequest
 from src.api.websocket import session_manager
 from src.services.agent_service import AgentService
 from src.services.repo_service import RepoService
@@ -195,13 +195,18 @@ async def cancel_session(session_id: str):
 
 
 @router.post("/{session_id}/resume", response_model=SessionResponse)
-async def resume_session(session_id: str):
-    """Resume a paused/failed session from checkpoint."""
+async def resume_session(session_id: str, body: Optional[SessionResumeRequest] = None):
+    """Resume a paused/failed session from checkpoint.
+
+    Optionally pass extra_turns to extend the turn budget beyond the default max_turns.
+    """
     try:
         from src.services.config_service import ConfigService
         config = ConfigService().load_config()
     except Exception:
         raise HTTPException(status_code=500, detail="Could not load config")
+
+    extra_turns = body.extra_turns if body else 0
 
     # Mark session as running before dispatching to background thread
     from src.data.database import get_session as get_db_session
@@ -215,7 +220,7 @@ async def resume_session(session_id: str):
 
     # Run resume in background thread so we don't block the event loop
     def _run():
-        session_service.resume_session(session_id, config)
+        session_service.resume_session(session_id, config, extra_turns=extra_turns)
 
     loop = asyncio.get_running_loop()
     loop.run_in_executor(_executor, _run)
