@@ -45,6 +45,7 @@ export default function RepoDetailPage() {
   const [claudeMdSaving, setClaudeMdSaving] = useState(false);
   const [claudeMdSaved, setClaudeMdSaved] = useState(false);
   const [claudeMdGenerating, setClaudeMdGenerating] = useState(false);
+  const [skillsPreview, setSkillsPreview] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -278,6 +279,22 @@ export default function RepoDetailPage() {
             {saved && (
               <span className="text-sm text-green-600 font-medium">Saved</span>
             )}
+            {skills && (
+              <button
+                onClick={() => {
+                  const blob = new Blob([skills], { type: 'text/markdown' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = 'SKILLS.md';
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }}
+                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 transition-colors"
+              >
+                Download
+              </button>
+            )}
             <button
               onClick={handleGenerateSkills}
               disabled={generating || skillsLoading}
@@ -294,14 +311,61 @@ export default function RepoDetailPage() {
             </button>
           </div>
         </div>
-        <textarea
-          value={skills}
-          onChange={(e) => setSkills(e.target.value)}
-          rows={16}
-          placeholder="# SKILLS.md&#10;&#10;Describe repo conventions, domain knowledge, testing patterns, etc."
-          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm font-mono focus:ring-indigo-500 focus:border-indigo-500 resize-y"
-          disabled={skillsLoading}
-        />
+        {/* Edit / Preview toggle */}
+        <div className="flex items-center gap-1 mb-2 border-b border-gray-200">
+          <button
+            onClick={() => setSkillsPreview(false)}
+            className={`px-3 py-1.5 text-xs font-medium rounded-t-md transition-colors ${
+              !skillsPreview ? 'bg-white border border-b-white border-gray-200 text-gray-900 -mb-px' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            Edit
+          </button>
+          <button
+            onClick={() => setSkillsPreview(true)}
+            disabled={!skills}
+            className={`px-3 py-1.5 text-xs font-medium rounded-t-md transition-colors disabled:opacity-40 ${
+              skillsPreview ? 'bg-white border border-b-white border-gray-200 text-gray-900 -mb-px' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            Preview
+          </button>
+        </div>
+        {skillsPreview ? (
+          <div
+            className="w-full border border-gray-300 rounded-md px-4 py-3 text-sm prose prose-sm max-w-none overflow-auto bg-gray-50/50"
+            style={{ minHeight: '16rem', maxHeight: '40rem' }}
+            dangerouslySetInnerHTML={{
+              __html: skills
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/^### (.+)$/gm, '<h3 class="text-sm font-semibold text-gray-800 mt-4 mb-1">$1</h3>')
+                .replace(/^## (.+)$/gm, '<h2 class="text-base font-bold text-gray-900 mt-5 mb-2 pb-1 border-b border-gray-200">$1</h2>')
+                .replace(/^# (.+)$/gm, '<h1 class="text-lg font-bold text-gray-900 mt-4 mb-3">$1</h1>')
+                .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre class="bg-gray-800 text-gray-100 rounded-md px-3 py-2 text-xs overflow-x-auto my-2"><code>$2</code></pre>')
+                .replace(/`([^`]+)`/g, '<code class="bg-gray-100 text-pink-700 px-1 py-0.5 rounded text-xs">$1</code>')
+                .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+                .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+                .replace(/^\|(.+)\|$/gm, (match) => {
+                  const cells = match.split('|').filter(c => c.trim()).map(c => `<td class="px-2 py-1 border border-gray-200 text-xs">${c.trim()}</td>`);
+                  return `<tr>${cells.join('')}</tr>`;
+                })
+                .replace(/(<tr>.*<\/tr>\n?)+/g, '<table class="w-full border-collapse my-2">$&</table>')
+                .replace(/^- (.+)$/gm, '<li class="ml-4 text-sm">$1</li>')
+                .replace(/(<li.*<\/li>\n?)+/g, '<ul class="list-disc my-1">$&</ul>')
+                .replace(/\n{2,}/g, '<br/><br/>')
+                .replace(/\n/g, '<br/>')
+            }}
+          />
+        ) : (
+          <textarea
+            value={skills}
+            onChange={(e) => setSkills(e.target.value)}
+            rows={16}
+            placeholder="# SKILLS.md&#10;&#10;Describe repo conventions, domain knowledge, testing patterns, etc."
+            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm font-mono focus:ring-indigo-500 focus:border-indigo-500 resize-y"
+            disabled={skillsLoading}
+          />
+        )}
       </div>
 
       {/* CLAUDE.md Editor */}
