@@ -1,21 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  ReactFlow,
-  Background,
-  Controls,
-  MiniMap,
-  Panel,
-  useNodesState,
-  useEdgesState,
-  type Node,
-  type Edge,
-  type NodeMouseHandler,
-  MarkerType,
-} from '@xyflow/react';
-import '@xyflow/react/dist/style.css';
-import dagre from 'dagre';
+import { useMemo, useState, useCallback } from 'react';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,16 +30,14 @@ interface ArchitectureGraphProps {
   repoId: string;
   symbols: Symbol[];
   fileTree?: FileTreeEntry[];
-  dependencies?: any;
 }
 
 // ---------------------------------------------------------------------------
-// Layer detection — classify files into architectural layers
+// Layer detection
 // ---------------------------------------------------------------------------
 
 const LAYER_RULES: { pattern: RegExp; layer: string }[] = [
   { pattern: /\/(controller|resource|endpoint|rest|api|handler|route)\//i, layer: 'API' },
-  { pattern: /\/(controller|Controller|Resource)\./i, layer: 'API' },
   { pattern: /Controller\.(java|ts|py|go)$/i, layer: 'API' },
   { pattern: /Resource\.(java|ts|py)$/i, layer: 'API' },
   { pattern: /\/(service|usecase|business|domain)\//i, layer: 'Service' },
@@ -69,24 +52,23 @@ const LAYER_RULES: { pattern: RegExp; layer: string }[] = [
   { pattern: /\/(test|spec|__test__|__spec__|e2e)\//i, layer: 'Test' },
   { pattern: /Test\.(java|ts|py)$/i, layer: 'Test' },
   { pattern: /\.test\.(ts|js|tsx|jsx)$/i, layer: 'Test' },
-  { pattern: /\.spec\.(ts|js|tsx|jsx)$/i, layer: 'Test' },
   { pattern: /\/(util|utils|helper|helpers|common|shared|lib)\//i, layer: 'Utility' },
   { pattern: /\/(middleware|filter|interceptor|aspect)\//i, layer: 'Middleware' },
   { pattern: /\/(client|remote|proxy|feign|integration)\//i, layer: 'External' },
   { pattern: /Client\.(java|ts|py)$/i, layer: 'External' },
 ];
 
-const LAYER_COLORS: Record<string, { bg: string; border: string; text: string; minimap: string }> = {
-  'API':        { bg: '#dbeafe', border: '#3b82f6', text: '#1e40af', minimap: '#3b82f6' },
-  'Service':    { bg: '#d1fae5', border: '#10b981', text: '#065f46', minimap: '#10b981' },
-  'Data':       { bg: '#fef3c7', border: '#f59e0b', text: '#92400e', minimap: '#f59e0b' },
-  'Model':      { bg: '#ede9fe', border: '#8b5cf6', text: '#5b21b6', minimap: '#8b5cf6' },
-  'Config':     { bg: '#f3f4f6', border: '#6b7280', text: '#374151', minimap: '#6b7280' },
-  'Test':       { bg: '#fce7f3', border: '#ec4899', text: '#9d174d', minimap: '#ec4899' },
-  'Utility':    { bg: '#e0e7ff', border: '#6366f1', text: '#3730a3', minimap: '#6366f1' },
-  'Middleware': { bg: '#ffedd5', border: '#f97316', text: '#9a3412', minimap: '#f97316' },
-  'External':   { bg: '#fecdd3', border: '#ef4444', text: '#991b1b', minimap: '#ef4444' },
-  'Other':      { bg: '#f9fafb', border: '#d1d5db', text: '#6b7280', minimap: '#9ca3af' },
+const LAYER_COLORS: Record<string, { bg: string; border: string; text: string; light: string }> = {
+  'API':        { bg: '#dbeafe', border: '#3b82f6', text: '#1e40af', light: '#eff6ff' },
+  'Service':    { bg: '#d1fae5', border: '#10b981', text: '#065f46', light: '#ecfdf5' },
+  'Data':       { bg: '#fef3c7', border: '#f59e0b', text: '#92400e', light: '#fffbeb' },
+  'Model':      { bg: '#ede9fe', border: '#8b5cf6', text: '#5b21b6', light: '#f5f3ff' },
+  'Config':     { bg: '#f3f4f6', border: '#6b7280', text: '#374151', light: '#f9fafb' },
+  'Test':       { bg: '#fce7f3', border: '#ec4899', text: '#9d174d', light: '#fdf2f8' },
+  'Utility':    { bg: '#e0e7ff', border: '#6366f1', text: '#3730a3', light: '#eef2ff' },
+  'Middleware': { bg: '#ffedd5', border: '#f97316', text: '#9a3412', light: '#fff7ed' },
+  'External':   { bg: '#fecdd3', border: '#ef4444', text: '#991b1b', light: '#fef2f2' },
+  'Other':      { bg: '#f9fafb', border: '#d1d5db', text: '#6b7280', light: '#f9fafb' },
 };
 
 function detectLayer(filePath: string): string {
@@ -96,446 +78,217 @@ function detectLayer(filePath: string): string {
   return 'Other';
 }
 
-// ---------------------------------------------------------------------------
-// Graph layout with Dagre
-// ---------------------------------------------------------------------------
-
-function getLayoutedElements(
-  nodes: Node[],
-  edges: Edge[],
-  direction: 'TB' | 'LR' = 'TB',
-): { nodes: Node[]; edges: Edge[] } {
-  const g = new dagre.graphlib.Graph();
-  g.setDefaultEdgeLabel(() => ({}));
-  g.setGraph({ rankdir: direction, nodesep: 60, ranksep: 80, marginx: 30, marginy: 30 });
-
-  nodes.forEach((node) => {
-    g.setNode(node.id, { width: 220, height: 60 });
-  });
-
-  edges.forEach((edge) => {
-    g.setEdge(edge.source, edge.target);
-  });
-
-  dagre.layout(g);
-
-  const layoutedNodes = nodes.map((node) => {
-    const pos = g.node(node.id);
-    return {
-      ...node,
-      position: { x: pos.x - 110, y: pos.y - 30 },
-    };
-  });
-
-  return { nodes: layoutedNodes, edges };
+function formatSize(bytes: number): string {
+  if (bytes > 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes > 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${bytes} B`;
 }
 
 // ---------------------------------------------------------------------------
-// Build graph from symbols
+// Layer Card Component
 // ---------------------------------------------------------------------------
 
-function buildGraph(symbols: Symbol[], viewMode: 'files' | 'classes') {
-  const nodes: Node[] = [];
-  const edges: Edge[] = [];
-  const nodeIds = new Set<string>();
-
-  if (viewMode === 'files') {
-    // Group symbols by file → one node per file
-    const fileMap = new Map<string, Symbol[]>();
-    for (const sym of symbols) {
-      if (!sym.file_path) continue;
-      const existing = fileMap.get(sym.file_path) || [];
-      existing.push(sym);
-      fileMap.set(sym.file_path, existing);
-    }
-
-    for (const [filePath, syms] of Array.from(fileMap.entries())) {
-      const layer = detectLayer(filePath);
-      const colors = LAYER_COLORS[layer] || LAYER_COLORS['Other'];
-      const fileName = filePath.split('/').pop() || filePath;
-      const classCount = syms.filter(s => s.symbol_type === 'class').length;
-      const methodCount = syms.filter(s => s.symbol_type === 'method' || s.symbol_type === 'function').length;
-
-      const id = filePath;
-      nodeIds.add(id);
-      nodes.push({
-        id,
-        type: 'default',
-        position: { x: 0, y: 0 },
-        data: {
-          label: (
-            <div style={{ fontSize: 11, lineHeight: 1.3 }}>
-              <div style={{ fontWeight: 600, color: colors.text, marginBottom: 2 }}>
-                {fileName}
-              </div>
-              <div style={{ fontSize: 9, color: '#6b7280' }}>
-                {layer} · {classCount}C · {methodCount}M
-              </div>
-            </div>
-          ),
-        },
-        style: {
-          background: colors.bg,
-          border: `1.5px solid ${colors.border}`,
-          borderRadius: 8,
-          padding: '6px 10px',
-          width: 220,
-          fontSize: 11,
-        },
-      });
-    }
-
-    // Edges: file A imports from file B (inferred from parent_class references)
-    const classToFile = new Map<string, string>();
-    for (const sym of symbols) {
-      if (sym.symbol_type === 'class' && sym.file_path) {
-        classToFile.set(sym.name, sym.file_path);
-      }
-    }
-
-    for (const sym of symbols) {
-      if (sym.parent_class && sym.file_path) {
-        const targetFile = classToFile.get(sym.parent_class);
-        if (targetFile && targetFile !== sym.file_path && nodeIds.has(targetFile)) {
-          const edgeId = `${sym.file_path}->${targetFile}`;
-          if (!edges.find(e => e.id === edgeId)) {
-            edges.push({
-              id: edgeId,
-              source: sym.file_path,
-              target: targetFile,
-              animated: false,
-              style: { stroke: '#94a3b8', strokeWidth: 1.5 },
-              markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8', width: 15, height: 15 },
-            });
-          }
-        }
-      }
-    }
-  } else {
-    // Class/function view — one node per class
-    for (const sym of symbols) {
-      if (sym.symbol_type !== 'class' && sym.symbol_type !== 'interface') continue;
-      const layer = detectLayer(sym.file_path);
-      const colors = LAYER_COLORS[layer] || LAYER_COLORS['Other'];
-      const methods = symbols.filter(s => s.parent_class === sym.name && (s.symbol_type === 'method' || s.symbol_type === 'function'));
-
-      const id = sym.fqn || sym.name;
-      nodeIds.add(id);
-      nodes.push({
-        id,
-        type: 'default',
-        position: { x: 0, y: 0 },
-        data: {
-          label: (
-            <div style={{ fontSize: 11, lineHeight: 1.3 }}>
-              <div style={{ fontWeight: 600, color: colors.text }}>
-                {sym.name}
-              </div>
-              <div style={{ fontSize: 9, color: '#6b7280' }}>
-                {sym.symbol_type} · {methods.length} methods · {layer}
-              </div>
-            </div>
-          ),
-        },
-        style: {
-          background: colors.bg,
-          border: `1.5px solid ${colors.border}`,
-          borderRadius: 8,
-          padding: '6px 10px',
-          width: 220,
-          fontSize: 11,
-        },
-      });
-    }
-
-    // Edges: inheritance / parent_class relationships
-    for (const sym of symbols) {
-      if (sym.parent_class && sym.symbol_type === 'class') {
-        const sourceId = sym.fqn || sym.name;
-        const targetId = symbols.find(s => s.name === sym.parent_class)?.fqn || sym.parent_class;
-        if (nodeIds.has(sourceId) && nodeIds.has(targetId) && sourceId !== targetId) {
-          edges.push({
-            id: `${sourceId}-extends->${targetId}`,
-            source: sourceId,
-            target: targetId,
-            label: 'extends',
-            animated: false,
-            style: { stroke: '#8b5cf6', strokeWidth: 1.5, strokeDasharray: '5 3' },
-            markerEnd: { type: MarkerType.ArrowClosed, color: '#8b5cf6', width: 15, height: 15 },
-          });
-        }
-      }
-    }
-  }
-
-  // Apply Dagre layout
-  if (nodes.length > 0) {
-    return getLayoutedElements(nodes, edges, 'TB');
-  }
-  return { nodes, edges };
-}
-
-// ---------------------------------------------------------------------------
-// Build graph from file tree (fallback when no symbols)
-// ---------------------------------------------------------------------------
-
-function buildGraphFromFileTree(files: FileTreeEntry[], groupBy: 'directory' | 'layer') {
-  const nodes: Node[] = [];
-  const edges: Edge[] = [];
-
-  if (groupBy === 'directory') {
-    // Group files by directory → one node per directory
-    const dirMap = new Map<string, FileTreeEntry[]>();
-    for (const f of files) {
-      const dir = f.directory || '(root)';
-      const existing = dirMap.get(dir) || [];
-      existing.push(f);
-      dirMap.set(dir, existing);
-    }
-
-    for (const [dir, dirFiles] of Array.from(dirMap.entries())) {
-      const layer = detectLayer(dir + '/');
-      const colors = LAYER_COLORS[layer] || LAYER_COLORS['Other'];
-      const sourceCount = dirFiles.filter(f => f.file_type === 'source').length;
-      const configCount = dirFiles.filter(f => f.file_type === 'config').length;
-
-      nodes.push({
-        id: dir,
-        type: 'default',
-        position: { x: 0, y: 0 },
-        data: {
-          label: (
-            <div style={{ fontSize: 11, lineHeight: 1.3 }}>
-              <div style={{ fontWeight: 600, color: colors.text, marginBottom: 2 }}>
-                {dir.split('/').pop() || dir}
-              </div>
-              <div style={{ fontSize: 9, color: '#6b7280' }}>
-                {layer} · {dirFiles.length} files ({sourceCount} src, {configCount} cfg)
-              </div>
-            </div>
-          ),
-        },
-        style: {
-          background: colors.bg,
-          border: `1.5px solid ${colors.border}`,
-          borderRadius: 8,
-          padding: '6px 10px',
-          width: 220,
-        },
-      });
-    }
-
-    // Edges: parent directory → child directory
-    const dirNames = Array.from(dirMap.keys());
-    const dirNameSet = new Set(dirNames);
-    for (const dir of dirNames) {
-      const parts = dir.split('/');
-      if (parts.length > 1) {
-        const parent = parts.slice(0, -1).join('/');
-        if (dirNameSet.has(parent)) {
-          edges.push({
-            id: `${parent}->${dir}`,
-            source: parent,
-            target: dir,
-            style: { stroke: '#d1d5db', strokeWidth: 1.5 },
-            markerEnd: { type: MarkerType.ArrowClosed, color: '#d1d5db', width: 12, height: 12 },
-          });
-        }
-      }
-    }
-  } else {
-    // Group by architectural layer
-    const layerMap = new Map<string, FileTreeEntry[]>();
-    for (const f of files) {
-      if (f.file_type !== 'source') continue;
-      const layer = detectLayer(f.path);
-      const existing = layerMap.get(layer) || [];
-      existing.push(f);
-      layerMap.set(layer, existing);
-    }
-
-    for (const [layer, layerFiles] of Array.from(layerMap.entries())) {
-      const colors = LAYER_COLORS[layer] || LAYER_COLORS['Other'];
-      const dirs = new Set(layerFiles.map(f => f.directory));
-
-      nodes.push({
-        id: layer,
-        type: 'default',
-        position: { x: 0, y: 0 },
-        data: {
-          label: (
-            <div style={{ fontSize: 12, lineHeight: 1.4 }}>
-              <div style={{ fontWeight: 700, color: colors.text, marginBottom: 3, fontSize: 13 }}>
-                {layer}
-              </div>
-              <div style={{ fontSize: 10, color: '#6b7280' }}>
-                {layerFiles.length} files · {dirs.size} dirs
-              </div>
-              <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 2, maxHeight: 40, overflow: 'hidden' }}>
-                {layerFiles.slice(0, 4).map(f => f.name).join(', ')}
-                {layerFiles.length > 4 ? `, +${layerFiles.length - 4}` : ''}
-              </div>
-            </div>
-          ),
-        },
-        style: {
-          background: colors.bg,
-          border: `2px solid ${colors.border}`,
-          borderRadius: 12,
-          padding: '10px 14px',
-          width: 240,
-        },
-      });
-    }
-
-    // Standard architectural edges
-    const layerOrder = ['API', 'Middleware', 'Service', 'Data', 'External'];
-    const presentLayers = layerOrder.filter(l => layerMap.has(l));
-    for (let i = 0; i < presentLayers.length - 1; i++) {
-      edges.push({
-        id: `${presentLayers[i]}->${presentLayers[i + 1]}`,
-        source: presentLayers[i],
-        target: presentLayers[i + 1],
-        style: { stroke: '#94a3b8', strokeWidth: 2 },
-        markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8', width: 15, height: 15 },
-      });
-    }
-    // Model connects to Service and Data
-    if (layerMap.has('Model')) {
-      if (layerMap.has('Service')) edges.push({
-        id: 'Service->Model', source: 'Service', target: 'Model',
-        style: { stroke: '#8b5cf6', strokeWidth: 1.5, strokeDasharray: '5 3' },
-        markerEnd: { type: MarkerType.ArrowClosed, color: '#8b5cf6', width: 12, height: 12 },
-      });
-      if (layerMap.has('Data')) edges.push({
-        id: 'Data->Model', source: 'Data', target: 'Model',
-        style: { stroke: '#8b5cf6', strokeWidth: 1.5, strokeDasharray: '5 3' },
-        markerEnd: { type: MarkerType.ArrowClosed, color: '#8b5cf6', width: 12, height: 12 },
-      });
-    }
-    // Config connects to everything
-    if (layerMap.has('Config')) {
-      for (const l of presentLayers) {
-        if (l !== 'Config') edges.push({
-          id: `Config->${l}`, source: 'Config', target: l,
-          style: { stroke: '#d1d5db', strokeWidth: 1, strokeDasharray: '3 3' },
-          markerEnd: { type: MarkerType.ArrowClosed, color: '#d1d5db', width: 10, height: 10 },
-        });
-      }
-    }
-    // Test connects to Service and API
-    if (layerMap.has('Test')) {
-      if (layerMap.has('Service')) edges.push({
-        id: 'Test->Service', source: 'Test', target: 'Service',
-        style: { stroke: '#ec4899', strokeWidth: 1, strokeDasharray: '3 3' },
-        markerEnd: { type: MarkerType.ArrowClosed, color: '#ec4899', width: 10, height: 10 },
-      });
-    }
-  }
-
-  if (nodes.length > 0) {
-    return getLayoutedElements(nodes, edges, 'TB');
-  }
-  return { nodes, edges };
-}
-
-// ---------------------------------------------------------------------------
-// Info Panel — shows details for clicked nodes (layer, directory, or file)
-// ---------------------------------------------------------------------------
-
-interface InfoPanelProps {
-  nodeId: string;
-  fileTree: FileTreeEntry[];
-  symbols: Symbol[];
-  onClose: () => void;
-  onDrillDown: (layer: string) => void;
-}
-
-function InfoPanel({ nodeId, fileTree, symbols, onClose, onDrillDown }: InfoPanelProps) {
-  // Determine what was clicked: layer name, directory, or file path
-  const layerColors = LAYER_COLORS[nodeId];
-  const isLayer = !!layerColors;
-  const isFile = fileTree.some(f => f.path === nodeId);
-  const isDir = !isLayer && !isFile && fileTree.some(f => f.directory === nodeId);
-
-  const matchingFiles = isLayer
-    ? fileTree.filter(f => detectLayer(f.path) === nodeId)
-    : isDir
-    ? fileTree.filter(f => f.directory === nodeId)
-    : isFile
-    ? fileTree.filter(f => f.path === nodeId)
-    : [];
-
-  const colors = isLayer ? layerColors : LAYER_COLORS[detectLayer(nodeId + '/')] || LAYER_COLORS['Other'];
-  const title = isLayer ? nodeId : (nodeId.split('/').pop() || nodeId);
-  const subtitle = isLayer ? `${matchingFiles.length} files` : isDir ? `Directory · ${matchingFiles.length} files` : 'File';
-
-  // Group files by subdirectory for layer view
-  const subDirs = new Map<string, FileTreeEntry[]>();
-  for (const f of matchingFiles) {
-    const dir = f.directory || '(root)';
-    const existing = subDirs.get(dir) || [];
-    existing.push(f);
-    subDirs.set(dir, existing);
-  }
-
-  const totalSize = matchingFiles.reduce((sum, f) => sum + f.size, 0);
-  const sizeLabel = totalSize > 1024 * 1024 ? `${(totalSize / 1024 / 1024).toFixed(1)} MB` : `${(totalSize / 1024).toFixed(0)} KB`;
+function LayerCard({
+  layer,
+  files,
+  isSelected,
+  onClick,
+  onDrillDown,
+}: {
+  layer: string;
+  files: FileTreeEntry[];
+  isSelected: boolean;
+  onClick: () => void;
+  onDrillDown: () => void;
+}) {
+  const colors = LAYER_COLORS[layer] || LAYER_COLORS['Other'];
+  const dirs = new Set(files.map(f => f.directory || '(root)'));
+  const totalSize = files.reduce((s, f) => s + f.size, 0);
+  const sourceFiles = files.filter(f => f.file_type === 'source');
 
   return (
-    <div className="absolute top-2 right-2 w-80 bg-white rounded-lg border border-gray-200 shadow-xl z-10 max-h-[calc(100%-16px)] overflow-y-auto">
-      <div className="sticky top-0 bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between">
-        <div>
-          <h3 className="font-semibold text-sm" style={{ color: colors.text }}>{title}</h3>
-          <p className="text-[10px] text-gray-500">{subtitle} · {sizeLabel}</p>
+    <div
+      onClick={onClick}
+      className={`rounded-xl border-2 p-4 cursor-pointer transition-all hover:shadow-lg ${
+        isSelected ? 'ring-2 ring-offset-2 shadow-lg scale-[1.02]' : 'hover:scale-[1.01]'
+      }`}
+      style={{
+        borderColor: colors.border,
+        background: isSelected ? colors.bg : colors.light,
+      }}
+    >
+      <div className="flex items-start justify-between mb-2">
+        <h3 className="text-base font-bold" style={{ color: colors.text }}>{layer}</h3>
+        <span
+          className="text-[10px] font-medium px-2 py-0.5 rounded-full"
+          style={{ background: colors.bg, color: colors.text }}
+        >
+          {files.length} files
+        </span>
+      </div>
+      <div className="text-xs text-gray-500 space-y-0.5">
+        <div>{dirs.size} directories · {formatSize(totalSize)}</div>
+        <div className="text-[10px] text-gray-400 line-clamp-1">
+          {sourceFiles.slice(0, 3).map(f => f.name).join(', ')}
+          {sourceFiles.length > 3 ? `, +${sourceFiles.length - 3}` : ''}
         </div>
-        <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
+      </div>
+      <button
+        onClick={(e) => { e.stopPropagation(); onDrillDown(); }}
+        className="mt-3 w-full text-xs font-medium py-1.5 rounded-lg transition-colors"
+        style={{ background: colors.bg, color: colors.text, border: `1px solid ${colors.border}` }}
+      >
+        Explore {layer} →
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// File List Component (drill-down view)
+// ---------------------------------------------------------------------------
+
+function FileExplorer({
+  layer,
+  files,
+  onBack,
+}: {
+  layer: string;
+  files: FileTreeEntry[];
+  onBack: () => void;
+}) {
+  const [expandedDir, setExpandedDir] = useState<string | null>(null);
+  const [sortBy, setSortBy] = useState<'name' | 'size'>('name');
+  const colors = LAYER_COLORS[layer] || LAYER_COLORS['Other'];
+
+  // Group by directory
+  const dirMap = new Map<string, FileTreeEntry[]>();
+  for (const f of files) {
+    const dir = f.directory || '(root)';
+    const existing = dirMap.get(dir) || [];
+    existing.push(f);
+    dirMap.set(dir, existing);
+  }
+
+  const sortedDirs = Array.from(dirMap.entries()).sort((a, b) => {
+    if (sortBy === 'size') return b[1].reduce((s, f) => s + f.size, 0) - a[1].reduce((s, f) => s + f.size, 0);
+    return a[0].localeCompare(b[0]);
+  });
+
+  return (
+    <div>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onBack}
+            className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+            Back
+          </button>
+          <span className="text-gray-300">|</span>
+          <h3 className="text-sm font-bold" style={{ color: colors.text }}>
+            {layer} Layer
+          </h3>
+          <span className="text-xs text-gray-400">{files.length} files in {dirMap.size} directories</span>
+        </div>
+        <div className="flex gap-1">
+          <button
+            onClick={() => setSortBy('name')}
+            className={`px-2 py-0.5 text-[10px] rounded ${sortBy === 'name' ? 'bg-gray-200 text-gray-800' : 'text-gray-500'}`}
+          >
+            Name
+          </button>
+          <button
+            onClick={() => setSortBy('size')}
+            className={`px-2 py-0.5 text-[10px] rounded ${sortBy === 'size' ? 'bg-gray-200 text-gray-800' : 'text-gray-500'}`}
+          >
+            Size
+          </button>
+        </div>
       </div>
 
-      <div className="p-3 space-y-3 text-xs">
-        {/* Drill-down button for layers */}
-        {isLayer && (
-          <button
-            onClick={() => onDrillDown(nodeId)}
-            className="w-full px-3 py-2 text-sm font-medium rounded-lg transition-colors"
-            style={{ background: colors.bg, color: colors.text, border: `1px solid ${colors.border}` }}
-          >
-            Explore {nodeId} layer →
-          </button>
-        )}
+      {/* Directory tree */}
+      <div className="space-y-1 max-h-[450px] overflow-y-auto">
+        {sortedDirs.map(([dir, dirFiles]) => {
+          const isExpanded = expandedDir === dir;
+          const dirSize = dirFiles.reduce((s, f) => s + f.size, 0);
+          const sortedFiles = [...dirFiles].sort((a, b) =>
+            sortBy === 'size' ? b.size - a.size : a.name.localeCompare(b.name)
+          );
 
-        {/* File list grouped by directory */}
-        {Array.from(subDirs.entries()).slice(0, 15).map(([dir, files]) => (
-          <div key={dir}>
-            <p className="text-[10px] font-medium text-gray-500 mb-1 flex items-center gap-1">
-              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-              </svg>
-              {dir}
-            </p>
-            <div className="space-y-0.5 ml-4">
-              {files.slice(0, 10).map((f, i) => (
-                <div key={i} className="flex items-center justify-between gap-2 py-0.5">
-                  <span className="font-mono text-gray-700 truncate">{f.name}</span>
-                  <span className="text-[9px] text-gray-400 flex-shrink-0">
-                    {f.size > 1024 ? `${(f.size / 1024).toFixed(0)}K` : `${f.size}B`}
-                  </span>
+          return (
+            <div key={dir}>
+              <button
+                onClick={() => setExpandedDir(isExpanded ? null : dir)}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-50 transition-colors text-left"
+              >
+                <svg className={`w-3.5 h-3.5 text-gray-400 transition-transform ${isExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+                <svg className="w-4 h-4 text-yellow-500" fill="currentColor" viewBox="0 0 20 20">
+                  <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                </svg>
+                <span className="text-xs font-medium text-gray-700 flex-1 truncate">{dir}</span>
+                <span className="text-[10px] text-gray-400">{dirFiles.length} files · {formatSize(dirSize)}</span>
+              </button>
+
+              {isExpanded && (
+                <div className="ml-10 border-l border-gray-200 pl-3 py-1 space-y-0.5">
+                  {sortedFiles.map((f, i) => {
+                    const ext = f.extension;
+                    const extColor = ext === '.java' ? 'text-red-500' : ext === '.py' ? 'text-green-500' :
+                      ext === '.ts' || ext === '.tsx' ? 'text-blue-500' : ext === '.xml' || ext === '.yml' ? 'text-purple-500' : 'text-gray-400';
+                    return (
+                      <div key={i} className="flex items-center gap-2 py-1 px-2 rounded hover:bg-gray-50 text-xs">
+                        <span className={`font-mono text-[10px] w-10 text-right ${extColor}`}>{ext}</span>
+                        <span className="text-gray-700 flex-1 truncate font-mono">{f.name}</span>
+                        <span className="text-[10px] text-gray-400">{formatSize(f.size)}</span>
+                      </div>
+                    );
+                  })}
                 </div>
-              ))}
-              {files.length > 10 && (
-                <p className="text-[9px] text-gray-400">+{files.length - 10} more</p>
               )}
             </div>
-          </div>
-        ))}
-        {subDirs.size > 15 && (
-          <p className="text-[9px] text-gray-400">+{subDirs.size - 15} more directories</p>
-        )}
+          );
+        })}
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Architecture flow arrows (SVG)
+// ---------------------------------------------------------------------------
+
+function FlowArrows({ layers }: { layers: string[] }) {
+  const order = ['API', 'Middleware', 'Service', 'Data', 'External'];
+  const present = order.filter(l => layers.includes(l));
+  if (present.length < 2) return null;
+
+  return (
+    <div className="flex items-center justify-center gap-1 py-3">
+      {present.map((layer, i) => {
+        const colors = LAYER_COLORS[layer] || LAYER_COLORS['Other'];
+        return (
+          <div key={layer} className="flex items-center gap-1">
+            <span
+              className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+              style={{ background: colors.bg, color: colors.text, border: `1px solid ${colors.border}` }}
+            >
+              {layer}
+            </span>
+            {i < present.length - 1 && (
+              <svg className="w-5 h-3 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 20 12">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M1 6h16m0 0l-4-4m4 4l-4 4" />
+              </svg>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -544,108 +297,40 @@ function InfoPanel({ nodeId, fileTree, symbols, onClose, onDrillDown }: InfoPane
 // Main Component
 // ---------------------------------------------------------------------------
 
-export default function ArchitectureGraph({ repoId, symbols, fileTree, dependencies }: ArchitectureGraphProps) {
-  const hasSymbols = symbols.length > 0;
-  const hasFileTree = (fileTree || []).length > 0;
-
-  const [viewMode, setViewMode] = useState<'files' | 'classes' | 'directories' | 'layers'>(
-    hasSymbols ? 'files' : 'layers'
-  );
-  const [layerFilter, setLayerFilter] = useState<string | null>(null);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+export default function ArchitectureGraph({ repoId, symbols, fileTree }: ArchitectureGraphProps) {
+  const files = fileTree || [];
+  const [selectedLayer, setSelectedLayer] = useState<string | null>(null);
   const [drillLayer, setDrillLayer] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [breadcrumb, setBreadcrumb] = useState<string[]>([]);
 
-  const filteredSymbols = useMemo(() => {
-    let syms = symbols;
-    if (layerFilter) {
-      syms = syms.filter(s => detectLayer(s.file_path) === layerFilter);
+  // Build layer data
+  const layerData = useMemo(() => {
+    const map = new Map<string, FileTreeEntry[]>();
+    for (const f of files) {
+      if (f.file_type !== 'source') continue;
+      const layer = detectLayer(f.path);
+      const existing = map.get(layer) || [];
+      existing.push(f);
+      map.set(layer, existing);
     }
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      syms = syms.filter(s =>
-        s.name.toLowerCase().includes(q) ||
-        s.file_path.toLowerCase().includes(q) ||
-        s.fqn.toLowerCase().includes(q)
-      );
-    }
-    return syms;
-  }, [symbols, layerFilter, searchQuery]);
+    // Sort by file count descending
+    return Array.from(map.entries()).sort((a, b) => b[1].length - a[1].length);
+  }, [files]);
 
-  const filteredFileTree = useMemo(() => {
-    let files = fileTree || [];
-    if (layerFilter) {
-      files = files.filter(f => detectLayer(f.path) === layerFilter);
-    }
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      files = files.filter(f => f.path.toLowerCase().includes(q) || f.name.toLowerCase().includes(q));
-    }
-    return files;
-  }, [fileTree, layerFilter, searchQuery]);
+  const filteredLayerData = useMemo(() => {
+    if (!searchQuery) return layerData;
+    const q = searchQuery.toLowerCase();
+    return layerData
+      .map(([layer, files]) => [layer, files.filter(f => f.name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q))] as [string, FileTreeEntry[]])
+      .filter(([, files]) => files.length > 0);
+  }, [layerData, searchQuery]);
 
-  // When drilling into a layer, filter file tree to that layer and show directories
-  const drillFilteredFileTree = useMemo(() => {
-    if (!drillLayer) return filteredFileTree;
-    return filteredFileTree.filter(f => detectLayer(f.path) === drillLayer);
-  }, [filteredFileTree, drillLayer]);
+  const allLayers = layerData.map(([l]) => l);
+  const totalFiles = files.filter(f => f.file_type === 'source').length;
 
-  const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(() => {
-    if (drillLayer) return buildGraphFromFileTree(drillFilteredFileTree, 'directory');
-    if (viewMode === 'files' && hasSymbols) return buildGraph(filteredSymbols, 'files');
-    if (viewMode === 'classes' && hasSymbols) return buildGraph(filteredSymbols, 'classes');
-    if (viewMode === 'directories') return buildGraphFromFileTree(filteredFileTree, 'directory');
-    if (viewMode === 'layers') return buildGraphFromFileTree(filteredFileTree, 'layer');
-    return buildGraphFromFileTree(filteredFileTree, 'layer');
-  }, [filteredSymbols, filteredFileTree, drillFilteredFileTree, viewMode, hasSymbols, drillLayer]);
-
-  const [nodes, setNodes, onNodesChange] = useNodesState(layoutedNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(layoutedEdges);
-
-  useEffect(() => {
-    setNodes(layoutedNodes);
-    setEdges(layoutedEdges);
-  }, [layoutedNodes, layoutedEdges, setNodes, setEdges]);
-
-  // Compute layer stats from whichever data source is available
-  const layerStats = useMemo(() => {
-    const stats = new Map<string, number>();
-    const seen = new Set<string>();
-
-    // Prefer symbols, fall back to fileTree
-    const sourceFiles = symbols.length > 0
-      ? symbols.map(s => s.file_path)
-      : (fileTree || []).map(f => f.path);
-
-    for (const fp of sourceFiles) {
-      if (!fp || seen.has(fp)) continue;
-      seen.add(fp);
-      const layer = detectLayer(fp);
-      stats.set(layer, (stats.get(layer) || 0) + 1);
-    }
-    return Array.from(stats.entries()).sort((a, b) => b[1] - a[1]);
-  }, [symbols, fileTree]);
-
-  const onNodeClick: NodeMouseHandler = useCallback((_event, node) => {
-    setSelectedNodeId(node.id);
-  }, []);
-
-  const handleDrillDown = useCallback((layer: string) => {
-    setBreadcrumb(prev => [...prev, drillLayer || 'All Layers']);
-    setDrillLayer(layer);
-    setSelectedNodeId(null);
-  }, [drillLayer]);
-
-  const handleBreadcrumbBack = useCallback(() => {
-    setDrillLayer(null);
-    setBreadcrumb([]);
-    setSelectedNodeId(null);
-  }, []);
-
-  if (symbols.length === 0 && (fileTree || []).length === 0) {
+  if (files.length === 0) {
     return (
-      <div className="flex items-center justify-center h-64 text-gray-400">
+      <div className="flex items-center justify-center h-48 text-gray-400">
         <div className="text-center">
           <p className="text-sm">No files found.</p>
           <p className="text-xs mt-1">Make sure the repository has a valid local path.</p>
@@ -654,160 +339,98 @@ export default function ArchitectureGraph({ repoId, symbols, fileTree, dependenc
     );
   }
 
+  // Drill-down view
+  if (drillLayer) {
+    const drillFiles = layerData.find(([l]) => l === drillLayer)?.[1] || [];
+    const filtered = searchQuery
+      ? drillFiles.filter(f => f.name.toLowerCase().includes(searchQuery.toLowerCase()) || f.path.toLowerCase().includes(searchQuery.toLowerCase()))
+      : drillFiles;
+
+    return (
+      <div>
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Search files..."
+          className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm mb-4 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
+        />
+        <FileExplorer
+          layer={drillLayer}
+          files={filtered}
+          onBack={() => { setDrillLayer(null); setSearchQuery(''); }}
+        />
+      </div>
+    );
+  }
+
+  // Layer overview
   return (
-    <div className="relative" style={{ height: 600 }}>
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        onNodeClick={onNodeClick}
-        fitView
-        fitViewOptions={{ padding: 0.2 }}
-        nodesDraggable={true}
-        nodesConnectable={false}
-        minZoom={0.1}
-        maxZoom={3}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background gap={20} size={1} color="#f1f5f9" />
-        <Controls position="bottom-left" />
-        <MiniMap
-          nodeColor={(node) => {
-            // Extract layer from node style border color
-            for (const [, colors] of Object.entries(LAYER_COLORS)) {
-              if (node.style?.border?.toString().includes(colors.border)) return colors.minimap;
-            }
-            return '#9ca3af';
-          }}
-          maskColor="rgba(255,255,255,0.7)"
-          position="bottom-right"
+    <div>
+      {/* Search + stats */}
+      <div className="flex items-center gap-4 mb-4">
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Search files, classes..."
+          className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-sm focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
         />
+        <span className="text-xs text-gray-400 flex-shrink-0">
+          {totalFiles} source files · {allLayers.length} layers
+        </span>
+      </div>
 
-        {/* Controls panel */}
-        <Panel position="top-left">
-          <div className="bg-white/95 backdrop-blur rounded-lg border border-gray-200 shadow-sm p-3 space-y-3" style={{ maxWidth: 260 }}>
-            {/* Search */}
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search files, classes..."
-              className="w-full px-2.5 py-1.5 border border-gray-200 rounded-md text-xs focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500"
-            />
+      {/* Architectural flow */}
+      <FlowArrows layers={allLayers} />
 
-            {/* View mode toggle */}
-            <div className="flex gap-1 flex-wrap">
-              <button
-                onClick={() => setViewMode('layers')}
-                className={`px-2 py-1 text-[10px] font-medium rounded transition-colors ${
-                  viewMode === 'layers' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'
-                }`}
-              >
-                Layers
-              </button>
-              <button
-                onClick={() => setViewMode('directories')}
-                className={`px-2 py-1 text-[10px] font-medium rounded transition-colors ${
-                  viewMode === 'directories' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'
-                }`}
-              >
-                Directories
-              </button>
-              {hasSymbols && (
-                <>
-                  <button
-                    onClick={() => setViewMode('files')}
-                    className={`px-2 py-1 text-[10px] font-medium rounded transition-colors ${
-                      viewMode === 'files' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'
-                    }`}
-                  >
-                    Files
-                  </button>
-                  <button
-                    onClick={() => setViewMode('classes')}
-                    className={`px-2 py-1 text-[10px] font-medium rounded transition-colors ${
-                      viewMode === 'classes' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'
-                    }`}
-                  >
-                    Classes
-                  </button>
-                </>
-              )}
-            </div>
+      {/* Layer grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
+        {filteredLayerData.map(([layer, layerFiles]) => (
+          <LayerCard
+            key={layer}
+            layer={layer}
+            files={layerFiles}
+            isSelected={selectedLayer === layer}
+            onClick={() => setSelectedLayer(selectedLayer === layer ? null : layer)}
+            onDrillDown={() => { setDrillLayer(layer); setSearchQuery(''); }}
+          />
+        ))}
+      </div>
 
-            {/* Layer legend + filter */}
-            <div>
-              <p className="text-[10px] font-medium text-gray-500 mb-1.5">Layers (click to filter)</p>
-              <div className="flex flex-wrap gap-1">
-                {layerStats.map(([layer, count]) => {
-                  const colors = LAYER_COLORS[layer] || LAYER_COLORS['Other'];
-                  const isActive = layerFilter === layer;
-                  return (
-                    <button
-                      key={layer}
-                      onClick={() => setLayerFilter(isActive ? null : layer)}
-                      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium transition-colors ${
-                        isActive
-                          ? 'ring-2 ring-offset-1'
-                          : 'opacity-80 hover:opacity-100'
-                      }`}
-                      style={{
-                        background: colors.bg,
-                        color: colors.text,
-                        borderColor: colors.border,
-                        ...(isActive ? { ringColor: colors.border } : {}),
-                      }}
-                    >
-                      <span className="w-2 h-2 rounded-full" style={{ background: colors.border }} />
-                      {layer} ({count})
-                    </button>
-                  );
-                })}
-                {layerFilter && (
-                  <button
-                    onClick={() => setLayerFilter(null)}
-                    className="text-[9px] text-gray-400 hover:text-gray-600 ml-1"
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Stats */}
-            <div className="text-[10px] text-gray-400">
-              {nodes.length} nodes · {edges.length} edges
-            </div>
+      {/* Selected layer detail */}
+      {selectedLayer && (
+        <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h4 className="text-sm font-semibold text-gray-700">
+              {selectedLayer} — Top Files
+            </h4>
+            <button
+              onClick={() => setDrillLayer(selectedLayer)}
+              className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+            >
+              See all →
+            </button>
           </div>
-        </Panel>
-      </ReactFlow>
-
-      {/* Breadcrumb for drill-down navigation */}
-      {drillLayer && (
-        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-10 bg-white/95 backdrop-blur rounded-lg border border-gray-200 shadow-sm px-3 py-1.5 flex items-center gap-2 text-xs">
-          <button onClick={handleBreadcrumbBack} className="text-indigo-600 hover:text-indigo-800 font-medium">
-            All Layers
-          </button>
-          <span className="text-gray-300">/</span>
-          <span className="font-medium" style={{ color: (LAYER_COLORS[drillLayer] || LAYER_COLORS['Other']).text }}>
-            {drillLayer}
-          </span>
-          <button onClick={handleBreadcrumbBack} className="ml-2 text-gray-400 hover:text-gray-600 text-[10px]">
-            ← Back
-          </button>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+            {(layerData.find(([l]) => l === selectedLayer)?.[1] || [])
+              .sort((a, b) => b.size - a.size)
+              .slice(0, 9)
+              .map((f, i) => {
+                const colors = LAYER_COLORS[selectedLayer] || LAYER_COLORS['Other'];
+                return (
+                  <div
+                    key={i}
+                    className="flex items-center gap-2 px-3 py-2 bg-white rounded-lg border border-gray-100 text-xs"
+                  >
+                    <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: colors.border }} />
+                    <span className="font-mono text-gray-700 truncate flex-1">{f.name}</span>
+                    <span className="text-[10px] text-gray-400">{formatSize(f.size)}</span>
+                  </div>
+                );
+              })}
+          </div>
         </div>
-      )}
-
-      {/* Info panel */}
-      {selectedNodeId && (
-        <InfoPanel
-          nodeId={selectedNodeId}
-          fileTree={fileTree || []}
-          symbols={symbols}
-          onClose={() => setSelectedNodeId(null)}
-          onDrillDown={handleDrillDown}
-        />
       )}
     </div>
   );
