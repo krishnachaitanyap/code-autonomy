@@ -32,9 +32,19 @@ interface Symbol {
   parent_class: string;
 }
 
+interface FileTreeEntry {
+  path: string;
+  name: string;
+  directory: string;
+  extension: string;
+  file_type: string;
+  size: number;
+}
+
 interface ArchitectureGraphProps {
   repoId: string;
   symbols: Symbol[];
+  fileTree?: FileTreeEntry[];
   dependencies?: any;
 }
 
@@ -266,6 +276,170 @@ function buildGraph(symbols: Symbol[], viewMode: 'files' | 'classes') {
 }
 
 // ---------------------------------------------------------------------------
+// Build graph from file tree (fallback when no symbols)
+// ---------------------------------------------------------------------------
+
+function buildGraphFromFileTree(files: FileTreeEntry[], groupBy: 'directory' | 'layer') {
+  const nodes: Node[] = [];
+  const edges: Edge[] = [];
+
+  if (groupBy === 'directory') {
+    // Group files by directory → one node per directory
+    const dirMap = new Map<string, FileTreeEntry[]>();
+    for (const f of files) {
+      const dir = f.directory || '(root)';
+      const existing = dirMap.get(dir) || [];
+      existing.push(f);
+      dirMap.set(dir, existing);
+    }
+
+    for (const [dir, dirFiles] of Array.from(dirMap.entries())) {
+      const layer = detectLayer(dir + '/');
+      const colors = LAYER_COLORS[layer] || LAYER_COLORS['Other'];
+      const sourceCount = dirFiles.filter(f => f.file_type === 'source').length;
+      const configCount = dirFiles.filter(f => f.file_type === 'config').length;
+
+      nodes.push({
+        id: dir,
+        type: 'default',
+        position: { x: 0, y: 0 },
+        data: {
+          label: (
+            <div style={{ fontSize: 11, lineHeight: 1.3 }}>
+              <div style={{ fontWeight: 600, color: colors.text, marginBottom: 2 }}>
+                {dir.split('/').pop() || dir}
+              </div>
+              <div style={{ fontSize: 9, color: '#6b7280' }}>
+                {layer} · {dirFiles.length} files ({sourceCount} src, {configCount} cfg)
+              </div>
+            </div>
+          ),
+        },
+        style: {
+          background: colors.bg,
+          border: `1.5px solid ${colors.border}`,
+          borderRadius: 8,
+          padding: '6px 10px',
+          width: 220,
+        },
+      });
+    }
+
+    // Edges: parent directory → child directory
+    const dirNames = Array.from(dirMap.keys());
+    const dirNameSet = new Set(dirNames);
+    for (const dir of dirNames) {
+      const parts = dir.split('/');
+      if (parts.length > 1) {
+        const parent = parts.slice(0, -1).join('/');
+        if (dirNameSet.has(parent)) {
+          edges.push({
+            id: `${parent}->${dir}`,
+            source: parent,
+            target: dir,
+            style: { stroke: '#d1d5db', strokeWidth: 1.5 },
+            markerEnd: { type: MarkerType.ArrowClosed, color: '#d1d5db', width: 12, height: 12 },
+          });
+        }
+      }
+    }
+  } else {
+    // Group by architectural layer
+    const layerMap = new Map<string, FileTreeEntry[]>();
+    for (const f of files) {
+      if (f.file_type !== 'source') continue;
+      const layer = detectLayer(f.path);
+      const existing = layerMap.get(layer) || [];
+      existing.push(f);
+      layerMap.set(layer, existing);
+    }
+
+    for (const [layer, layerFiles] of Array.from(layerMap.entries())) {
+      const colors = LAYER_COLORS[layer] || LAYER_COLORS['Other'];
+      const dirs = new Set(layerFiles.map(f => f.directory));
+
+      nodes.push({
+        id: layer,
+        type: 'default',
+        position: { x: 0, y: 0 },
+        data: {
+          label: (
+            <div style={{ fontSize: 12, lineHeight: 1.4 }}>
+              <div style={{ fontWeight: 700, color: colors.text, marginBottom: 3, fontSize: 13 }}>
+                {layer}
+              </div>
+              <div style={{ fontSize: 10, color: '#6b7280' }}>
+                {layerFiles.length} files · {dirs.size} dirs
+              </div>
+              <div style={{ fontSize: 9, color: '#9ca3af', marginTop: 2, maxHeight: 40, overflow: 'hidden' }}>
+                {layerFiles.slice(0, 4).map(f => f.name).join(', ')}
+                {layerFiles.length > 4 ? `, +${layerFiles.length - 4}` : ''}
+              </div>
+            </div>
+          ),
+        },
+        style: {
+          background: colors.bg,
+          border: `2px solid ${colors.border}`,
+          borderRadius: 12,
+          padding: '10px 14px',
+          width: 240,
+        },
+      });
+    }
+
+    // Standard architectural edges
+    const layerOrder = ['API', 'Middleware', 'Service', 'Data', 'External'];
+    const presentLayers = layerOrder.filter(l => layerMap.has(l));
+    for (let i = 0; i < presentLayers.length - 1; i++) {
+      edges.push({
+        id: `${presentLayers[i]}->${presentLayers[i + 1]}`,
+        source: presentLayers[i],
+        target: presentLayers[i + 1],
+        style: { stroke: '#94a3b8', strokeWidth: 2 },
+        markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8', width: 15, height: 15 },
+      });
+    }
+    // Model connects to Service and Data
+    if (layerMap.has('Model')) {
+      if (layerMap.has('Service')) edges.push({
+        id: 'Service->Model', source: 'Service', target: 'Model',
+        style: { stroke: '#8b5cf6', strokeWidth: 1.5, strokeDasharray: '5 3' },
+        markerEnd: { type: MarkerType.ArrowClosed, color: '#8b5cf6', width: 12, height: 12 },
+      });
+      if (layerMap.has('Data')) edges.push({
+        id: 'Data->Model', source: 'Data', target: 'Model',
+        style: { stroke: '#8b5cf6', strokeWidth: 1.5, strokeDasharray: '5 3' },
+        markerEnd: { type: MarkerType.ArrowClosed, color: '#8b5cf6', width: 12, height: 12 },
+      });
+    }
+    // Config connects to everything
+    if (layerMap.has('Config')) {
+      for (const l of presentLayers) {
+        if (l !== 'Config') edges.push({
+          id: `Config->${l}`, source: 'Config', target: l,
+          style: { stroke: '#d1d5db', strokeWidth: 1, strokeDasharray: '3 3' },
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#d1d5db', width: 10, height: 10 },
+        });
+      }
+    }
+    // Test connects to Service and API
+    if (layerMap.has('Test')) {
+      if (layerMap.has('Service')) edges.push({
+        id: 'Test->Service', source: 'Test', target: 'Service',
+        style: { stroke: '#ec4899', strokeWidth: 1, strokeDasharray: '3 3' },
+        markerEnd: { type: MarkerType.ArrowClosed, color: '#ec4899', width: 10, height: 10 },
+      });
+    }
+  }
+
+  if (nodes.length > 0) {
+    return getLayoutedElements(nodes, edges, 'TB');
+  }
+  return { nodes, edges };
+}
+
+// ---------------------------------------------------------------------------
 // Detail Panel
 // ---------------------------------------------------------------------------
 
@@ -349,8 +523,13 @@ function DetailPanel({ symbol, symbols, onClose }: { symbol: Symbol | null; symb
 // Main Component
 // ---------------------------------------------------------------------------
 
-export default function ArchitectureGraph({ repoId, symbols, dependencies }: ArchitectureGraphProps) {
-  const [viewMode, setViewMode] = useState<'files' | 'classes'>('files');
+export default function ArchitectureGraph({ repoId, symbols, fileTree, dependencies }: ArchitectureGraphProps) {
+  const hasSymbols = symbols.length > 0;
+  const hasFileTree = (fileTree || []).length > 0;
+
+  const [viewMode, setViewMode] = useState<'files' | 'classes' | 'directories' | 'layers'>(
+    hasSymbols ? 'files' : 'layers'
+  );
   const [layerFilter, setLayerFilter] = useState<string | null>(null);
   const [selectedSymbol, setSelectedSymbol] = useState<Symbol | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -371,10 +550,26 @@ export default function ArchitectureGraph({ repoId, symbols, dependencies }: Arc
     return syms;
   }, [symbols, layerFilter, searchQuery]);
 
-  const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(
-    () => buildGraph(filteredSymbols, viewMode),
-    [filteredSymbols, viewMode],
-  );
+  const filteredFileTree = useMemo(() => {
+    let files = fileTree || [];
+    if (layerFilter) {
+      files = files.filter(f => detectLayer(f.path) === layerFilter);
+    }
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      files = files.filter(f => f.path.toLowerCase().includes(q) || f.name.toLowerCase().includes(q));
+    }
+    return files;
+  }, [fileTree, layerFilter, searchQuery]);
+
+  const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(() => {
+    if (viewMode === 'files' && hasSymbols) return buildGraph(filteredSymbols, 'files');
+    if (viewMode === 'classes' && hasSymbols) return buildGraph(filteredSymbols, 'classes');
+    if (viewMode === 'directories') return buildGraphFromFileTree(filteredFileTree, 'directory');
+    if (viewMode === 'layers') return buildGraphFromFileTree(filteredFileTree, 'layer');
+    // Fallback to file tree
+    return buildGraphFromFileTree(filteredFileTree, 'layer');
+  }, [filteredSymbols, filteredFileTree, viewMode, hasSymbols]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(layoutedNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(layoutedEdges);
@@ -384,18 +579,24 @@ export default function ArchitectureGraph({ repoId, symbols, dependencies }: Arc
     setEdges(layoutedEdges);
   }, [layoutedNodes, layoutedEdges, setNodes, setEdges]);
 
-  // Compute layer stats
+  // Compute layer stats from whichever data source is available
   const layerStats = useMemo(() => {
     const stats = new Map<string, number>();
     const seen = new Set<string>();
-    for (const sym of symbols) {
-      if (!sym.file_path || seen.has(sym.file_path)) continue;
-      seen.add(sym.file_path);
-      const layer = detectLayer(sym.file_path);
+
+    // Prefer symbols, fall back to fileTree
+    const sourceFiles = symbols.length > 0
+      ? symbols.map(s => s.file_path)
+      : (fileTree || []).map(f => f.path);
+
+    for (const fp of sourceFiles) {
+      if (!fp || seen.has(fp)) continue;
+      seen.add(fp);
+      const layer = detectLayer(fp);
       stats.set(layer, (stats.get(layer) || 0) + 1);
     }
     return Array.from(stats.entries()).sort((a, b) => b[1] - a[1]);
-  }, [symbols]);
+  }, [symbols, fileTree]);
 
   const onNodeClick: NodeMouseHandler = useCallback((_event, node) => {
     // Find the symbol for this node
@@ -406,12 +607,12 @@ export default function ArchitectureGraph({ repoId, symbols, dependencies }: Arc
     setSelectedSymbol(sym || null);
   }, [symbols, viewMode]);
 
-  if (symbols.length === 0) {
+  if (symbols.length === 0 && (fileTree || []).length === 0) {
     return (
       <div className="flex items-center justify-center h-64 text-gray-400">
         <div className="text-center">
-          <p className="text-sm">No symbols indexed yet.</p>
-          <p className="text-xs mt-1">Run an agent session to build the code index.</p>
+          <p className="text-sm">No files found.</p>
+          <p className="text-xs mt-1">Make sure the repository has a valid local path.</p>
         </div>
       </div>
     );
@@ -460,23 +661,43 @@ export default function ArchitectureGraph({ repoId, symbols, dependencies }: Arc
             />
 
             {/* View mode toggle */}
-            <div className="flex gap-1">
+            <div className="flex gap-1 flex-wrap">
               <button
-                onClick={() => setViewMode('files')}
-                className={`flex-1 px-2 py-1 text-[10px] font-medium rounded transition-colors ${
-                  viewMode === 'files' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'
+                onClick={() => setViewMode('layers')}
+                className={`px-2 py-1 text-[10px] font-medium rounded transition-colors ${
+                  viewMode === 'layers' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'
                 }`}
               >
-                File View
+                Layers
               </button>
               <button
-                onClick={() => setViewMode('classes')}
-                className={`flex-1 px-2 py-1 text-[10px] font-medium rounded transition-colors ${
-                  viewMode === 'classes' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'
+                onClick={() => setViewMode('directories')}
+                className={`px-2 py-1 text-[10px] font-medium rounded transition-colors ${
+                  viewMode === 'directories' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'
                 }`}
               >
-                Class View
+                Directories
               </button>
+              {hasSymbols && (
+                <>
+                  <button
+                    onClick={() => setViewMode('files')}
+                    className={`px-2 py-1 text-[10px] font-medium rounded transition-colors ${
+                      viewMode === 'files' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'
+                    }`}
+                  >
+                    Files
+                  </button>
+                  <button
+                    onClick={() => setViewMode('classes')}
+                    className={`px-2 py-1 text-[10px] font-medium rounded transition-colors ${
+                      viewMode === 'classes' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-50 text-gray-600 hover:bg-gray-100'
+                    }`}
+                  >
+                    Classes
+                  </button>
+                </>
+              )}
             </div>
 
             {/* Layer legend + filter */}

@@ -599,3 +599,95 @@ async def get_repo_symbols(repo_id: str, file_path: str = ""):
         file_path=file_path or None,
     )
     return [SymbolResponse(**s) for s in symbols]
+
+
+@router.get("/{repo_id}/file-tree")
+async def get_repo_file_tree(repo_id: str, max_files: int = 500):
+    """Get the file tree for a repository — lightweight, no code index needed.
+
+    Returns a list of source files with inferred type and directory info,
+    suitable for building an architecture graph without a full code index.
+    """
+    import os
+    from pathlib import Path
+
+    repo = repo_service.get_repo(repo_id)
+    if repo is None:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    repo_path = repo.local_path
+    if not repo_path or not Path(repo_path).is_dir():
+        raise HTTPException(status_code=400, detail="Repository path not available locally")
+
+    # Source file extensions to include
+    SOURCE_EXTS = {
+        '.java', '.py', '.ts', '.tsx', '.js', '.jsx', '.go', '.rs', '.kt', '.scala',
+        '.cs', '.rb', '.php', '.swift', '.c', '.cpp', '.h', '.hpp',
+        '.xml', '.yml', '.yaml', '.json', '.properties', '.ini', '.toml',
+        '.sql', '.graphql', '.proto', '.tf', '.sh',
+        '.feature', '.md',
+    }
+
+    # Directories to skip
+    SKIP_DIRS = {
+        'node_modules', '.git', '.svn', '__pycache__', '.idea', '.vscode',
+        '.gradle', 'build', 'dist', 'target', '.next', '.nuxt',
+        'vendor', '.tox', '.mypy_cache', '.pytest_cache', 'venv', 'env',
+    }
+
+    root = Path(repo_path)
+    files = []
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune skipped directories
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith('.')]
+
+        rel_dir = os.path.relpath(dirpath, root)
+        if rel_dir == '.':
+            rel_dir = ''
+
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in SOURCE_EXTS:
+                continue
+
+            rel_path = os.path.join(rel_dir, fname) if rel_dir else fname
+            full_path = os.path.join(dirpath, fname)
+
+            # Infer file type from extension
+            if ext in {'.java', '.py', '.ts', '.tsx', '.js', '.jsx', '.go', '.rs', '.kt', '.scala', '.cs', '.rb', '.php', '.swift', '.c', '.cpp'}:
+                file_type = 'source'
+            elif ext in {'.xml', '.yml', '.yaml', '.json', '.properties', '.ini', '.toml'}:
+                file_type = 'config'
+            elif ext in {'.sql', '.graphql', '.proto'}:
+                file_type = 'schema'
+            elif ext in {'.tf', '.sh'}:
+                file_type = 'infra'
+            elif ext == '.feature':
+                file_type = 'test'
+            elif ext == '.md':
+                file_type = 'docs'
+            else:
+                file_type = 'other'
+
+            # Get file size for complexity hint
+            try:
+                size = os.path.getsize(full_path)
+            except OSError:
+                size = 0
+
+            files.append({
+                'path': rel_path.replace('\\', '/'),
+                'name': fname,
+                'directory': rel_dir.replace('\\', '/'),
+                'extension': ext,
+                'file_type': file_type,
+                'size': size,
+            })
+
+            if len(files) >= max_files:
+                break
+        if len(files) >= max_files:
+            break
+
+    return {'files': files, 'total': len(files), 'repo_path': repo_path}

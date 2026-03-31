@@ -47,7 +47,7 @@ export default function RepoDetailPage() {
   const [claudeMdSaved, setClaudeMdSaved] = useState(false);
   const [claudeMdGenerating, setClaudeMdGenerating] = useState(false);
   const [symbols, setSymbols] = useState<any[]>([]);
-  const [symbolsLoading, setSymbolsLoading] = useState(false);
+  const [fileTree, setFileTree] = useState<any[]>([]);
   const [skillsPreview, setSkillsPreview] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -55,18 +55,20 @@ export default function RepoDetailPage() {
   useEffect(() => {
     async function load() {
       try {
-        const [repoData, branchData, skillsData, claudeMdData, symbolsData] = await Promise.all([
+        const [repoData, branchData, skillsData, claudeMdData, symbolsData, fileTreeData] = await Promise.all([
           repos.get(repoId),
           repos.branches(repoId).catch(() => ({ branches: [] })),
           repos.getSkills(repoId).catch(() => ({ content: '' })),
           repos.getClaudeMd(repoId).catch(() => ({ content: '' })),
           repos.symbols(repoId).catch(() => []),
+          repos.fileTree(repoId, 500).catch(() => ({ files: [], total: 0 })),
         ]);
         setRepo(repoData);
         setBranches(branchData.branches);
         setSkills(skillsData.content);
         setClaudeMd(claudeMdData.content);
         setSymbols(Array.isArray(symbolsData) ? symbolsData : []);
+        setFileTree(fileTreeData.files || []);
       } catch (err: any) {
         setError(err.message || 'Failed to load repository');
       } finally {
@@ -268,7 +270,7 @@ export default function RepoDetailPage() {
         <p className="text-sm text-gray-500 mb-4">
           Interactive knowledge graph of the codebase — explore files, classes, and their relationships. Click nodes for details.
         </p>
-        <ArchitectureGraph repoId={repoId} symbols={symbols} />
+        <ArchitectureGraph repoId={repoId} symbols={symbols} fileTree={fileTree} />
       </div>
 
       {/* Dependency Visualizer */}
