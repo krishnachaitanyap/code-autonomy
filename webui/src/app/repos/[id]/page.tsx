@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { repos, type Repo } from '@/lib/api';
 import DependencyVisualizer from '@/components/DependencyVisualizer';
+import ArchitectureGraph from '@/components/ArchitectureGraph';
 
 function getBranchType(name: string): { label: string; color: string } {
   const n = name.toLowerCase();
@@ -45,6 +46,8 @@ export default function RepoDetailPage() {
   const [claudeMdSaving, setClaudeMdSaving] = useState(false);
   const [claudeMdSaved, setClaudeMdSaved] = useState(false);
   const [claudeMdGenerating, setClaudeMdGenerating] = useState(false);
+  const [symbols, setSymbols] = useState<any[]>([]);
+  const [symbolsLoading, setSymbolsLoading] = useState(false);
   const [skillsPreview, setSkillsPreview] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -52,16 +55,18 @@ export default function RepoDetailPage() {
   useEffect(() => {
     async function load() {
       try {
-        const [repoData, branchData, skillsData, claudeMdData] = await Promise.all([
+        const [repoData, branchData, skillsData, claudeMdData, symbolsData] = await Promise.all([
           repos.get(repoId),
           repos.branches(repoId).catch(() => ({ branches: [] })),
           repos.getSkills(repoId).catch(() => ({ content: '' })),
           repos.getClaudeMd(repoId).catch(() => ({ content: '' })),
+          repos.symbols(repoId).catch(() => []),
         ]);
         setRepo(repoData);
         setBranches(branchData.branches);
         setSkills(skillsData.content);
         setClaudeMd(claudeMdData.content);
+        setSymbols(Array.isArray(symbolsData) ? symbolsData : []);
       } catch (err: any) {
         setError(err.message || 'Failed to load repository');
       } finally {
@@ -255,6 +260,15 @@ export default function RepoDetailPage() {
             )}
           </>
         )}
+      </div>
+
+      {/* Architecture Graph */}
+      <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <h2 className="text-lg font-semibold text-gray-900 mb-2">Architecture Graph</h2>
+        <p className="text-sm text-gray-500 mb-4">
+          Interactive knowledge graph of the codebase — explore files, classes, and their relationships. Click nodes for details.
+        </p>
+        <ArchitectureGraph repoId={repoId} symbols={symbols} />
       </div>
 
       {/* Dependency Visualizer */}
