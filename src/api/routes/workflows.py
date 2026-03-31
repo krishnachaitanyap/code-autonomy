@@ -236,6 +236,53 @@ async def resume_workflow(workflow_id: str):
     return _workflow_to_response(wf)
 
 
+@router.post("/{workflow_id}/retry-step", response_model=WorkflowResponse)
+async def retry_failed_step(
+    workflow_id: str,
+    step_index: int = Query(..., description="Index of the failed step to retry"),
+    extra_turns: int = Query(30, ge=10, le=200, description="Additional turns to grant"),
+):
+    """Retry a failed workflow step with more turns (human-approved budget increase)."""
+    wf = _service.get_workflow(workflow_id)
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    subtasks = wf.subtasks or []
+    if step_index < 0 or step_index >= len(subtasks):
+        raise HTTPException(status_code=400, detail=f"Invalid step index {step_index}")
+    if subtasks[step_index].get("status") != "failed":
+        raise HTTPException(status_code=400, detail=f"Step {step_index} is not failed (status={subtasks[step_index].get('status')})")
+
+    try:
+        from src.services.config_service import ConfigService
+        config = ConfigService().load_config()
+    except Exception:
+        config = {}
+
+    # Apply config overrides from original workflow
+    wf_config = wf.config or {}
+    for section, values in (wf_config.get("config_overrides") or {}).items():
+        if section in config and isinstance(config[section], dict):
+            config[section].update(values)
+
+    # Launch retry in background
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(
+        _executor,
+        lambda: _service.retry_failed_step(workflow_id, step_index, config, extra_turns),
+    )
+
+    # Return current state
+    from src.data.database import get_session
+    from src.data.models import Workflow
+    with get_session() as db:
+        workflow = db.get(Workflow, workflow_id)
+        if workflow:
+            return _workflow_to_response(workflow)
+
+    return _workflow_to_response(wf)
+
+
 @router.post("/{workflow_id}/cancel")
 async def cancel_workflow(workflow_id: str):
     """Cancel a running or paused workflow."""

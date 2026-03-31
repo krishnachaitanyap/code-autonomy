@@ -649,6 +649,70 @@ Output ONLY a JSON array of subtask objects. No markdown, no explanation."""
         # Return fresh state
         return self.get_workflow(workflow_id)
 
+    def retry_failed_step(
+        self,
+        workflow_id: str,
+        step_index: int,
+        config: dict,
+        extra_turns: int = 30,
+        progress_callback: Optional[Callable[[dict], None]] = None,
+    ) -> Optional[Workflow]:
+        """Retry a failed workflow step with more turns (human-approved budget increase).
+
+        Resets the failed step to 'pending', increases its turn budget,
+        and resumes execution from that step.
+        """
+        with get_session() as db:
+            wf = db.get(Workflow, workflow_id)
+            if not wf:
+                return None
+            if wf.status not in ("failed", "paused", "completed"):
+                return wf
+
+            subtasks = list(wf.subtasks or [])
+            if step_index < 0 or step_index >= len(subtasks):
+                return wf
+
+            step = subtasks[step_index]
+            if step.get("status") != "failed":
+                return wf
+
+            # Reset the failed step and all subsequent steps
+            step["status"] = "pending"
+            step["error"] = None
+            step["result_summary"] = ""
+            step["started_at"] = None
+            step["completed_at"] = None
+            step["attempts"] = 1
+            step["tokens_used"] = 0
+
+            # Store the extra turns grant in the step for the executor to pick up
+            step["extra_turns"] = extra_turns
+
+            # Reset subsequent pending steps too
+            for s in subtasks[step_index + 1:]:
+                if s.get("status") in ("failed", "skipped"):
+                    s["status"] = "pending"
+                    s["error"] = None
+
+            wf.subtasks = subtasks
+            wf.current_step = step_index
+            wf.status = "running"
+            db.flush()
+            db.expunge(wf)
+
+        # Boost max_turns in the config for this execution
+        boosted_config = dict(config)
+        agent_cfg = dict(boosted_config.get("agent", {}))
+        current_max = int(agent_cfg.get("max_turns", 30))
+        agent_cfg["max_turns"] = current_max + extra_turns
+        boosted_config["agent"] = agent_cfg
+
+        # Re-launch execution (will skip completed subtasks, retry from step_index)
+        self.execute_workflow(workflow_id, boosted_config, progress_callback)
+
+        return self.get_workflow(workflow_id)
+
     # ------------------------------------------------------------------
     # Subtask Executors
     # ------------------------------------------------------------------
@@ -911,3 +975,164 @@ Output ONLY a JSON array of subtask objects. No markdown, no explanation."""
             return SubtaskResult(success=False, summary="Command timed out (300s).", error="timeout")
         except Exception as exc:
             return SubtaskResult(success=False, summary=str(exc), error=str(exc))
+
+    # ------------------------------------------------------------------
+    # Pipeline Execution (Agent-to-Agent Orchestration)
+    # ------------------------------------------------------------------
+
+    def execute_pipeline(
+        self,
+        pipeline_id: str,
+        repo_path: str,
+        config: dict,
+        repo_url: str = "",
+        progress_callback: Optional[Callable[[dict], None]] = None,
+    ) -> dict:
+        """Execute an agent pipeline — ordered sequence of tools with shared context.
+
+        Each step invokes a CustomTool as a sub-agent. Steps in the same
+        parallel_group run concurrently. Findings are passed via PipelineContext.
+        """
+        import concurrent.futures
+        from src.agent.knowledge import PipelineContext
+        from src.data.models import AgentPipeline, CustomTool
+
+        with get_session() as db:
+            pipeline = db.get(AgentPipeline, pipeline_id)
+            if not pipeline:
+                return {"success": False, "error": f"Pipeline {pipeline_id} not found"}
+            steps = list(pipeline.steps or [])
+            pipeline_name = pipeline.name
+
+        if not steps:
+            return {"success": True, "summary": "Pipeline has no steps"}
+
+        context = PipelineContext(pipeline_id=pipeline_id)
+        results: list[dict] = []
+
+        def _emit(msg: str):
+            if progress_callback:
+                progress_callback({"type": "pipeline", "message": msg, "pipeline_id": pipeline_id})
+
+        _emit(f"Starting pipeline: {pipeline_name} ({len(steps)} steps)")
+
+        # Group steps by parallel_group
+        groups: dict[int, list[dict]] = {}
+        for step in steps:
+            group = step.get("parallel_group", step.get("index", 0))
+            groups.setdefault(group, []).append(step)
+
+        for group_num in sorted(groups.keys()):
+            group_steps = groups[group_num]
+
+            if len(group_steps) == 1:
+                # Sequential execution
+                step = group_steps[0]
+                result = self._execute_pipeline_step(step, context, config, repo_path, repo_url, _emit)
+                results.append(result)
+                if not result.get("success", False):
+                    _emit(f"Pipeline failed at step: {step.get('tool_id', 'unknown')}")
+                    return {"success": False, "results": results, "error": result.get("error", "")}
+            else:
+                # Parallel execution
+                _emit(f"Running {len(group_steps)} steps in parallel (group {group_num})")
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(group_steps)) as executor:
+                    futures = {
+                        executor.submit(
+                            self._execute_pipeline_step, step, context, config, repo_path, repo_url, _emit
+                        ): step
+                        for step in group_steps
+                    }
+                    for future in concurrent.futures.as_completed(futures):
+                        result = future.result()
+                        results.append(result)
+
+        _emit(f"Pipeline completed: {len(results)} steps executed")
+        return {
+            "success": all(r.get("success", False) for r in results),
+            "results": results,
+            "summary": f"Pipeline '{pipeline_name}' completed ({len(results)} steps)",
+        }
+
+    def _execute_pipeline_step(
+        self,
+        step: dict,
+        context: "PipelineContext",
+        config: dict,
+        repo_path: str,
+        repo_url: str,
+        emit_fn,
+    ) -> dict:
+        """Execute a single pipeline step using a CustomTool as sub-agent."""
+        tool_id = step.get("tool_id", "")
+        step_id = step.get("id", tool_id)
+
+        emit_fn(f"Step: {step_id} (tool: {tool_id})")
+
+        try:
+            from src.data.models import CustomTool
+            with get_session() as db:
+                tool = db.get(CustomTool, tool_id)
+                if not tool:
+                    return {"success": False, "step_id": step_id, "error": f"Tool {tool_id} not found"}
+                tool_name = tool.name
+                agent_instructions = tool.agent_instructions
+                max_turns = tool.max_turns
+
+            # Resolve inputs from context
+            step_inputs = context.get_context_for_step(step)
+            input_context = "\n".join(f"- {k}: {v[:500]}" for k, v in step_inputs.items()) if step_inputs else ""
+
+            # Build requirements
+            requirements = agent_instructions
+            if input_context:
+                requirements += f"\n\n## Context from previous steps:\n{input_context}"
+
+            # Run as sub-agent
+            from src.agent.analyzer import generate_changes_with_agent
+            from src.consciousness.core import build_or_load_consciousness
+
+            ai_cfg = config.get("ai", {})
+            consciousness = build_or_load_consciousness(repo_path, config, repo_url=repo_url)
+
+            agent_config = {
+                "max_turns": max_turns,
+                "smart_summarization": True,
+                "truncation_limit": 30000,
+                "skip_tests": True,
+            }
+
+            result = generate_changes_with_agent(
+                requirements, repo_path,
+                llm_config=ai_cfg,
+                verbose=False,
+                consciousness=consciousness,
+                agent_config=agent_config,
+                config=config,
+                repo_url=repo_url,
+                initial_working_memory=context.to_dict(),
+            )
+
+            # Write outputs to context
+            output_keys = step.get("output_keys", [])
+            for key in output_keys:
+                context.write_step_output(step_id, key, result.summary or "")
+
+            # Also store working memory from result
+            if result.working_memory:
+                for k, v in result.working_memory.items():
+                    context.write_step_output(step_id, k, v)
+
+            emit_fn(f"Step {step_id} completed: {result.summary[:100]}")
+
+            return {
+                "success": result.success,
+                "step_id": step_id,
+                "tool_name": tool_name,
+                "summary": result.summary,
+                "files_changed": result.files_changed,
+            }
+
+        except Exception as exc:
+            emit_fn(f"Step {step_id} failed: {exc}")
+            return {"success": False, "step_id": step_id, "error": str(exc)}

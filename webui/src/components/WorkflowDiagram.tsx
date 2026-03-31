@@ -68,10 +68,13 @@ interface WorkflowDiagramProps {
   status?: string;
   mode?: string;
   recipes?: RecipeInfo[];
+  workflowId?: string;
+  onRetryStep?: (stepIndex: number, extraTurns: number) => void;
 }
 
-export default function WorkflowDiagram({ subtasks, currentStep, goal, status, mode, recipes }: WorkflowDiagramProps) {
+export default function WorkflowDiagram({ subtasks, currentStep, goal, status, mode, recipes, workflowId, onRetryStep }: WorkflowDiagramProps) {
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
+  const [retryTurns, setRetryTurns] = useState<Record<number, number>>({});
 
   if (!subtasks || subtasks.length === 0) {
     return (
@@ -399,6 +402,33 @@ export default function WorkflowDiagram({ subtasks, currentStep, goal, status, m
                           </div>
                         )}
 
+                        {/* Grant More Turns & Retry — shown on failed steps */}
+                        {st.status === 'failed' && onRetryStep && (
+                          <div className="mt-2 p-2 rounded bg-amber-50 border border-amber-200">
+                            <p className="text-[10px] text-amber-700 font-medium mb-1.5">Grant more turns and retry?</p>
+                            <div className="flex items-center gap-2">
+                              <select
+                                value={retryTurns[i] || 30}
+                                onChange={e => setRetryTurns(prev => ({ ...prev, [i]: Number(e.target.value) }))}
+                                className="text-[10px] px-1.5 py-1 border border-amber-300 rounded bg-white text-gray-700"
+                                onClick={e => e.stopPropagation()}
+                              >
+                                <option value={20}>+20 turns</option>
+                                <option value={30}>+30 turns</option>
+                                <option value={50}>+50 turns</option>
+                                <option value={75}>+75 turns</option>
+                                <option value={100}>+100 turns</option>
+                              </select>
+                              <button
+                                onClick={e => { e.stopPropagation(); onRetryStep(i, retryTurns[i] || 30); }}
+                                className="px-2.5 py-1 bg-amber-600 text-white rounded text-[10px] font-medium hover:bg-amber-700 transition-colors"
+                              >
+                                Retry Step
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
                         {/* Files changed */}
                         {st.files_changed && st.files_changed.length > 0 && (
                           <div className="mt-2">
@@ -524,6 +554,29 @@ export default function WorkflowDiagram({ subtasks, currentStep, goal, status, m
                     )}
                     {st.error && (
                       <p className="text-[11px] text-red-600 mt-1 bg-red-50 rounded px-2 py-1 line-clamp-2">{st.error}</p>
+                    )}
+                    {/* Grant More Turns — vertical timeline */}
+                    {st.status === 'failed' && onRetryStep && (
+                      <div className="mt-2 flex items-center gap-2 p-2 bg-amber-50 border border-amber-200 rounded-lg">
+                        <span className="text-[11px] text-amber-700 font-medium">Turn limit reached.</span>
+                        <select
+                          value={retryTurns[i] || 30}
+                          onChange={e => setRetryTurns(prev => ({ ...prev, [i]: Number(e.target.value) }))}
+                          className="text-[11px] px-2 py-1 border border-amber-300 rounded bg-white text-gray-700"
+                        >
+                          <option value={20}>+20 turns</option>
+                          <option value={30}>+30 turns</option>
+                          <option value={50}>+50 turns</option>
+                          <option value={75}>+75 turns</option>
+                          <option value={100}>+100 turns</option>
+                        </select>
+                        <button
+                          onClick={() => onRetryStep(i, retryTurns[i] || 30)}
+                          className="px-3 py-1 bg-amber-600 text-white rounded text-[11px] font-medium hover:bg-amber-700 transition-colors"
+                        >
+                          Grant Turns & Retry
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>

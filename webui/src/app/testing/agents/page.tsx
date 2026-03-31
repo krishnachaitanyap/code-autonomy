@@ -1163,6 +1163,16 @@ function AgentsPage() {
                             status={run.status}
                             mode={run.mode}
                             recipes={run.recipes}
+                            workflowId={run.id}
+                            onRetryStep={async (stepIndex, extraTurns) => {
+                              try {
+                                const updated = await workflowsApi.retryStep(run.id, stepIndex, extraTurns);
+                                setSelectedRun(workflowToUnified(updated));
+                                loadData();
+                              } catch (err) {
+                                console.error('Failed to retry step:', err);
+                              }
+                            }}
                           />
                           {/* Checkpoint resume/cancel */}
                           {run.status === 'paused' && (

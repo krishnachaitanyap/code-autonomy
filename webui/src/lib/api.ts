@@ -575,6 +575,8 @@ export const workflows = {
   create: (data: { repo_id?: string; project_id?: string; goal: string; mode?: string; auto_advance?: boolean; branch?: string; token_budget?: number; recipe_ids?: string[]; config_overrides?: Record<string, any> }) =>
     request<Workflow>('/workflows', { method: 'POST', body: JSON.stringify(data) }),
   resume: (id: string) => request<Workflow>(`/workflows/${id}/resume`, { method: 'POST' }),
+  retryStep: (id: string, stepIndex: number, extraTurns: number = 30) =>
+    request<Workflow>(`/workflows/${id}/retry-step?step_index=${stepIndex}&extra_turns=${extraTurns}`, { method: 'POST' }),
   cancel: (id: string) => request<{ status: string }>(`/workflows/${id}/cancel`, { method: 'POST' }),
 };
 
