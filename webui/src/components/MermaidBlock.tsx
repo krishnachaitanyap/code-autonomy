@@ -284,7 +284,6 @@ export default function MermaidBlock({ code }: { code: string }) {
       .then(({ svg }) => {
         if (!cancelled) {
           setSvgContent(svg);
-          if (containerRef.current) containerRef.current.innerHTML = svg;
         }
       })
       .catch((err) => {
@@ -361,11 +360,18 @@ export default function MermaidBlock({ code }: { code: string }) {
             </button>
           </div>
         </div>
-        <div
-          ref={containerRef}
-          className="p-3 flex justify-center overflow-x-auto cursor-pointer"
-          onClick={() => setShowPopup(true)}
-        />
+        {svgContent ? (
+          <div
+            ref={containerRef}
+            className="p-3 flex justify-center overflow-x-auto cursor-pointer min-h-[60px]"
+            onClick={() => setShowPopup(true)}
+            dangerouslySetInnerHTML={{ __html: svgContent }}
+          />
+        ) : (
+          <div className="p-3 flex justify-center items-center min-h-[60px] text-gray-400 text-xs">
+            Rendering diagram...
+          </div>
+        )}
       </div>
 
       {showPopup && (
