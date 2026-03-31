@@ -690,4 +690,135 @@ async def get_repo_file_tree(repo_id: str, max_files: int = 500):
         if len(files) >= max_files:
             break
 
-    return {'files': files, 'total': len(files), 'repo_path': repo_path}
+    # Detect infrastructure: Dockerfiles, K8s manifests, Helm charts, docker-compose
+    infra = _detect_infrastructure(root)
+
+    return {'files': files, 'total': len(files), 'repo_path': repo_path, 'infrastructure': infra}
+
+
+def _detect_infrastructure(root) -> dict:
+    """Scan for Docker, Kubernetes, Helm, and docker-compose artifacts."""
+    import os
+    import re
+    from pathlib import Path
+
+    containers: list[dict] = []
+    k8s_resources: list[dict] = []
+    helm_charts: list[str] = []
+    compose_services: list[dict] = []
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Skip irrelevant dirs
+        rel_dir = os.path.relpath(dirpath, root)
+        if any(p in rel_dir for p in ['.git', 'node_modules', 'target', 'build', 'dist']):
+            continue
+
+        for fname in filenames:
+            full_path = os.path.join(dirpath, fname)
+            rel_path = os.path.join(rel_dir, fname).replace('\\', '/').lstrip('./')
+
+            # Dockerfiles
+            if fname == 'Dockerfile' or fname.startswith('Dockerfile.') or fname.endswith('.Dockerfile'):
+                container = {'name': '', 'file': rel_path, 'base_image': '', 'ports': [], 'type': 'docker'}
+                try:
+                    content = open(full_path, 'r', errors='replace').read(4096)
+                    m = re.search(r'^FROM\s+(\S+)', content, re.MULTILINE)
+                    if m:
+                        container['base_image'] = m.group(1)
+                    ports = re.findall(r'^EXPOSE\s+(.+)', content, re.MULTILINE)
+                    container['ports'] = [p.strip() for line in ports for p in line.split()]
+                    # Derive container name from directory or Dockerfile suffix
+                    if fname.startswith('Dockerfile.'):
+                        container['name'] = fname.split('.', 1)[1]
+                    elif rel_dir and rel_dir != '.':
+                        container['name'] = rel_dir.rstrip('/').split('/')[-1]
+                    else:
+                        container['name'] = 'app'
+                except Exception:
+                    pass
+                containers.append(container)
+
+            # docker-compose
+            if fname in ('docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'):
+                try:
+                    import yaml
+                    content = open(full_path, 'r', errors='replace').read(8192)
+                    data = yaml.safe_load(content) or {}
+                    services = data.get('services', {})
+                    for svc_name, svc_cfg in (services or {}).items():
+                        svc = {
+                            'name': svc_name,
+                            'image': svc_cfg.get('image', ''),
+                            'build': str(svc_cfg.get('build', '')),
+                            'ports': [str(p) for p in (svc_cfg.get('ports') or [])],
+                            'depends_on': list(svc_cfg.get('depends_on', {}).keys()) if isinstance(svc_cfg.get('depends_on'), dict) else list(svc_cfg.get('depends_on', []) or []),
+                            'environment': list((svc_cfg.get('environment') or {}).keys()) if isinstance(svc_cfg.get('environment'), dict) else [str(e).split('=')[0] for e in (svc_cfg.get('environment') or [])],
+                            'file': rel_path,
+                        }
+                        compose_services.append(svc)
+                except Exception:
+                    pass
+
+            # Kubernetes manifests (YAML with kind: Deployment/Service/etc)
+            if fname.endswith(('.yml', '.yaml')) and any(p in rel_dir.lower() for p in ['k8s', 'kube', 'deploy', 'manifest', 'helm', 'chart']):
+                try:
+                    import yaml
+                    content = open(full_path, 'r', errors='replace').read(8192)
+                    for doc in yaml.safe_load_all(content):
+                        if not isinstance(doc, dict):
+                            continue
+                        kind = doc.get('kind', '')
+                        if kind in ('Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob',
+                                    'Service', 'Ingress', 'ConfigMap', 'Secret', 'HorizontalPodAutoscaler',
+                                    'PersistentVolumeClaim', 'NetworkPolicy', 'ServiceAccount'):
+                            resource = {
+                                'kind': kind,
+                                'name': (doc.get('metadata') or {}).get('name', ''),
+                                'namespace': (doc.get('metadata') or {}).get('namespace', ''),
+                                'file': rel_path,
+                            }
+                            # Extract container details from pod specs
+                            if kind in ('Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob'):
+                                spec = (doc.get('spec', {}).get('template', {}).get('spec', {}))
+                                for c in (spec.get('containers') or []):
+                                    resource.setdefault('containers', []).append({
+                                        'name': c.get('name', ''),
+                                        'image': c.get('image', ''),
+                                        'ports': [str(p.get('containerPort', '')) for p in (c.get('ports') or [])],
+                                    })
+                                replicas = doc.get('spec', {}).get('replicas')
+                                if replicas:
+                                    resource['replicas'] = replicas
+                            # Extract service ports/selectors
+                            if kind == 'Service':
+                                svc_spec = doc.get('spec', {})
+                                resource['service_type'] = svc_spec.get('type', 'ClusterIP')
+                                resource['ports'] = [
+                                    {'port': p.get('port'), 'target': p.get('targetPort'), 'protocol': p.get('protocol', 'TCP')}
+                                    for p in (svc_spec.get('ports') or [])
+                                ]
+                                resource['selector'] = svc_spec.get('selector', {})
+                            # Ingress rules
+                            if kind == 'Ingress':
+                                ing_spec = doc.get('spec', {})
+                                resource['rules'] = [
+                                    {'host': r.get('host', ''), 'paths': [p.get('path', '/') for p in (r.get('http', {}).get('paths') or [])]}
+                                    for r in (ing_spec.get('rules') or [])
+                                ]
+                            k8s_resources.append(resource)
+                except Exception:
+                    pass
+
+            # Helm charts
+            if fname == 'Chart.yaml' or fname == 'Chart.yml':
+                helm_charts.append(rel_dir.replace('\\', '/'))
+
+    return {
+        'containers': containers,
+        'k8s_resources': k8s_resources,
+        'helm_charts': helm_charts,
+        'compose_services': compose_services,
+        'has_docker': len(containers) > 0 or len(compose_services) > 0,
+        'has_kubernetes': len(k8s_resources) > 0,
+        'has_helm': len(helm_charts) > 0,
+    }

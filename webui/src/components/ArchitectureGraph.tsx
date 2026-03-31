@@ -8,7 +8,13 @@ import { useMemo, useState } from 'react';
 
 interface Symbol { fqn: string; name: string; file_path: string; symbol_type: string; line_start: number; line_end: number; signature: string; parent_class: string; }
 interface FileTreeEntry { path: string; name: string; directory: string; extension: string; file_type: string; size: number; }
-interface ArchitectureGraphProps { repoId: string; symbols: Symbol[]; fileTree?: FileTreeEntry[]; }
+interface K8sContainer { name: string; image: string; ports: string[]; }
+interface K8sResource { kind: string; name: string; namespace: string; file: string; containers?: K8sContainer[]; replicas?: number; service_type?: string; ports?: { port: number; target: any; protocol: string }[]; selector?: Record<string, string>; rules?: { host: string; paths: string[] }[]; }
+interface DockerContainer { name: string; file: string; base_image: string; ports: string[]; type: string; }
+interface ComposeService { name: string; image: string; build: string; ports: string[]; depends_on: string[]; environment: string[]; file: string; }
+interface Infrastructure { containers: DockerContainer[]; k8s_resources: K8sResource[]; helm_charts: string[]; compose_services: ComposeService[]; has_docker: boolean; has_kubernetes: boolean; has_helm: boolean; }
+
+interface ArchitectureGraphProps { repoId: string; symbols: Symbol[]; fileTree?: FileTreeEntry[]; infrastructure?: Infrastructure; }
 
 // ---------------------------------------------------------------------------
 // Layer detection & colors
@@ -335,10 +341,239 @@ function FileExplorer({ layer, files, onBack }: { layer: string; files: FileTree
 }
 
 // ---------------------------------------------------------------------------
+// Infrastructure Panel — Docker, K8s, Helm, Compose
+// ---------------------------------------------------------------------------
+
+function InfraPanel({ infra }: { infra: Infrastructure }) {
+  const [expanded, setExpanded] = useState(true);
+  const { k8s_resources, containers, compose_services, helm_charts } = infra;
+
+  const deployments = k8s_resources.filter(r => ['Deployment', 'StatefulSet', 'DaemonSet'].includes(r.kind));
+  const services = k8s_resources.filter(r => r.kind === 'Service');
+  const ingresses = k8s_resources.filter(r => r.kind === 'Ingress');
+  const others = k8s_resources.filter(r => !['Deployment', 'StatefulSet', 'DaemonSet', 'Service', 'Ingress'].includes(r.kind));
+
+  const K8S_KIND_STYLE: Record<string, { icon: string; color: string; bg: string }> = {
+    Deployment:    { icon: '\uD83D\uDCE6', color: 'text-blue-700',    bg: 'bg-blue-50' },
+    StatefulSet:   { icon: '\uD83D\uDDC4\uFE0F', color: 'text-indigo-700', bg: 'bg-indigo-50' },
+    DaemonSet:     { icon: '\uD83D\uDD04', color: 'text-purple-700',  bg: 'bg-purple-50' },
+    Service:       { icon: '\uD83C\uDF10', color: 'text-emerald-700', bg: 'bg-emerald-50' },
+    Ingress:       { icon: '\uD83D\uDEAA', color: 'text-amber-700',   bg: 'bg-amber-50' },
+    ConfigMap:     { icon: '\u2699\uFE0F', color: 'text-gray-600',    bg: 'bg-gray-50' },
+    Secret:        { icon: '\uD83D\uDD12', color: 'text-red-700',     bg: 'bg-red-50' },
+    HorizontalPodAutoscaler: { icon: '\uD83D\uDCC8', color: 'text-cyan-700', bg: 'bg-cyan-50' },
+    Job:           { icon: '\u23F1\uFE0F', color: 'text-orange-700',  bg: 'bg-orange-50' },
+    CronJob:       { icon: '\uD83D\uDD53', color: 'text-orange-700',  bg: 'bg-orange-50' },
+  };
+
+  return (
+    <div className="rounded-xl border border-sky-200 bg-gradient-to-br from-sky-50/80 to-white overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center justify-between px-5 py-3.5 hover:bg-sky-50/50 transition-colors"
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-sky-500 to-blue-600 flex items-center justify-center text-white text-sm shadow-sm">
+            {infra.has_kubernetes ? '\u2638\uFE0F' : '\uD83D\uDC33'}
+          </div>
+          <div className="text-left">
+            <h3 className="text-sm font-bold text-gray-900">Infrastructure</h3>
+            <div className="flex items-center gap-2 mt-0.5">
+              {infra.has_kubernetes && <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-sky-100 text-sky-700">Kubernetes</span>}
+              {infra.has_docker && <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700">Docker</span>}
+              {infra.has_helm && <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-700">Helm</span>}
+              {compose_services.length > 0 && <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700">Compose</span>}
+            </div>
+          </div>
+        </div>
+        <svg className={`w-4 h-4 text-gray-400 transition-transform ${expanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {expanded && (
+        <div className="px-5 pb-5 space-y-5">
+          {/* K8s Deployment topology */}
+          {deployments.length > 0 && (
+            <div>
+              <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Workloads</h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {deployments.map((dep, i) => {
+                  const st = K8S_KIND_STYLE[dep.kind] || K8S_KIND_STYLE['Deployment'];
+                  const svc = services.find(s => {
+                    const sel = s.selector || {};
+                    const labels = Object.values(sel);
+                    return labels.some(v => dep.name.includes(String(v)) || String(v).includes(dep.name));
+                  });
+                  const ing = ingresses.find(ig => (ig.rules || []).length > 0);
+
+                  return (
+                    <div key={i} className={`rounded-xl border border-gray-200 ${st.bg} overflow-hidden`}>
+                      {/* Header */}
+                      <div className="px-4 py-3 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-lg">{st.icon}</span>
+                          <div>
+                            <h5 className={`text-sm font-bold ${st.color}`}>{dep.name}</h5>
+                            <span className="text-[10px] text-gray-400">{dep.kind}{dep.replicas ? ` · ${dep.replicas} replicas` : ''}</span>
+                          </div>
+                        </div>
+                        <span className="text-[9px] font-mono text-gray-400 bg-white/50 px-2 py-0.5 rounded">{dep.file}</span>
+                      </div>
+                      {/* Containers */}
+                      {dep.containers && dep.containers.length > 0 && (
+                        <div className="px-4 pb-3 space-y-2">
+                          {dep.containers.map((c, j) => (
+                            <div key={j} className="flex items-center gap-2 bg-white/70 rounded-lg px-3 py-2">
+                              <span className="text-sm">{'\uD83D\uDC33'}</span>
+                              <div className="flex-1 min-w-0">
+                                <div className="text-xs font-semibold text-gray-800">{c.name}</div>
+                                <div className="text-[10px] font-mono text-gray-500 truncate">{c.image}</div>
+                              </div>
+                              {c.ports.length > 0 && (
+                                <div className="flex gap-1">
+                                  {c.ports.map((p, k) => (
+                                    <span key={k} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-blue-100 text-blue-600">:{p}</span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {/* Connected service */}
+                      {svc && (
+                        <div className="px-4 pb-3">
+                          <div className="flex items-center gap-1.5 text-[10px] text-emerald-600">
+                            <span>{'\uD83C\uDF10'}</span>
+                            <span className="font-medium">Service: {svc.name}</span>
+                            {svc.service_type && <span className="text-gray-400">({svc.service_type})</span>}
+                            {svc.ports && svc.ports.map((p, k) => (
+                              <span key={k} className="font-mono bg-emerald-50 px-1 rounded">{p.port}→{p.target}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Ingress / Networking */}
+          {ingresses.length > 0 && (
+            <div>
+              <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Networking</h4>
+              {ingresses.map((ing, i) => (
+                <div key={i} className="flex items-center gap-3 bg-amber-50 rounded-lg px-4 py-2.5 border border-amber-200">
+                  <span className="text-lg">{'\uD83D\uDEAA'}</span>
+                  <div className="flex-1">
+                    <span className="text-xs font-semibold text-amber-800">{ing.name}</span>
+                    <div className="flex flex-wrap gap-2 mt-1">
+                      {(ing.rules || []).map((r, j) => (
+                        <span key={j} className="text-[10px] font-mono text-amber-600 bg-white/60 px-2 py-0.5 rounded">
+                          {r.host || '*'}{r.paths.map(p => p).join(', ')}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Docker Compose */}
+          {compose_services.length > 0 && (
+            <div>
+              <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-3">Compose Services</h4>
+              <div className="space-y-2">
+                {compose_services.map((svc, i) => (
+                  <div key={i} className="flex items-center gap-3 bg-white rounded-lg border border-gray-200 px-4 py-2.5">
+                    <span className="text-lg">{'\uD83D\uDC33'}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-gray-800">{svc.name}</span>
+                        {svc.ports.length > 0 && svc.ports.map((p, j) => (
+                          <span key={j} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">{p}</span>
+                        ))}
+                      </div>
+                      <div className="text-[10px] font-mono text-gray-500 truncate">{svc.image || svc.build || ''}</div>
+                    </div>
+                    {svc.depends_on.length > 0 && (
+                      <div className="flex items-center gap-1 text-[10px] text-gray-400">
+                        <span>needs:</span>
+                        {svc.depends_on.map((d, j) => (
+                          <span key={j} className="font-mono bg-gray-100 px-1 rounded">{d}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Standalone Dockerfiles */}
+          {containers.length > 0 && compose_services.length === 0 && (
+            <div>
+              <h4 className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Containers</h4>
+              <div className="grid grid-cols-2 gap-2">
+                {containers.map((c, i) => (
+                  <div key={i} className="bg-white rounded-lg border border-gray-200 px-3 py-2">
+                    <div className="flex items-center gap-2">
+                      <span>{'\uD83D\uDC33'}</span>
+                      <span className="text-xs font-semibold text-gray-800">{c.name || 'app'}</span>
+                    </div>
+                    <div className="text-[10px] font-mono text-gray-500 mt-0.5 truncate">{c.base_image}</div>
+                    {c.ports.length > 0 && (
+                      <div className="flex gap-1 mt-1">
+                        {c.ports.map((p, j) => (
+                          <span key={j} className="text-[9px] font-mono px-1 py-0.5 rounded bg-blue-50 text-blue-600">:{p}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Helm */}
+          {helm_charts.length > 0 && (
+            <div className="flex items-center gap-2 text-xs text-purple-600">
+              <span>{'\u2638\uFE0F'}</span>
+              <span className="font-medium">Helm Charts:</span>
+              {helm_charts.map((h, i) => (
+                <span key={i} className="font-mono bg-purple-50 px-2 py-0.5 rounded">{h}</span>
+              ))}
+            </div>
+          )}
+
+          {/* Other K8s resources */}
+          {others.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {others.map((r, i) => {
+                const st = K8S_KIND_STYLE[r.kind] || { icon: '\uD83D\uDCC4', color: 'text-gray-600', bg: 'bg-gray-50' };
+                return (
+                  <span key={i} className={`inline-flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-lg ${st.bg} ${st.color}`}>
+                    {st.icon} {r.kind}: {r.name}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main Component
 // ---------------------------------------------------------------------------
 
-export default function ArchitectureGraph({ repoId, symbols, fileTree }: ArchitectureGraphProps) {
+export default function ArchitectureGraph({ repoId, symbols, fileTree, infrastructure }: ArchitectureGraphProps) {
   const files = fileTree || [];
   const [drillLayer, setDrillLayer] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -408,6 +643,11 @@ export default function ArchitectureGraph({ repoId, symbols, fileTree }: Archite
         <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Layer Distribution</h4>
         <StatsBar layers={layerData} totalFiles={totalFiles} totalSize={totalSize} />
       </div>
+
+      {/* Infrastructure — Docker / Kubernetes / Helm / Compose */}
+      {infrastructure && (infrastructure.has_docker || infrastructure.has_kubernetes) && (
+        <InfraPanel infra={infrastructure} />
+      )}
 
       {/* Two-column: Diagram + Details */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
