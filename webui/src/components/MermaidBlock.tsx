@@ -172,69 +172,105 @@ function DiagramViewer({ svgContent, onClose, onCopy, onDownload, copied }: {
 /**
  * Sanitize LLM-generated Mermaid code for Mermaid v11 compatibility.
  *
- * LLMs often produce node labels containing characters that break Mermaid's
- * parser (parentheses, angle brackets, quotes, pipes, ampersands, etc.).
- * This function wraps unquoted labels in quotes and escapes problematic chars
- * inside already-quoted labels.
+ * LLMs produce node definitions with special chars that break parsing.
+ * This rewrites node labels to use quoted strings ["..."] which safely
+ * handle parens, ampersands, angle brackets, pipes, etc.
+ *
+ * Strategy: scan each line for node definitions (ID + bracket/paren/brace
+ * delimiters) and quote any unquoted labels. Leave edge labels (|...|),
+ * comments, keywords, and already-quoted labels untouched.
  */
 function sanitizeMermaidCode(raw: string): string {
+  const SKIP_PREFIXES = [
+    'graph ', 'flowchart ', 'sequenceDiagram', 'classDiagram', 'stateDiagram',
+    'erDiagram', 'gantt', 'pie', 'gitGraph', 'mindmap', 'timeline',
+    'style ', 'linkStyle ', 'class ', 'click ', 'title ', 'section ',
+    'participant ', 'actor ', 'Note ', 'loop ', 'alt ', 'opt ', 'rect ',
+    'activate ', 'deactivate ', 'autonumber',
+  ];
+
   return raw
     .split('\n')
     .map(line => {
       const trimmed = line.trim();
-      // Skip directives, empty lines, comments, and keywords
-      if (
-        !trimmed ||
-        trimmed.startsWith('%%') ||
-        trimmed.startsWith('graph ') ||
-        trimmed.startsWith('flowchart ') ||
-        trimmed.startsWith('sequenceDiagram') ||
-        trimmed.startsWith('classDiagram') ||
-        trimmed.startsWith('stateDiagram') ||
-        trimmed.startsWith('erDiagram') ||
-        trimmed.startsWith('gantt') ||
-        trimmed.startsWith('pie') ||
-        trimmed.startsWith('gitGraph') ||
-        trimmed.startsWith('mindmap') ||
-        trimmed.startsWith('subgraph ') ||
-        trimmed === 'end' ||
-        trimmed.startsWith('style ') ||
-        trimmed.startsWith('linkStyle ') ||
-        trimmed.startsWith('class ') ||
-        trimmed.startsWith('click ') ||
-        trimmed.startsWith('title ') ||
-        trimmed.startsWith('section ') ||
-        trimmed.startsWith('participant ') ||
-        trimmed.startsWith('actor ') ||
-        trimmed.startsWith('Note ')
-      ) {
+      if (!trimmed || trimmed.startsWith('%%') || trimmed === 'end') return line;
+      if (SKIP_PREFIXES.some(p => trimmed.startsWith(p))) return line;
+
+      // Handle subgraph — label after "subgraph" keyword may have special chars
+      if (trimmed.startsWith('subgraph ')) {
+        const label = trimmed.slice(9).trim();
+        if (label && /[()&<>|{}]/.test(label) && !label.startsWith('"')) {
+          const indent = line.match(/^(\s*)/)?.[1] || '';
+          return `${indent}subgraph "${label.replace(/"/g, '#quot;')}"`;
+        }
         return line;
       }
 
-      // Fix labels inside bracket types: ["..."], ("..."), {"..."}, [/"..."/]
-      // Replace special HTML-breaking chars inside quoted labels
-      let fixed = line.replace(
-        /(\["|\"|\("|"\)|{"|"}|\[\/"|"\/\])([^"]*?)(\1|\]|"|"|\)|}|\/\])/g,
-        (match) => match
+      // Replace all node definitions with unquoted labels that contain
+      // problematic characters. We handle the three bracket types:
+      //   ID[label]  ID(label)  ID{label}
+      // and their quoted variants which are already safe:
+      //   ID["label"]  ID("label")  ID{"label"}
+      let fixed = line;
+
+      // Pattern: NodeId[unquoted label with special chars]
+      // Must not match already-quoted: NodeId["..."]
+      // Must not match edge notation inside: -->|label|
+      fixed = fixed.replace(
+        /(\b\w+)\[([^\]]*)\]/g,
+        (match, nodeId, label) => {
+          // Already quoted — leave alone
+          if (label.startsWith('"') && label.endsWith('"')) return match;
+          // Contains problematic chars — quote it
+          if (/[()&<>|{}"\/\\]/.test(label)) {
+            const safe = label.replace(/"/g, '#quot;');
+            return `${nodeId}["${safe}"]`;
+          }
+          return match;
+        }
       );
 
-      // For node definitions with unquoted labels containing problematic chars,
-      // wrap the label in quotes. Match patterns like: NodeId[Label with (parens)]
-      // but only if the label isn't already quoted.
+      // Pattern: NodeId(unquoted label) — only when label has special chars
+      // Tricky: must distinguish NodeId(Label) from edge arrow --> Target
+      // A node def with parens: starts at word boundary, not after arrow
       fixed = fixed.replace(
-        /(\w+)\[([^\]"]*[()&<>|][^\]"]*)\]/g,
-        (_, nodeId, label) => {
-          const safe = label.replace(/"/g, '#quot;');
-          return `${nodeId}["${safe}"]`;
+        /(\b\w+)\(([^)]*)\)/g,
+        (match, nodeId, label, offset) => {
+          // Already quoted
+          if (label.startsWith('"') && label.endsWith('"')) return match;
+          // Skip if preceded by arrow chars (this is an edge target, not a node def)
+          const before = fixed.slice(Math.max(0, offset - 4), offset);
+          if (/-->$|--\>$|==>$|-.->$/.test(before.trim())) return match;
+          // Contains problematic chars — quote it
+          if (/[&<>|{}"\/\\]/.test(label)) {
+            const safe = label.replace(/"/g, '#quot;');
+            return `${nodeId}("${safe}")`;
+          }
+          // Contains nested parens like Topic(s) — quote to avoid parse ambiguity
+          if (/[()]/.test(label)) {
+            const safe = label.replace(/"/g, '#quot;');
+            return `${nodeId}("${safe}")`;
+          }
+          return match;
         }
       );
+
+      // Pattern: NodeId{unquoted label}
       fixed = fixed.replace(
-        /(\w+)\(([^)"]*[&<>|{}][^)"]*)\)/g,
-        (_, nodeId, label) => {
-          const safe = label.replace(/"/g, '#quot;');
-          return `${nodeId}("${safe}")`;
+        /(\b\w+)\{([^}]*)\}/g,
+        (match, nodeId, label) => {
+          if (label.startsWith('"') && label.endsWith('"')) return match;
+          if (/[()&<>|"\/\\]/.test(label)) {
+            const safe = label.replace(/"/g, '#quot;');
+            return `${nodeId}{"${safe}"}`;
+          }
+          return match;
         }
       );
+
+      // Fix & in any remaining unquoted text (Mermaid chokes on raw &)
+      // But don't touch edge labels |...|, already-quoted "...", or arrow syntax
+      fixed = fixed.replace(/&(?!amp;|lt;|gt;|quot;)/g, '&amp;');
 
       return fixed;
     })
