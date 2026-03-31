@@ -440,25 +440,54 @@ function buildGraphFromFileTree(files: FileTreeEntry[], groupBy: 'directory' | '
 }
 
 // ---------------------------------------------------------------------------
-// Detail Panel
+// Info Panel — shows details for clicked nodes (layer, directory, or file)
 // ---------------------------------------------------------------------------
 
-function DetailPanel({ symbol, symbols, onClose }: { symbol: Symbol | null; symbols: Symbol[]; onClose: () => void }) {
-  if (!symbol) return null;
+interface InfoPanelProps {
+  nodeId: string;
+  fileTree: FileTreeEntry[];
+  symbols: Symbol[];
+  onClose: () => void;
+  onDrillDown: (layer: string) => void;
+}
 
-  const layer = detectLayer(symbol.file_path);
-  const colors = LAYER_COLORS[layer] || LAYER_COLORS['Other'];
-  const relatedSymbols = symbols.filter(
-    s => s.file_path === symbol.file_path && s.name !== symbol.name
-  );
-  const referencedBy = symbols.filter(s => s.parent_class === symbol.name);
+function InfoPanel({ nodeId, fileTree, symbols, onClose, onDrillDown }: InfoPanelProps) {
+  // Determine what was clicked: layer name, directory, or file path
+  const layerColors = LAYER_COLORS[nodeId];
+  const isLayer = !!layerColors;
+  const isFile = fileTree.some(f => f.path === nodeId);
+  const isDir = !isLayer && !isFile && fileTree.some(f => f.directory === nodeId);
+
+  const matchingFiles = isLayer
+    ? fileTree.filter(f => detectLayer(f.path) === nodeId)
+    : isDir
+    ? fileTree.filter(f => f.directory === nodeId)
+    : isFile
+    ? fileTree.filter(f => f.path === nodeId)
+    : [];
+
+  const colors = isLayer ? layerColors : LAYER_COLORS[detectLayer(nodeId + '/')] || LAYER_COLORS['Other'];
+  const title = isLayer ? nodeId : (nodeId.split('/').pop() || nodeId);
+  const subtitle = isLayer ? `${matchingFiles.length} files` : isDir ? `Directory · ${matchingFiles.length} files` : 'File';
+
+  // Group files by subdirectory for layer view
+  const subDirs = new Map<string, FileTreeEntry[]>();
+  for (const f of matchingFiles) {
+    const dir = f.directory || '(root)';
+    const existing = subDirs.get(dir) || [];
+    existing.push(f);
+    subDirs.set(dir, existing);
+  }
+
+  const totalSize = matchingFiles.reduce((sum, f) => sum + f.size, 0);
+  const sizeLabel = totalSize > 1024 * 1024 ? `${(totalSize / 1024 / 1024).toFixed(1)} MB` : `${(totalSize / 1024).toFixed(0)} KB`;
 
   return (
     <div className="absolute top-2 right-2 w-80 bg-white rounded-lg border border-gray-200 shadow-xl z-10 max-h-[calc(100%-16px)] overflow-y-auto">
       <div className="sticky top-0 bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between">
         <div>
-          <h3 className="font-semibold text-sm text-gray-900">{symbol.name}</h3>
-          <p className="text-[10px] text-gray-500">{symbol.symbol_type} · {layer}</p>
+          <h3 className="font-semibold text-sm" style={{ color: colors.text }}>{title}</h3>
+          <p className="text-[10px] text-gray-500">{subtitle} · {sizeLabel}</p>
         </div>
         <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -466,53 +495,45 @@ function DetailPanel({ symbol, symbols, onClose }: { symbol: Symbol | null; symb
           </svg>
         </button>
       </div>
-      <div className="p-4 space-y-3 text-xs">
-        <div>
-          <span className="text-gray-500">File:</span>
-          <span className="ml-1 font-mono text-gray-800">{symbol.file_path}</span>
-        </div>
-        {symbol.signature && (
-          <div>
-            <span className="text-gray-500">Signature:</span>
-            <pre className="mt-1 bg-gray-50 rounded p-2 text-[10px] font-mono overflow-x-auto">{symbol.signature}</pre>
-          </div>
-        )}
-        <div className="flex gap-4">
-          <div>
-            <span className="text-gray-500">Lines:</span>
-            <span className="ml-1">{symbol.line_start}–{symbol.line_end}</span>
-          </div>
-          {symbol.parent_class && (
-            <div>
-              <span className="text-gray-500">Extends:</span>
-              <span className="ml-1 font-medium" style={{ color: colors.text }}>{symbol.parent_class}</span>
-            </div>
-          )}
-        </div>
 
-        {relatedSymbols.length > 0 && (
-          <div>
-            <p className="text-gray-500 font-medium mb-1">In same file ({relatedSymbols.length}):</p>
-            <div className="space-y-0.5 max-h-32 overflow-y-auto">
-              {relatedSymbols.slice(0, 15).map((s, i) => (
-                <div key={i} className="flex items-center gap-1.5">
-                  <span className="text-[9px] px-1 py-0.5 rounded bg-gray-100 text-gray-600">{s.symbol_type}</span>
-                  <span className="text-gray-800 truncate">{s.name}</span>
+      <div className="p-3 space-y-3 text-xs">
+        {/* Drill-down button for layers */}
+        {isLayer && (
+          <button
+            onClick={() => onDrillDown(nodeId)}
+            className="w-full px-3 py-2 text-sm font-medium rounded-lg transition-colors"
+            style={{ background: colors.bg, color: colors.text, border: `1px solid ${colors.border}` }}
+          >
+            Explore {nodeId} layer →
+          </button>
+        )}
+
+        {/* File list grouped by directory */}
+        {Array.from(subDirs.entries()).slice(0, 15).map(([dir, files]) => (
+          <div key={dir}>
+            <p className="text-[10px] font-medium text-gray-500 mb-1 flex items-center gap-1">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+              </svg>
+              {dir}
+            </p>
+            <div className="space-y-0.5 ml-4">
+              {files.slice(0, 10).map((f, i) => (
+                <div key={i} className="flex items-center justify-between gap-2 py-0.5">
+                  <span className="font-mono text-gray-700 truncate">{f.name}</span>
+                  <span className="text-[9px] text-gray-400 flex-shrink-0">
+                    {f.size > 1024 ? `${(f.size / 1024).toFixed(0)}K` : `${f.size}B`}
+                  </span>
                 </div>
               ))}
+              {files.length > 10 && (
+                <p className="text-[9px] text-gray-400">+{files.length - 10} more</p>
+              )}
             </div>
           </div>
-        )}
-
-        {referencedBy.length > 0 && (
-          <div>
-            <p className="text-gray-500 font-medium mb-1">Referenced by ({referencedBy.length}):</p>
-            <div className="space-y-0.5 max-h-32 overflow-y-auto">
-              {referencedBy.slice(0, 10).map((s, i) => (
-                <div key={i} className="text-gray-800 truncate">{s.name} ({s.symbol_type})</div>
-              ))}
-            </div>
-          </div>
+        ))}
+        {subDirs.size > 15 && (
+          <p className="text-[9px] text-gray-400">+{subDirs.size - 15} more directories</p>
         )}
       </div>
     </div>
@@ -531,8 +552,10 @@ export default function ArchitectureGraph({ repoId, symbols, fileTree, dependenc
     hasSymbols ? 'files' : 'layers'
   );
   const [layerFilter, setLayerFilter] = useState<string | null>(null);
-  const [selectedSymbol, setSelectedSymbol] = useState<Symbol | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [drillLayer, setDrillLayer] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [breadcrumb, setBreadcrumb] = useState<string[]>([]);
 
   const filteredSymbols = useMemo(() => {
     let syms = symbols;
@@ -562,14 +585,20 @@ export default function ArchitectureGraph({ repoId, symbols, fileTree, dependenc
     return files;
   }, [fileTree, layerFilter, searchQuery]);
 
+  // When drilling into a layer, filter file tree to that layer and show directories
+  const drillFilteredFileTree = useMemo(() => {
+    if (!drillLayer) return filteredFileTree;
+    return filteredFileTree.filter(f => detectLayer(f.path) === drillLayer);
+  }, [filteredFileTree, drillLayer]);
+
   const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(() => {
+    if (drillLayer) return buildGraphFromFileTree(drillFilteredFileTree, 'directory');
     if (viewMode === 'files' && hasSymbols) return buildGraph(filteredSymbols, 'files');
     if (viewMode === 'classes' && hasSymbols) return buildGraph(filteredSymbols, 'classes');
     if (viewMode === 'directories') return buildGraphFromFileTree(filteredFileTree, 'directory');
     if (viewMode === 'layers') return buildGraphFromFileTree(filteredFileTree, 'layer');
-    // Fallback to file tree
     return buildGraphFromFileTree(filteredFileTree, 'layer');
-  }, [filteredSymbols, filteredFileTree, viewMode, hasSymbols]);
+  }, [filteredSymbols, filteredFileTree, drillFilteredFileTree, viewMode, hasSymbols, drillLayer]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(layoutedNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(layoutedEdges);
@@ -599,13 +628,20 @@ export default function ArchitectureGraph({ repoId, symbols, fileTree, dependenc
   }, [symbols, fileTree]);
 
   const onNodeClick: NodeMouseHandler = useCallback((_event, node) => {
-    // Find the symbol for this node
-    const sym = symbols.find(s => {
-      if (viewMode === 'files') return s.file_path === node.id;
-      return (s.fqn || s.name) === node.id;
-    });
-    setSelectedSymbol(sym || null);
-  }, [symbols, viewMode]);
+    setSelectedNodeId(node.id);
+  }, []);
+
+  const handleDrillDown = useCallback((layer: string) => {
+    setBreadcrumb(prev => [...prev, drillLayer || 'All Layers']);
+    setDrillLayer(layer);
+    setSelectedNodeId(null);
+  }, [drillLayer]);
+
+  const handleBreadcrumbBack = useCallback(() => {
+    setDrillLayer(null);
+    setBreadcrumb([]);
+    setSelectedNodeId(null);
+  }, []);
 
   if (symbols.length === 0 && (fileTree || []).length === 0) {
     return (
@@ -747,12 +783,30 @@ export default function ArchitectureGraph({ repoId, symbols, fileTree, dependenc
         </Panel>
       </ReactFlow>
 
-      {/* Detail panel */}
-      {selectedSymbol && (
-        <DetailPanel
-          symbol={selectedSymbol}
+      {/* Breadcrumb for drill-down navigation */}
+      {drillLayer && (
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-10 bg-white/95 backdrop-blur rounded-lg border border-gray-200 shadow-sm px-3 py-1.5 flex items-center gap-2 text-xs">
+          <button onClick={handleBreadcrumbBack} className="text-indigo-600 hover:text-indigo-800 font-medium">
+            All Layers
+          </button>
+          <span className="text-gray-300">/</span>
+          <span className="font-medium" style={{ color: (LAYER_COLORS[drillLayer] || LAYER_COLORS['Other']).text }}>
+            {drillLayer}
+          </span>
+          <button onClick={handleBreadcrumbBack} className="ml-2 text-gray-400 hover:text-gray-600 text-[10px]">
+            ← Back
+          </button>
+        </div>
+      )}
+
+      {/* Info panel */}
+      {selectedNodeId && (
+        <InfoPanel
+          nodeId={selectedNodeId}
+          fileTree={fileTree || []}
           symbols={symbols}
-          onClose={() => setSelectedSymbol(null)}
+          onClose={() => setSelectedNodeId(null)}
+          onDrillDown={handleDrillDown}
         />
       )}
     </div>

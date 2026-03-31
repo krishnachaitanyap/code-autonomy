@@ -3,7 +3,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { repos, type Repo } from '@/lib/api';
-import DependencyVisualizer from '@/components/DependencyVisualizer';
 import ArchitectureGraph from '@/components/ArchitectureGraph';
 
 function getBranchType(name: string): { label: string; color: string } {
@@ -55,20 +54,25 @@ export default function RepoDetailPage() {
   useEffect(() => {
     async function load() {
       try {
-        const [repoData, branchData, skillsData, claudeMdData, symbolsData, fileTreeData] = await Promise.all([
+        const [repoData, branchData, skillsData, claudeMdData, fileTreeData] = await Promise.all([
           repos.get(repoId),
           repos.branches(repoId).catch(() => ({ branches: [] })),
           repos.getSkills(repoId).catch(() => ({ content: '' })),
           repos.getClaudeMd(repoId).catch(() => ({ content: '' })),
-          repos.symbols(repoId).catch(() => []),
           repos.fileTree(repoId, 500).catch(() => ({ files: [], total: 0 })),
         ]);
         setRepo(repoData);
         setBranches(branchData.branches);
         setSkills(skillsData.content);
         setClaudeMd(claudeMdData.content);
-        setSymbols(Array.isArray(symbolsData) ? symbolsData : []);
         setFileTree(fileTreeData.files || []);
+        // Symbols require code index — load lazily only if file-tree is small
+        // (indicates index might be built). Avoids noisy 500 errors in console.
+        if (fileTreeData.total > 0 && fileTreeData.total < 100) {
+          repos.symbols(repoId).then(s => {
+            if (Array.isArray(s) && s.length > 0) setSymbols(s);
+          }).catch(() => {});
+        }
       } catch (err: any) {
         setError(err.message || 'Failed to load repository');
       } finally {
@@ -221,6 +225,15 @@ export default function RepoDetailPage() {
         </dl>
       </div>
 
+      {/* Architecture Graph — hero section */}
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <h2 className="text-lg font-semibold text-gray-900 mb-1">Architecture Graph</h2>
+        <p className="text-sm text-gray-500 mb-4">
+          Explore the codebase structure — layers, directories, files, and their relationships.
+        </p>
+        <ArchitectureGraph repoId={repoId} symbols={symbols} fileTree={fileTree} />
+      </div>
+
       {/* Branches */}
       <div className="bg-white rounded-lg border border-gray-200 p-6">
         <h2 className="text-lg font-semibold text-gray-900 mb-4">
@@ -238,7 +251,7 @@ export default function RepoDetailPage() {
               className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm mb-3 focus:ring-indigo-500 focus:border-indigo-500"
             />
             {filteredBranches.length === 0 ? (
-              <p className="text-sm text-gray-500">No branches match "{branchSearch}"</p>
+              <p className="text-sm text-gray-500">No branches match &quot;{branchSearch}&quot;</p>
             ) : (
               <div className="flex flex-wrap gap-2">
                 {filteredBranches.map((branch) => {
@@ -264,23 +277,6 @@ export default function RepoDetailPage() {
         )}
       </div>
 
-      {/* Architecture Graph */}
-      <div className="bg-white rounded-lg border border-gray-200 p-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-2">Architecture Graph</h2>
-        <p className="text-sm text-gray-500 mb-4">
-          Interactive knowledge graph of the codebase — explore files, classes, and their relationships. Click nodes for details.
-        </p>
-        <ArchitectureGraph repoId={repoId} symbols={symbols} fileTree={fileTree} />
-      </div>
-
-      {/* Dependency Visualizer */}
-      <div className="bg-white rounded-lg border border-gray-200 p-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Dependencies</h2>
-        <p className="text-sm text-gray-500 mb-4">
-          Downstream services, data stores, messaging, and API endpoints detected via static analysis.
-        </p>
-        <DependencyVisualizer repoId={repoId} repoName={repo.nickname || repo.url || repo.local_path || repoId} />
-      </div>
 
       {/* SKILLS.md Editor */}
       <div className="bg-white rounded-lg border border-gray-200 p-6">
