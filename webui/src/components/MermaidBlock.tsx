@@ -2,7 +2,12 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import mermaid from 'mermaid';
 
-mermaid.initialize({ startOnLoad: false, theme: 'default' });
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'default',
+  securityLevel: 'loose',
+  suppressErrorRendering: true,
+});
 
 let _id = 0;
 
@@ -164,6 +169,78 @@ function DiagramViewer({ svgContent, onClose, onCopy, onDownload, copied }: {
   );
 }
 
+/**
+ * Sanitize LLM-generated Mermaid code for Mermaid v11 compatibility.
+ *
+ * LLMs often produce node labels containing characters that break Mermaid's
+ * parser (parentheses, angle brackets, quotes, pipes, ampersands, etc.).
+ * This function wraps unquoted labels in quotes and escapes problematic chars
+ * inside already-quoted labels.
+ */
+function sanitizeMermaidCode(raw: string): string {
+  return raw
+    .split('\n')
+    .map(line => {
+      const trimmed = line.trim();
+      // Skip directives, empty lines, comments, and keywords
+      if (
+        !trimmed ||
+        trimmed.startsWith('%%') ||
+        trimmed.startsWith('graph ') ||
+        trimmed.startsWith('flowchart ') ||
+        trimmed.startsWith('sequenceDiagram') ||
+        trimmed.startsWith('classDiagram') ||
+        trimmed.startsWith('stateDiagram') ||
+        trimmed.startsWith('erDiagram') ||
+        trimmed.startsWith('gantt') ||
+        trimmed.startsWith('pie') ||
+        trimmed.startsWith('gitGraph') ||
+        trimmed.startsWith('mindmap') ||
+        trimmed.startsWith('subgraph ') ||
+        trimmed === 'end' ||
+        trimmed.startsWith('style ') ||
+        trimmed.startsWith('linkStyle ') ||
+        trimmed.startsWith('class ') ||
+        trimmed.startsWith('click ') ||
+        trimmed.startsWith('title ') ||
+        trimmed.startsWith('section ') ||
+        trimmed.startsWith('participant ') ||
+        trimmed.startsWith('actor ') ||
+        trimmed.startsWith('Note ')
+      ) {
+        return line;
+      }
+
+      // Fix labels inside bracket types: ["..."], ("..."), {"..."}, [/"..."/]
+      // Replace special HTML-breaking chars inside quoted labels
+      let fixed = line.replace(
+        /(\["|\"|\("|"\)|{"|"}|\[\/"|"\/\])([^"]*?)(\1|\]|"|"|\)|}|\/\])/g,
+        (match) => match
+      );
+
+      // For node definitions with unquoted labels containing problematic chars,
+      // wrap the label in quotes. Match patterns like: NodeId[Label with (parens)]
+      // but only if the label isn't already quoted.
+      fixed = fixed.replace(
+        /(\w+)\[([^\]"]*[()&<>|][^\]"]*)\]/g,
+        (_, nodeId, label) => {
+          const safe = label.replace(/"/g, '#quot;');
+          return `${nodeId}["${safe}"]`;
+        }
+      );
+      fixed = fixed.replace(
+        /(\w+)\(([^)"]*[&<>|{}][^)"]*)\)/g,
+        (_, nodeId, label) => {
+          const safe = label.replace(/"/g, '#quot;');
+          return `${nodeId}("${safe}")`;
+        }
+      );
+
+      return fixed;
+    })
+    .join('\n');
+}
+
 export default function MermaidBlock({ code }: { code: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -175,6 +252,8 @@ export default function MermaidBlock({ code }: { code: string }) {
     const id = `mermaid-${++_id}`;
     let cancelled = false;
 
+    const sanitized = sanitizeMermaidCode(code);
+
     // Render into a temporary off-screen container so mermaid's error SVGs
     // (bomb icons + "Syntax error in text") never appear in the visible DOM.
     const tempContainer = document.createElement('div');
@@ -183,7 +262,7 @@ export default function MermaidBlock({ code }: { code: string }) {
     tempContainer.style.top = '-9999px';
     document.body.appendChild(tempContainer);
 
-    mermaid.render(id, code, tempContainer)
+    mermaid.render(id, sanitized, tempContainer)
       .then(({ svg }) => {
         if (!cancelled) {
           setSvgContent(svg);
@@ -194,9 +273,19 @@ export default function MermaidBlock({ code }: { code: string }) {
         if (!cancelled) setError(String(err));
       })
       .finally(() => {
-        // Clean up the temp container and any error elements mermaid injected
+        // Clean up the temp container and any error elements mermaid injected.
+        // Mermaid v11 injects error SVGs directly into document.body — remove them all.
         tempContainer.remove();
         document.getElementById(`d${id}`)?.remove();
+        document.getElementById(id)?.remove();
+        // Mermaid v11 also creates elements with id like "dmermaid-N"
+        document.querySelectorAll(`[id^="d${id}"], [id="${id}"]`).forEach(el => el.remove());
+        // Clean up any stray mermaid error SVGs that escaped containment
+        document.querySelectorAll('svg[id^="mermaid-"] > g > text').forEach(el => {
+          if (el.textContent?.includes('Syntax error')) {
+            el.closest('svg')?.remove();
+          }
+        });
       });
     return () => { cancelled = true; };
   }, [code]);
