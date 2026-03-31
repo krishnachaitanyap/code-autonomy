@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -14,33 +14,56 @@ interface DockerContainer { name: string; file: string; base_image: string; port
 interface ComposeService { name: string; image: string; build: string; ports: string[]; depends_on: string[]; environment: string[]; file: string; }
 interface Infrastructure { containers: DockerContainer[]; k8s_resources: K8sResource[]; helm_charts: string[]; compose_services: ComposeService[]; has_docker: boolean; has_kubernetes: boolean; has_helm: boolean; }
 
-interface ArchitectureGraphProps { repoId: string; symbols: Symbol[]; fileTree?: FileTreeEntry[]; infrastructure?: Infrastructure; }
+interface DiscoveredLayer { name: string; pattern: string; count: number; source: string; }
+interface ArchitectureGraphProps { repoId: string; symbols: Symbol[]; fileTree?: FileTreeEntry[]; infrastructure?: Infrastructure; discoveredLayers?: DiscoveredLayer[]; }
 
 // ---------------------------------------------------------------------------
 // Layer detection & colors
 // ---------------------------------------------------------------------------
 
 const LAYER_RULES: { pattern: RegExp; layer: string }[] = [
-  { pattern: /\/(controller|resource|endpoint|rest|api|handler|route)\//i, layer: 'API' },
-  { pattern: /Controller\.(java|ts|py|go)$/i, layer: 'API' },
-  { pattern: /Resource\.(java|ts|py)$/i, layer: 'API' },
-  { pattern: /\/(service|usecase|business|domain)\//i, layer: 'Service' },
-  { pattern: /Service\.(java|ts|py|go)$/i, layer: 'Service' },
+  // --- API / Presentation ---
+  { pattern: /\/(controller|resource|endpoint|rest|api|handler|route|servlet|web|view|graphql)\//i, layer: 'API' },
+  { pattern: /(Controller|Resource|Endpoint|Servlet|Handler)\.(java|ts|py|go|kt)$/i, layer: 'API' },
+  { pattern: /\/(invoker|invokers|gateway|gateways)\//i, layer: 'API' },
+  { pattern: /(Invoker|Gateway)\.(java|ts|py)$/i, layer: 'API' },
+  // --- Service / Business Logic ---
+  { pattern: /\/(service|services|usecase|business|domain|logic|manager|orchestrator|processor|workflow|engine|facade)\//i, layer: 'Service' },
+  { pattern: /(Service|ServiceImpl|Manager|Orchestrator|Processor|Facade|Engine)\.(java|ts|py|go|kt)$/i, layer: 'Service' },
   { pattern: /Impl\.(java|ts|py)$/i, layer: 'Service' },
-  { pattern: /\/(repository|repo|dao|mapper|persistence|data)\//i, layer: 'Data' },
-  { pattern: /Repository\.(java|ts|py)$/i, layer: 'Data' },
-  { pattern: /Dao\.(java|ts|py)$/i, layer: 'Data' },
-  { pattern: /\/(model|entity|dto|vo|pojo|schema)\//i, layer: 'Model' },
-  { pattern: /\/(config|configuration|setup|properties)\//i, layer: 'Config' },
-  { pattern: /Config\.(java|ts|py)$/i, layer: 'Config' },
-  { pattern: /\/(test|spec|__test__|__spec__|e2e)\//i, layer: 'Test' },
-  { pattern: /Test\.(java|ts|py)$/i, layer: 'Test' },
-  { pattern: /\.test\.(ts|js|tsx|jsx)$/i, layer: 'Test' },
-  { pattern: /\.spec\.(ts|js|tsx|jsx)$/i, layer: 'Test' },
-  { pattern: /\/(util|utils|helper|helpers|common|shared|lib)\//i, layer: 'Utility' },
-  { pattern: /\/(middleware|filter|interceptor|aspect)\//i, layer: 'Middleware' },
-  { pattern: /\/(client|remote|proxy|feign|integration)\//i, layer: 'External' },
-  { pattern: /Client\.(java|ts|py)$/i, layer: 'External' },
+  // --- Data / Persistence ---
+  { pattern: /\/(repository|repo|dao|mapper|persistence|data|dataaccess|store|storage|cache|jpa|jdbc|mybatis|hibernate)\//i, layer: 'Data' },
+  { pattern: /(Repository|Dao|Mapper|Store|Cache)\.(java|ts|py|go|kt)$/i, layer: 'Data' },
+  // --- Model / Domain Objects ---
+  { pattern: /\/(model|models|entity|entities|dto|dtos|vo|vos|pojo|schema|schemas|domain|bean|beans|record|records)\//i, layer: 'Model' },
+  { pattern: /(Entity|Dto|VO|Bean|Record|Model)\.(java|ts|py|kt)$/i, layer: 'Model' },
+  // --- Config ---
+  { pattern: /\/(config|configuration|setup|properties|settings|bootstrap|autoconfigure|initializer)\//i, layer: 'Config' },
+  { pattern: /(Config|Configuration|Properties|Settings)\.(java|ts|py|kt)$/i, layer: 'Config' },
+  // --- Test ---
+  { pattern: /\/(test|tests|spec|specs|__test__|__tests__|__spec__|e2e|it|integration-test|bdd|cucumber|feature)\//i, layer: 'Test' },
+  { pattern: /(Test|Tests|Spec|IT)\.(java|ts|py|kt)$/i, layer: 'Test' },
+  { pattern: /\.(test|spec)\.(ts|js|tsx|jsx|py)$/i, layer: 'Test' },
+  { pattern: /\.feature$/i, layer: 'Test' },
+  // --- Utility / Commons ---
+  { pattern: /\/(util|utils|utility|helper|helpers|common|commons|shared|lib|support|toolkit|base|abstract|foundation)\//i, layer: 'Utility' },
+  { pattern: /(Util|Utils|Helper|Helpers|Constants|Base|Abstract)\.(java|ts|py|kt)$/i, layer: 'Utility' },
+  // --- Middleware / Cross-cutting ---
+  { pattern: /\/(middleware|filter|filters|interceptor|interceptors|aspect|aspects|aop|security|auth|authentication|authorization|audit|logging)\//i, layer: 'Middleware' },
+  { pattern: /(Filter|Interceptor|Aspect|Advice|Guard|Authenticator)\.(java|ts|py|kt)$/i, layer: 'Middleware' },
+  // --- External / Integration ---
+  { pattern: /\/(client|clients|remote|proxy|proxies|feign|integration|connector|connectors|adapter|adapters|bridge|consumer|producer|publisher|subscriber|listener|mq|messaging|kafka|jms|soap|rpc|grpc|webhook)\//i, layer: 'External' },
+  { pattern: /(Client|Proxy|Adapter|Connector|Consumer|Producer|Publisher|Subscriber|Listener|Bridge)\.(java|ts|py|kt)$/i, layer: 'External' },
+  // --- Infrastructure / DevOps ---
+  { pattern: /\/(infra|infrastructure|deploy|deployment|helm|k8s|kubernetes|docker|terraform|ci|cd|pipeline|scripts|ansible|cloudformation)\//i, layer: 'Infra' },
+  { pattern: /(Dockerfile|Jenkinsfile|Makefile)$/i, layer: 'Infra' },
+  { pattern: /\.(tf|hcl|Dockerfile)$/i, layer: 'Infra' },
+  // --- Events / Async ---
+  { pattern: /\/(event|events|handler|handlers|command|commands|cqrs|saga|aggregate|eventstore|bus)\//i, layer: 'Events' },
+  { pattern: /(Event|EventHandler|Command|CommandHandler|Saga|Aggregate)\.(java|ts|py|kt)$/i, layer: 'Events' },
+  // --- Scheduler / Jobs ---
+  { pattern: /\/(scheduler|schedulers|job|jobs|cron|batch|task|tasks|worker|workers|queue|queues)\//i, layer: 'Jobs' },
+  { pattern: /(Scheduler|Job|Worker|Task|Batch)\.(java|ts|py|kt)$/i, layer: 'Jobs' },
 ];
 
 interface LayerTheme { gradient: string; border: string; text: string; icon: string; badge: string; bar: string; glow: string; }
@@ -55,6 +78,9 @@ const LAYER_THEME: Record<string, LayerTheme> = {
   'Utility':    { gradient: 'from-indigo-500 to-indigo-600', border: 'border-indigo-200',   text: 'text-indigo-700',  icon: '\uD83D\uDD27', badge: 'bg-indigo-100 text-indigo-700',   bar: 'bg-indigo-500', glow: 'shadow-indigo-200' },
   'Middleware': { gradient: 'from-orange-500 to-orange-600', border: 'border-orange-200',   text: 'text-orange-700',  icon: '\uD83D\uDEE1\uFE0F', badge: 'bg-orange-100 text-orange-700', bar: 'bg-orange-500', glow: 'shadow-orange-200' },
   'External':   { gradient: 'from-red-500 to-red-600',       border: 'border-red-200',      text: 'text-red-700',     icon: '\u2601\uFE0F',  badge: 'bg-red-100 text-red-700',         bar: 'bg-red-500',    glow: 'shadow-red-200' },
+  'Infra':      { gradient: 'from-sky-500 to-sky-600',       border: 'border-sky-200',      text: 'text-sky-700',     icon: '\uD83D\uDEE0\uFE0F', badge: 'bg-sky-100 text-sky-700',  bar: 'bg-sky-500',    glow: 'shadow-sky-200' },
+  'Events':     { gradient: 'from-teal-500 to-teal-600',     border: 'border-teal-200',     text: 'text-teal-700',    icon: '\u26A1',       badge: 'bg-teal-100 text-teal-700',     bar: 'bg-teal-500',   glow: 'shadow-teal-200' },
+  'Jobs':       { gradient: 'from-lime-500 to-lime-600',     border: 'border-lime-200',     text: 'text-lime-700',    icon: '\u23F0',       badge: 'bg-lime-100 text-lime-700',     bar: 'bg-lime-500',   glow: 'shadow-lime-200' },
   'Other':      { gradient: 'from-slate-400 to-slate-500',   border: 'border-slate-200',    text: 'text-slate-600',   icon: '\uD83D\uDCC4', badge: 'bg-slate-100 text-slate-600',     bar: 'bg-slate-400',  glow: 'shadow-slate-200' },
 };
 
@@ -83,7 +109,7 @@ function getTheme(l: string): LayerTheme { return LAYER_THEME[l] || LAYER_THEME[
 // ---------------------------------------------------------------------------
 
 function ArchDiagram({ layers, onSelect }: { layers: [string, FileTreeEntry[]][]; onSelect: (l: string) => void }) {
-  const flowOrder = ['API', 'Middleware', 'Service', 'Data', 'External'];
+  const flowOrder = ['API', 'Middleware', 'Events', 'Service', 'Data', 'External', 'Jobs'];
   const mainFlow = flowOrder.filter(l => layers.some(([n]) => n === l));
   const side = layers.filter(([n]) => !flowOrder.includes(n)).map(([n]) => n);
 
@@ -573,24 +599,53 @@ function InfraPanel({ infra }: { infra: Infrastructure }) {
 // Main Component
 // ---------------------------------------------------------------------------
 
-export default function ArchitectureGraph({ repoId, symbols, fileTree, infrastructure }: ArchitectureGraphProps) {
+export default function ArchitectureGraph({ repoId, symbols, fileTree, infrastructure, discoveredLayers }: ArchitectureGraphProps) {
   const files = fileTree || [];
   const [drillLayer, setDrillLayer] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
+  // Build dynamic layer rules from discovered patterns
+  const dynamicDetect = useMemo(() => {
+    const extra: { pattern: RegExp; layer: string }[] = [];
+    for (const dl of (discoveredLayers || [])) {
+      const p = dl.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      extra.push({ pattern: new RegExp(`\\/${p}\\/`, 'i'), layer: dl.name });
+      if (dl.source === 'class_suffix') {
+        extra.push({ pattern: new RegExp(`${dl.name}\\.(java|ts|py|kt|go)$`, 'i'), layer: dl.name });
+      }
+      // Ensure theme exists
+      if (!LAYER_THEME[dl.name]) {
+        const colors = ['from-cyan-500 to-cyan-600', 'from-rose-500 to-rose-600', 'from-fuchsia-500 to-fuchsia-600', 'from-yellow-500 to-yellow-600', 'from-stone-500 to-stone-600'];
+        const idx = extra.length % colors.length;
+        LAYER_THEME[dl.name] = {
+          gradient: colors[idx], border: 'border-gray-200', text: 'text-gray-700',
+          icon: '\uD83D\uDD37', badge: 'bg-gray-100 text-gray-700', bar: 'bg-gray-500', glow: 'shadow-gray-200',
+        };
+      }
+    }
+    return extra;
+  }, [discoveredLayers]);
+
+  // Combined detectLayer: static rules + dynamic
+  const detectLayerFull = useCallback((p: string): string => {
+    // Dynamic rules first (enterprise-specific take priority)
+    for (const r of dynamicDetect) { if (r.pattern.test(p)) return r.layer; }
+    return detectLayer(p);
+  }, [dynamicDetect]);
+
   const layerData = useMemo(() => {
     const map = new Map<string, FileTreeEntry[]>();
     for (const f of files) {
-      if (f.file_type !== 'source') continue;
-      const layer = detectLayer(f.path);
+      if (f.file_type === 'docs') continue;  // skip markdown/docs only
+      const layer = detectLayerFull(f.path);
       map.set(layer, [...(map.get(layer) || []), f]);
     }
     return Array.from(map.entries()).sort((a, b) => b[1].length - a[1].length);
-  }, [files]);
+  }, [files, detectLayerFull]);
 
   const totalFiles = layerData.reduce((s, [, f]) => s + f.length, 0);
   const totalSize = layerData.reduce((s, [, f]) => s + f.reduce((ss, ff) => ss + ff.size, 0), 0);
-  const totalDirs = new Set(files.filter(f => f.file_type === 'source').map(f => f.directory)).size;
+  const totalDirs = new Set(files.filter(f => f.file_type !== 'docs').map(f => f.directory)).size;
 
   if (files.length === 0) {
     return (

@@ -602,7 +602,7 @@ async def get_repo_symbols(repo_id: str, file_path: str = ""):
 
 
 @router.get("/{repo_id}/file-tree")
-async def get_repo_file_tree(repo_id: str, max_files: int = 500):
+async def get_repo_file_tree(repo_id: str, max_files: int = 2000):
     """Get the file tree for a repository — lightweight, no code index needed.
 
     Returns a list of source files with inferred type and directory info,
@@ -693,7 +693,94 @@ async def get_repo_file_tree(repo_id: str, max_files: int = 500):
     # Detect infrastructure: Dockerfiles, K8s manifests, Helm charts, docker-compose
     infra = _detect_infrastructure(root)
 
-    return {'files': files, 'total': len(files), 'repo_path': repo_path, 'infrastructure': infra}
+    # Auto-discover custom layers from directory names and class suffixes
+    custom_layers = _discover_custom_layers(files)
+
+    return {
+        'files': files,
+        'total': len(files),
+        'repo_path': repo_path,
+        'infrastructure': infra,
+        'discovered_layers': custom_layers,
+    }
+
+
+def _discover_custom_layers(files: list[dict]) -> list[dict]:
+    """Auto-discover architectural layers from actual directory names and class suffixes.
+
+    Scans all source files and identifies recurring directory names and
+    class name suffixes that likely represent architectural layers not
+    covered by the static rules (e.g., Invoker, Gateway, Processor,
+    Delegator, Adapter in enterprise frameworks).
+    """
+    import os
+    import re
+    from collections import Counter
+
+    # Count directory name segments (the meaningful part, e.g., "invoker" from "com/foo/invoker/")
+    dir_segments: Counter = Counter()
+    suffix_counter: Counter = Counter()
+
+    for f in files:
+        if f.get('file_type') != 'source':
+            continue
+        path = f.get('path', '')
+        name = f.get('name', '')
+
+        # Extract meaningful directory segments
+        parts = path.replace('\\', '/').split('/')
+        for part in parts[:-1]:  # exclude filename
+            lower = part.lower()
+            # Skip generic names
+            if lower in ('src', 'main', 'java', 'kotlin', 'python', 'com', 'org', 'net',
+                         'resources', 'webapp', 'app', 'module', 'modules', 'core',
+                         'internal', 'impl', 'pkg', 'cmd'):
+                continue
+            if len(lower) >= 3:
+                dir_segments[lower] += 1
+
+        # Extract class name suffix (e.g., "FooInvoker" → "Invoker")
+        basename = os.path.splitext(name)[0]
+        m = re.match(r'^.*?([A-Z][a-z]{2,}(?:[A-Z][a-z]+)*)$', basename)
+        if m:
+            suffix = m.group(1)
+            # Only count multi-char suffixes that appear as a pattern
+            if len(suffix) >= 4 and suffix[0].isupper():
+                suffix_counter[suffix] += 1
+
+    # Layers = directory segments or suffixes that appear 3+ times
+    # and are not already covered by standard patterns
+    STANDARD_NAMES = {
+        'controller', 'service', 'repository', 'model', 'entity', 'dto',
+        'config', 'test', 'util', 'utils', 'helper', 'middleware', 'filter',
+        'client', 'resource', 'dao', 'mapper', 'aspect', 'interceptor',
+    }
+
+    discovered = []
+
+    for segment, count in dir_segments.most_common(20):
+        if segment in STANDARD_NAMES or count < 3:
+            continue
+        # Check if this is a meaningful architectural pattern
+        discovered.append({
+            'name': segment.capitalize(),
+            'pattern': segment,
+            'count': count,
+            'source': 'directory',
+        })
+
+    for suffix, count in suffix_counter.most_common(20):
+        if suffix.lower() in STANDARD_NAMES or count < 3:
+            continue
+        if not any(d['pattern'] == suffix.lower() for d in discovered):
+            discovered.append({
+                'name': suffix,
+                'pattern': suffix.lower(),
+                'count': count,
+                'source': 'class_suffix',
+            })
+
+    return discovered[:10]  # top 10 custom layers
 
 
 def _detect_infrastructure(root) -> dict:
