@@ -583,6 +583,63 @@ export const workflows = {
 };
 
 // ---------------------------------------------------------------------------
+// MCP Servers — Model Context Protocol server management
+// ---------------------------------------------------------------------------
+
+export interface McpServerTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, any>;
+}
+
+export interface McpServer {
+  id: string;
+  name: string;
+  description: string;
+  transport: string;
+  command: string;
+  url: string;
+  env_vars: Record<string, string>;
+  auth_set: boolean;
+  discovered_tools: McpServerTool[];
+  status: string;
+  last_connected_at: string | null;
+  last_error: string;
+  is_active: boolean;
+  tools_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export const mcpServers = {
+  list: (params?: { status?: string; transport?: string; is_active?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (params?.status) qs.set('status', params.status);
+    if (params?.transport) qs.set('transport', params.transport);
+    if (params?.is_active !== undefined) qs.set('is_active', String(params.is_active));
+    const query = qs.toString() ? `?${qs}` : '';
+    return request<{ servers: McpServer[]; total: number }>(`/mcp-servers${query}`);
+  },
+  get: (id: string) => request<McpServer>(`/mcp-servers/${id}`),
+  create: (data: {
+    name: string; description?: string; transport?: string;
+    command?: string; url?: string; env_vars?: Record<string, string>;
+    auth_config?: Record<string, any>;
+  }) => request<McpServer>('/mcp-servers', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id: string, data: Partial<McpServer>) =>
+    request<McpServer>(`/mcp-servers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete: (id: string) => request<void>(`/mcp-servers/${id}`, { method: 'DELETE' }),
+  discover: (id: string) =>
+    request<{ status: string; tools_count: number; tools: McpServerTool[]; latency_ms: number }>(
+      `/mcp-servers/${id}/discover`, { method: 'POST' }
+    ),
+  test: (id: string) =>
+    request<{ status: string; latency_ms: number; error?: string }>(
+      `/mcp-servers/${id}/test`, { method: 'POST' }
+    ),
+};
+
+// ---------------------------------------------------------------------------
 // Testing Platform
 // ---------------------------------------------------------------------------
 

@@ -92,7 +92,10 @@ const NAV_GROUPS: NavGroup[] = [
       { href: '/testing', label: 'Testing', icon: <IconTesting /> },
       { href: '/testing/coverage', label: 'Coverage', icon: <IconCoverage /> },
       { href: '/migration', label: 'Migration', icon: <IconMigration /> },
+      { href: '/fleet', label: 'Fleet', icon: <IconMigration /> },
+      { href: '/pipelines', label: 'Pipelines', icon: <IconTools /> },
       { href: '/tools', label: 'Tools', icon: <IconTools /> },
+      { href: '/mcp-servers', label: 'MCP', icon: <IconConfig /> },
     ],
   },
   {

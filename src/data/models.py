@@ -83,6 +83,9 @@ class Session(Base):
     trace_id = Column(String(64), nullable=True)
     log = Column(JSON, nullable=False, default=list)
     recipe_ids = Column(JSON, nullable=False, default=list)
+    team_id = Column(String(128), nullable=True)
+    cost_center = Column(String(128), nullable=True)
+    initiated_by = Column(String(256), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -646,10 +649,14 @@ class CustomTool(Base):
     max_turns = Column(Integer, nullable=False, default=20)
     model = Column(String(64), nullable=False, default="")  # legacy — prefer model_config_id
     model_config_id = Column(String(64), ForeignKey("model_configs.id"), nullable=True)
+    mcp_server_id = Column(String(64), ForeignKey("mcp_servers.id"), nullable=True)
+    mcp_tool_names = Column(JSON, nullable=False, default=list)
+    mcp_server = relationship("McpServer", uselist=False, foreign_keys=[mcp_server_id])
     timeout_seconds = Column(Integer, nullable=False, default=300)
 
     # Relationship — eagerly resolve model config
-    model_config = relationship("ModelConfig", uselist=False, foreign_keys=[model_config_id])
+    # NOTE: named 'resolved_model_config' to avoid collision with Pydantic's reserved 'model_config'
+    resolved_model_config = relationship("ModelConfig", uselist=False, foreign_keys=[model_config_id])
 
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
@@ -657,6 +664,57 @@ class CustomTool(Base):
 
     def __repr__(self) -> str:
         return f"<CustomTool id={self.id!r} name={self.name!r} type={self.tool_type!r}>"
+
+
+# ---------------------------------------------------------------------------
+# McpServer — registered Model Context Protocol servers
+# ---------------------------------------------------------------------------
+
+class McpServer(Base):
+    __tablename__ = "mcp_servers"
+
+    id = Column(String(64), primary_key=True, default=_uuid)
+    name = Column(String(256), nullable=False, unique=True)
+    description = Column(Text, nullable=False, default="")
+    transport = Column(String(32), nullable=False, default="stdio")
+    # stdio | sse | streamable-http
+    command = Column(String(2048), nullable=False, default="")
+    url = Column(String(1024), nullable=False, default="")
+    env_vars = Column(JSON, nullable=False, default=dict)
+    auth_config = Column(JSON, nullable=False, default=dict)
+    discovered_tools = Column(JSON, nullable=False, default=list)
+    status = Column(String(32), nullable=False, default="pending")
+    last_connected_at = Column(DateTime(timezone=True), nullable=True)
+    last_error = Column(Text, nullable=False, default="")
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+    def __repr__(self) -> str:
+        return f"<McpServer id={self.id!r} name={self.name!r} transport={self.transport!r}>"
+
+
+# ---------------------------------------------------------------------------
+# AgentPipeline — ordered sequence of tools for agent-to-agent orchestration
+# ---------------------------------------------------------------------------
+
+class AgentPipeline(Base):
+    __tablename__ = "agent_pipelines"
+
+    id = Column(String(64), primary_key=True, default=_uuid)
+    name = Column(String(256), nullable=False)
+    description = Column(Text, nullable=False, default="")
+    steps = Column(JSON, nullable=False, default=list)
+    # Each step: {tool_id, input_mapping: {key: source_key}, output_keys: [str],
+    #             parallel_group: int, condition: str}
+    context_schema = Column(JSON, nullable=False, default=dict)
+    # Defines the shared context keys and their types
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+    def __repr__(self) -> str:
+        return f"<AgentPipeline id={self.id!r} name={self.name!r}>"
 
 
 class MigrationRun(Base):
