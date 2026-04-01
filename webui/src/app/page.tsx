@@ -46,7 +46,7 @@ export default function Dashboard() {
         migrations.stats().catch(() => null),
         models.list().catch(() => ({ models: [], total: 0 })),
       ]);
-      setRepoList(Array.isArray(r) ? r : []);
+      setRepoList((Array.isArray(r) ? r : []).filter(repo => repo.id !== '__workspace_free__'));
       setTestingStats(testS);
       setMigrationStats(migS);
       const modelList = mdls.models || [];
@@ -189,8 +189,8 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Feature grid — 2x2 */}
-          <div className="grid grid-cols-2 gap-3">
+          {/* Feature grid — 3x2 */}
+          <div className="grid grid-cols-3 gap-3">
             <Link
               href="/testing"
               data-tour="testing"
@@ -234,6 +234,26 @@ export default function Dashboard() {
               </div>
               <p className="font-medium text-gray-900 text-sm">Tools</p>
               <p className="text-xs text-gray-500 mt-0.5">Custom agent tools</p>
+            </Link>
+            <Link
+              href="/pipelines"
+              className="bg-white rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow group"
+            >
+              <div className="w-9 h-9 rounded-lg bg-teal-100 flex items-center justify-center text-base mb-2 group-hover:scale-110 transition-transform">
+                {'\u{1F517}'}
+              </div>
+              <p className="font-medium text-gray-900 text-sm">Pipelines</p>
+              <p className="text-xs text-gray-500 mt-0.5">Multi-agent workflows</p>
+            </Link>
+            <Link
+              href="/fleet"
+              className="bg-white rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow group"
+            >
+              <div className="w-9 h-9 rounded-lg bg-indigo-100 flex items-center justify-center text-base mb-2 group-hover:scale-110 transition-transform">
+                {'\u{1F3D7}\u{FE0F}'}
+              </div>
+              <p className="font-medium text-gray-900 text-sm">Fleet</p>
+              <p className="text-xs text-gray-500 mt-0.5">Enterprise-wide migrations</p>
             </Link>
           </div>
         </div>

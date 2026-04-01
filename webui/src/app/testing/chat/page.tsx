@@ -451,7 +451,7 @@ export default function ChatPage() {
     (async () => {
       try {
         const r = await repos.list();
-        const list = Array.isArray(r) ? r : [];
+        const list = (Array.isArray(r) ? r : []).filter(repo => repo.id !== '__workspace_free__');
         setRepoList(list);
 
         // Clean up localStorage for repos that no longer exist
