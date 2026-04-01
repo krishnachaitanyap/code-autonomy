@@ -693,8 +693,8 @@ async def get_repo_file_tree(repo_id: str, max_files: int = 2000):
     # Detect infrastructure: Dockerfiles, K8s manifests, Helm charts, docker-compose
     infra = _detect_infrastructure(root)
 
-    # Auto-discover custom layers from directory names and class suffixes
-    custom_layers = _discover_custom_layers(files)
+    # Custom layers are now detected by _analyze_source_files via annotations
+    custom_layers = []
 
     # Deep scan: parse imports and annotations to detect actual frameworks
     source_analysis = _analyze_source_files(root, files)
