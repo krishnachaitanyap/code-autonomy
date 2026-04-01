@@ -354,7 +354,7 @@ export default function ChatPage() {
       return;
     }
     const timer = setTimeout(() => {
-      const matches = suggestRecipes(input, availableRecipes);
+      const matches: { recipe: { id: string }; score: number }[] = [];
       const matchedIds = matches.map(m => m.recipe.id);
       setAutoSuggestedIds(matchedIds);
       // Add new suggestions to selection (union with manual picks)
