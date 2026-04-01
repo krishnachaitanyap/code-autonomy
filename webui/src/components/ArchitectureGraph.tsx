@@ -51,16 +51,25 @@ const LAYER_RULES: { pattern: RegExp; layer: string }[] = [
   // --- Middleware / Cross-cutting ---
   { pattern: /\/(middleware|filter|filters|interceptor|interceptors|aspect|aspects|aop|security|auth|authentication|authorization|audit|logging)\//i, layer: 'Middleware' },
   { pattern: /(Filter|Interceptor|Aspect|Advice|Guard|Authenticator)\.(java|ts|py|kt)$/i, layer: 'Middleware' },
-  // --- External / Integration ---
-  { pattern: /\/(client|clients|remote|proxy|proxies|feign|integration|connector|connectors|adapter|adapters|bridge|consumer|producer|publisher|subscriber|listener|mq|messaging|kafka|jms|soap|rpc|grpc|webhook)\//i, layer: 'External' },
-  { pattern: /(Client|Proxy|Adapter|Connector|Consumer|Producer|Publisher|Subscriber|Listener|Bridge)\.(java|ts|py|kt)$/i, layer: 'External' },
+  // --- External / Integration (REST/SOAP/gRPC clients only — messaging moved to Events) ---
+  { pattern: /\/(client|clients|remote|proxy|proxies|feign|integration|connector|connectors|adapter|adapters|bridge|soap|rpc|grpc|webhook)\//i, layer: 'External' },
+  { pattern: /(Client|Proxy|Adapter|Connector|Bridge|Feign)\.(java|ts|py|kt)$/i, layer: 'External' },
   // --- Infrastructure / DevOps ---
   { pattern: /\/(infra|infrastructure|deploy|deployment|helm|k8s|kubernetes|docker|terraform|ci|cd|pipeline|scripts|ansible|cloudformation)\//i, layer: 'Infra' },
   { pattern: /(Dockerfile|Jenkinsfile|Makefile)$/i, layer: 'Infra' },
   { pattern: /\.(tf|hcl|Dockerfile)$/i, layer: 'Infra' },
-  // --- Events / Async ---
+  // --- Events / Async / Messaging ---
   { pattern: /\/(event|events|handler|handlers|command|commands|cqrs|saga|aggregate|eventstore|bus)\//i, layer: 'Events' },
   { pattern: /(Event|EventHandler|Command|CommandHandler|Saga|Aggregate)\.(java|ts|py|kt)$/i, layer: 'Events' },
+  // Kafka-specific patterns
+  { pattern: /\/(kafka|kafkastreams|stream|streams|avro|confluent)\//i, layer: 'Events' },
+  { pattern: /Kafka\w*\.(java|ts|py|kt)$/i, layer: 'Events' },
+  { pattern: /(MessageListener|MessageConsumer|MessageProducer|MessageHandler|TopicListener|EventListener)\.(java|ts|py|kt)$/i, layer: 'Events' },
+  { pattern: /\w+Listener\.(java|ts|py|kt)$/i, layer: 'Events' },
+  { pattern: /(Consumer|Producer|StreamProcessor|KafkaTemplate|KafkaConfig)\.(java|ts|py|kt)$/i, layer: 'Events' },
+  // JMS / MQ / RabbitMQ / ActiveMQ
+  { pattern: /\/(jms|mq|amqp|rabbit|activemq|sqs|sns|pubsub)\//i, layer: 'Events' },
+  { pattern: /(Queue|Topic|Exchange|Binding|MessageBroker)\.(java|ts|py|kt)$/i, layer: 'Events' },
   // --- Scheduler / Jobs ---
   { pattern: /\/(scheduler|schedulers|job|jobs|cron|batch|task|tasks|worker|workers|queue|queues)\//i, layer: 'Jobs' },
   { pattern: /(Scheduler|Job|Worker|Task|Batch)\.(java|ts|py|kt)$/i, layer: 'Jobs' },
