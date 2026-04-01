@@ -118,7 +118,8 @@ def init_db(url: str = "") -> None:
         columns = [c['name'] for c in inspector.get_columns('custom_tools')]
         if 'mcp_server_id' not in columns:
             with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE custom_tools ADD COLUMN mcp_server_id VARCHAR(64) REFERENCES mcp_servers(id)"))
+                # No FK constraint in ALTER — SQLite doesn't enforce it anyway
+                conn.execute(text("ALTER TABLE custom_tools ADD COLUMN mcp_server_id VARCHAR(64)"))
         if 'mcp_tool_names' not in columns:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE custom_tools ADD COLUMN mcp_tool_names JSON DEFAULT '[]'"))
@@ -768,6 +769,31 @@ def _seed_default_recipes(conn) -> None:
             "source_framework": "JISI",
             "target_framework": "",
             "tool_name": "JISI_downstream_detector",  # resolved to tool_ids at insert time
+        },
+        {
+            "name": "Kubernetes Operations",
+            "category": "devops",
+            "description": (
+                "Inspect, manage, and troubleshoot Kubernetes clusters — pods, deployments, "
+                "services, logs, events, scaling, rollouts, and more."
+            ),
+            "priority": 60,
+            "tags": '["kubernetes", "k8s", "devops", "infrastructure", "operations"]',
+            "prerequisites": "[]",
+            "agent_instructions": (
+                "Use the @Kubernetes tool to interact with the Kubernetes cluster.\n\n"
+                "**Common workflows:**\n"
+                "- **Health check:** get pods → check events → read logs of unhealthy pods\n"
+                "- **Deployment status:** get deployments → rollout status → top pods\n"
+                "- **Debugging:** describe pod → get events → get logs (--previous for crashes)\n"
+                "- **Scaling:** get deployments → scale → verify rollout status\n"
+                "- **Config review:** get configmaps → get ingress → get services\n\n"
+                "Always start by understanding the current state before making changes. "
+                "Show the user what exists before modifying anything."
+            ),
+            "source_framework": "",
+            "target_framework": "",
+            "tool_name": "Kubernetes",
         },
     ]
 
