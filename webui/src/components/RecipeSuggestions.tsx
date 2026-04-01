@@ -36,7 +36,7 @@ export default function RecipeSuggestions({
             onChange={(e) => onToggleEnabled(e.target.checked)}
             className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5"
           />
-          Auto-suggest recipes
+          Auto-suggest
         </label>
       </div>
     );
