@@ -120,7 +120,7 @@ export const repos = {
   symbols: (id: string, filePath?: string) =>
     request<any[]>(`/repos/${id}/symbols${filePath ? `?file_path=${filePath}` : ''}`),
   fileTree: (id: string, maxFiles?: number) =>
-    request<{ files: any[]; total: number; infrastructure?: any; discovered_layers?: any[] }>(`/repos/${id}/file-tree${maxFiles ? `?max_files=${maxFiles}` : ''}`),
+    request<{ files: any[]; total: number; infrastructure?: any; discovered_layers?: any[]; source_analysis?: any }>(`/repos/${id}/file-tree${maxFiles ? `?max_files=${maxFiles}` : ''}`),
   branches: (id: string) =>
     request<{ branches: string[]; current_branch?: string }>(`/repos/${id}/branches`),
   generateSkills: (id: string) =>

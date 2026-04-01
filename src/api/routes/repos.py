@@ -696,16 +696,121 @@ async def get_repo_file_tree(repo_id: str, max_files: int = 2000):
     # Auto-discover custom layers from directory names and class suffixes
     custom_layers = _discover_custom_layers(files)
 
+    # Deep scan: parse imports and annotations to detect actual frameworks
+    source_analysis = _analyze_source_files(root, files)
+
     return {
         'files': files,
         'total': len(files),
         'repo_path': repo_path,
+        'source_analysis': source_analysis,
         'infrastructure': infra,
         'discovered_layers': custom_layers,
     }
 
 
-def _discover_custom_layers(files: list[dict]) -> list[dict]:
+def _analyze_source_files(root, files: list[dict]) -> dict:
+    """Parse source files to detect actual frameworks, annotations, and patterns.
+
+    Instead of guessing layers from file names, reads imports and annotations
+    from Java/Python/TypeScript files to classify them accurately.
+    """
+    import os
+    import re
+
+    # Framework detection from imports
+    FRAMEWORK_PATTERNS = {
+        # Java
+        'spring-web': re.compile(r'import\s+org\.springframework\.web\.', re.MULTILINE),
+        'spring-kafka': re.compile(r'import\s+org\.springframework\.kafka\.', re.MULTILINE),
+        'spring-jms': re.compile(r'import\s+org\.springframework\.jms\.', re.MULTILINE),
+        'spring-data': re.compile(r'import\s+org\.springframework\.data\.', re.MULTILINE),
+        'spring-security': re.compile(r'import\s+org\.springframework\.security\.', re.MULTILINE),
+        'spring-boot': re.compile(r'import\s+org\.springframework\.boot\.', re.MULTILINE),
+        'spring-cloud': re.compile(r'import\s+org\.springframework\.cloud\.', re.MULTILINE),
+        'jpa-hibernate': re.compile(r'import\s+javax\.persistence\.|import\s+jakarta\.persistence\.', re.MULTILINE),
+        'kafka-client': re.compile(r'import\s+org\.apache\.kafka\.', re.MULTILINE),
+        'jms': re.compile(r'import\s+javax\.jms\.|import\s+jakarta\.jms\.', re.MULTILINE),
+        'soap': re.compile(r'import\s+javax\.xml\.ws\.|import\s+jakarta\.xml\.ws\.', re.MULTILINE),
+        'rest-client': re.compile(r'import\s+.*\.(RestTemplate|WebClient|FeignClient|HttpClient)', re.MULTILINE),
+        'grpc': re.compile(r'import\s+io\.grpc\.', re.MULTILINE),
+        'junit': re.compile(r'import\s+org\.junit\.', re.MULTILINE),
+        'mockito': re.compile(r'import\s+org\.mockito\.', re.MULTILINE),
+        'cucumber': re.compile(r'import\s+io\.cucumber\.', re.MULTILINE),
+        'lombok': re.compile(r'import\s+lombok\.', re.MULTILINE),
+        'slf4j': re.compile(r'import\s+org\.slf4j\.', re.MULTILINE),
+        'jackson': re.compile(r'import\s+com\.fasterxml\.jackson\.', re.MULTILINE),
+        'mybatis': re.compile(r'import\s+org\.mybatis\.', re.MULTILINE),
+        'redis': re.compile(r'import\s+.*redis\.|import\s+org\.springframework\.data\.redis\.', re.MULTILINE),
+        'mongodb': re.compile(r'import\s+.*mongo\.|import\s+org\.springframework\.data\.mongodb\.', re.MULTILINE),
+        'elasticsearch': re.compile(r'import\s+.*elasticsearch\.', re.MULTILINE),
+        'rabbitmq': re.compile(r'import\s+.*rabbit\.|import\s+org\.springframework\.amqp\.', re.MULTILINE),
+        'swagger': re.compile(r'import\s+io\.swagger\.|import\s+org\.springdoc\.', re.MULTILINE),
+    }
+
+    # Annotation-based classification
+    ANNOTATION_LAYER = {
+        '@RestController': 'API', '@Controller': 'API', '@RequestMapping': 'API',
+        '@GetMapping': 'API', '@PostMapping': 'API', '@PutMapping': 'API', '@DeleteMapping': 'API',
+        '@WebServlet': 'API', '@Path': 'API', '@GraphQLApi': 'API',
+        '@Service': 'Service', '@Component': 'Service', '@Named': 'Service',
+        '@Repository': 'Data', '@Mapper': 'Data', '@Dao': 'Data',
+        '@Entity': 'Model', '@Table': 'Model', '@Document': 'Model', '@MappedSuperclass': 'Model',
+        '@Configuration': 'Config', '@Bean': 'Config', '@ConfigurationProperties': 'Config',
+        '@EnableAutoConfiguration': 'Config', '@SpringBootApplication': 'Config',
+        '@KafkaListener': 'Events', '@JmsListener': 'Events', '@RabbitListener': 'Events',
+        '@StreamListener': 'Events', '@EventHandler': 'Events', '@Scheduled': 'Jobs',
+        '@Aspect': 'Middleware', '@Around': 'Middleware', '@Before': 'Middleware',
+        '@PreAuthorize': 'Middleware', '@Secured': 'Middleware',
+        '@FeignClient': 'External', '@WebServiceClient': 'External',
+        '@Test': 'Test', '@ParameterizedTest': 'Test', '@SpringBootTest': 'Test',
+        '@CucumberOptions': 'Test', '@Given': 'Test', '@When': 'Test', '@Then': 'Test',
+    }
+
+    frameworks_detected: dict[str, int] = {}
+    file_layers: dict[str, str] = {}  # path -> detected layer
+    annotation_counts: dict[str, int] = {}
+
+    for f in files:
+        if f.get('file_type') not in ('source',):
+            continue
+        ext = f.get('extension', '')
+        if ext not in ('.java', '.kt', '.py', '.ts', '.tsx', '.js', '.jsx'):
+            continue
+
+        full_path = os.path.join(str(root), f['path'])
+        try:
+            content = open(full_path, 'r', errors='replace').read(8192)  # first 8KB
+        except Exception:
+            continue
+
+        # Detect frameworks from imports
+        for fw_name, pattern in FRAMEWORK_PATTERNS.items():
+            if pattern.search(content):
+                frameworks_detected[fw_name] = frameworks_detected.get(fw_name, 0) + 1
+
+        # Detect layer from annotations
+        for annotation, layer in ANNOTATION_LAYER.items():
+            if annotation in content:
+                annotation_counts[annotation] = annotation_counts.get(annotation, 0) + 1
+                # First annotation match wins for this file
+                if f['path'] not in file_layers:
+                    file_layers[f['path']] = layer
+
+    # Build layer summary from annotations (more accurate than regex)
+    layer_files: dict[str, list[str]] = {}
+    for path, layer in file_layers.items():
+        layer_files.setdefault(layer, []).append(path)
+
+    return {
+        'frameworks': frameworks_detected,
+        'annotations': annotation_counts,
+        'file_layers': file_layers,
+        'layer_summary': {layer: len(files) for layer, files in layer_files.items()},
+    }
+
+
+
     """Auto-discover architectural layers from actual directory names and class suffixes.
 
     Scans all source files and identifies recurring directory names and
@@ -866,16 +971,99 @@ def _detect_infrastructure(root) -> dict:
                             }
                             # Extract container details from pod specs
                             if kind in ('Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob'):
-                                spec = (doc.get('spec', {}).get('template', {}).get('spec', {}))
-                                for c in (spec.get('containers') or []):
-                                    resource.setdefault('containers', []).append({
+                                pod_spec = doc.get('spec', {}).get('template', {}).get('spec', {})
+                                for c in (pod_spec.get('containers') or []):
+                                    container_info = {
                                         'name': c.get('name', ''),
                                         'image': c.get('image', ''),
                                         'ports': [str(p.get('containerPort', '')) for p in (c.get('ports') or [])],
-                                    })
+                                    }
+                                    # Probes
+                                    for probe_type in ('livenessProbe', 'readinessProbe', 'startupProbe'):
+                                        probe = c.get(probe_type)
+                                        if probe:
+                                            probe_info = {'type': probe_type.replace('Probe', '')}
+                                            if probe.get('httpGet'):
+                                                probe_info['method'] = 'httpGet'
+                                                probe_info['path'] = probe['httpGet'].get('path', '')
+                                                probe_info['port'] = str(probe['httpGet'].get('port', ''))
+                                            elif probe.get('tcpSocket'):
+                                                probe_info['method'] = 'tcpSocket'
+                                                probe_info['port'] = str(probe['tcpSocket'].get('port', ''))
+                                            elif probe.get('exec'):
+                                                probe_info['method'] = 'exec'
+                                                probe_info['command'] = ' '.join(probe['exec'].get('command', []))
+                                            if probe.get('initialDelaySeconds'):
+                                                probe_info['initialDelay'] = probe['initialDelaySeconds']
+                                            if probe.get('periodSeconds'):
+                                                probe_info['period'] = probe['periodSeconds']
+                                            container_info.setdefault('probes', []).append(probe_info)
+                                    # Resources (requests/limits)
+                                    resources = c.get('resources', {})
+                                    if resources:
+                                        container_info['resources'] = {
+                                            'requests': resources.get('requests', {}),
+                                            'limits': resources.get('limits', {}),
+                                        }
+                                    # Environment variables (names only, not values)
+                                    env = c.get('env', [])
+                                    env_from = c.get('envFrom', [])
+                                    if env or env_from:
+                                        container_info['env_count'] = len(env)
+                                        container_info['env_names'] = [e.get('name', '') for e in env[:10]]
+                                        container_info['env_from'] = [
+                                            ef.get('configMapRef', {}).get('name') or ef.get('secretRef', {}).get('name', '')
+                                            for ef in env_from
+                                        ]
+                                    # Volume mounts
+                                    vol_mounts = c.get('volumeMounts', [])
+                                    if vol_mounts:
+                                        container_info['volume_mounts'] = [
+                                            {'name': vm.get('name', ''), 'path': vm.get('mountPath', ''), 'readOnly': vm.get('readOnly', False)}
+                                            for vm in vol_mounts
+                                        ]
+                                    # Security context (container-level)
+                                    sec_ctx = c.get('securityContext', {})
+                                    if sec_ctx:
+                                        container_info['security_context'] = {
+                                            k: v for k, v in sec_ctx.items() if v is not None
+                                        }
+                                    resource.setdefault('containers', []).append(container_info)
+
+                                # Pod-level details
                                 replicas = doc.get('spec', {}).get('replicas')
                                 if replicas:
                                     resource['replicas'] = replicas
+                                # Pod security context
+                                pod_sec = pod_spec.get('securityContext', {})
+                                if pod_sec:
+                                    resource['pod_security_context'] = {k: v for k, v in pod_sec.items() if v is not None}
+                                # Service account
+                                sa = pod_spec.get('serviceAccountName') or pod_spec.get('serviceAccount')
+                                if sa:
+                                    resource['service_account'] = sa
+                                # Volumes
+                                volumes = pod_spec.get('volumes', [])
+                                if volumes:
+                                    resource['volumes'] = [
+                                        {
+                                            'name': v.get('name', ''),
+                                            'type': next((k for k in v if k != 'name'), 'unknown'),
+                                            'source': str(v.get(next((k for k in v if k != 'name'), ''), ''))[:100],
+                                        }
+                                        for v in volumes
+                                    ]
+                                # Node selector / affinity
+                                node_sel = pod_spec.get('nodeSelector', {})
+                                if node_sel:
+                                    resource['node_selector'] = node_sel
+                                # Tolerations
+                                tolerations = pod_spec.get('tolerations', [])
+                                if tolerations:
+                                    resource['tolerations'] = [
+                                        {'key': t.get('key', ''), 'effect': t.get('effect', ''), 'operator': t.get('operator', '')}
+                                        for t in tolerations
+                                    ]
                             # Extract service ports/selectors
                             if kind == 'Service':
                                 svc_spec = doc.get('spec', {})
@@ -892,6 +1080,32 @@ def _detect_infrastructure(root) -> dict:
                                     {'host': r.get('host', ''), 'paths': [p.get('path', '/') for p in (r.get('http', {}).get('paths') or [])]}
                                     for r in (ing_spec.get('rules') or [])
                                 ]
+                            # HPA details
+                            if kind == 'HorizontalPodAutoscaler':
+                                hpa_spec = doc.get('spec', {})
+                                resource['min_replicas'] = hpa_spec.get('minReplicas')
+                                resource['max_replicas'] = hpa_spec.get('maxReplicas')
+                                resource['target_cpu'] = hpa_spec.get('targetCPUUtilizationPercentage')
+                                metrics = hpa_spec.get('metrics', [])
+                                resource['metrics'] = [
+                                    {'type': m.get('type', ''), 'name': (m.get('resource', {}) or m.get('pods', {})).get('name', '')}
+                                    for m in metrics
+                                ]
+                            # PVC details
+                            if kind == 'PersistentVolumeClaim':
+                                pvc_spec = doc.get('spec', {})
+                                resource['storage_class'] = pvc_spec.get('storageClassName', '')
+                                resource['access_modes'] = pvc_spec.get('accessModes', [])
+                                req = pvc_spec.get('resources', {}).get('requests', {})
+                                resource['storage_size'] = req.get('storage', '')
+                            # NetworkPolicy
+                            if kind == 'NetworkPolicy':
+                                np_spec = doc.get('spec', {})
+                                resource['pod_selector'] = np_spec.get('podSelector', {})
+                                resource['policy_types'] = np_spec.get('policyTypes', [])
+                                resource['ingress_rules_count'] = len(np_spec.get('ingress', []))
+                                resource['egress_rules_count'] = len(np_spec.get('egress', []))
+
                             k8s_resources.append(resource)
                 except Exception:
                     pass

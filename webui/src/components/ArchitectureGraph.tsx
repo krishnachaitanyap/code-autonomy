@@ -15,7 +15,8 @@ interface ComposeService { name: string; image: string; build: string; ports: st
 interface Infrastructure { containers: DockerContainer[]; k8s_resources: K8sResource[]; helm_charts: string[]; compose_services: ComposeService[]; has_docker: boolean; has_kubernetes: boolean; has_helm: boolean; }
 
 interface DiscoveredLayer { name: string; pattern: string; count: number; source: string; }
-interface ArchitectureGraphProps { repoId: string; symbols: Symbol[]; fileTree?: FileTreeEntry[]; infrastructure?: Infrastructure; discoveredLayers?: DiscoveredLayer[]; }
+interface SourceAnalysis { frameworks: Record<string, number>; annotations: Record<string, number>; file_layers: Record<string, string>; layer_summary: Record<string, number>; }
+interface ArchitectureGraphProps { repoId: string; symbols: Symbol[]; fileTree?: FileTreeEntry[]; infrastructure?: Infrastructure; discoveredLayers?: DiscoveredLayer[]; sourceAnalysis?: SourceAnalysis; }
 
 // ---------------------------------------------------------------------------
 // Layer detection & colors
@@ -114,81 +115,147 @@ function fmt(b: number): string { return b > 1048576 ? `${(b/1048576).toFixed(1)
 function getTheme(l: string): LayerTheme { return LAYER_THEME[l] || LAYER_THEME['Other']; }
 
 // ---------------------------------------------------------------------------
-// Vertical Architecture Diagram — the hero visualization
+// Architecture Diagram — parallel entry points converging into service layer
 // ---------------------------------------------------------------------------
 
 function ArchDiagram({ layers, onSelect }: { layers: [string, FileTreeEntry[]][]; onSelect: (l: string) => void }) {
-  const flowOrder = ['API', 'Middleware', 'Events', 'Service', 'Data', 'External', 'Jobs'];
-  const mainFlow = flowOrder.filter(l => layers.some(([n]) => n === l));
-  const side = layers.filter(([n]) => !flowOrder.includes(n)).map(([n]) => n);
+  const has = (l: string) => layers.some(([n]) => n === l);
 
-  return (
-    <div className="flex gap-6 justify-center py-2">
-      {/* Main vertical flow */}
-      <div className="flex flex-col items-center">
-        {/* Client entry */}
-        <div className="flex items-center gap-2 mb-2">
-          <div className="w-8 h-8 rounded-full bg-gray-800 text-white flex items-center justify-center text-[10px] font-bold">IN</div>
-          <span className="text-[10px] text-gray-400 font-medium">Incoming Requests</span>
-        </div>
+  // Parallel entry points
+  const entryLayers = ['API', 'Events'].filter(has);
+  // Core processing flow
+  const coreFlow = ['Middleware', 'Service'].filter(has);
+  // Data + External (can be parallel)
+  const dataLayers = ['Data', 'External'].filter(has);
+  // Background
+  const bgLayers = ['Jobs'].filter(has);
+  // Supporting (sidebar)
+  const allMain = [...entryLayers, ...coreFlow, ...dataLayers, ...bgLayers];
+  const side = layers.filter(([n]) => !allMain.includes(n)).map(([n]) => n);
 
-        {mainFlow.map((layer, i) => {
-          const t = getTheme(layer);
-          const files = layers.find(([n]) => n === layer)?.[1] || [];
-          const dirs = new Set(files.map(f => f.directory));
-          return (
-            <div key={layer} className="flex flex-col items-center">
-              {/* Arrow down */}
-              {i > 0 && (
-                <div className="flex flex-col items-center my-1">
-                  <div className="w-0.5 h-4 bg-gradient-to-b from-gray-300 to-gray-400" />
-                  <svg className="w-3 h-2 text-gray-400" viewBox="0 0 12 8" fill="currentColor"><path d="M6 8L0 0h12z"/></svg>
-                </div>
-              )}
-              {/* Layer box */}
-              <button
-                onClick={() => onSelect(layer)}
-                className={`group relative w-64 rounded-2xl border ${t.border} bg-white hover:${t.glow} hover:shadow-lg transition-all duration-200 overflow-hidden`}
-              >
+  function LayerBox({ layer, compact }: { layer: string; compact?: boolean }) {
+    const t = getTheme(layer);
+    const files = layers.find(([n]) => n === layer)?.[1] || [];
+    const dirs = new Set(files.map(f => f.directory));
+    return (
+      <button
+        onClick={() => onSelect(layer)}
+        className={`group relative ${compact ? 'w-48' : 'w-56'} rounded-2xl border ${t.border} bg-white hover:shadow-lg transition-all duration-200 overflow-hidden`}
+      >
                 {/* Gradient top bar */}
                 <div className={`h-1.5 bg-gradient-to-r ${t.gradient}`} />
-                <div className="px-4 py-3">
+                <div className="px-3 py-2.5">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <span className="text-lg">{t.icon}</span>
+                      <span className="text-base">{t.icon}</span>
                       <span className={`font-bold text-sm ${t.text}`}>{layer}</span>
                     </div>
-                    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${t.badge}`}>
-                      {files.length}
-                    </span>
+                    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${t.badge}`}>{files.length}</span>
                   </div>
-                  <div className="flex items-center gap-3 mt-1.5 text-[10px] text-gray-400">
+                  <div className="flex items-center gap-3 mt-1 text-[10px] text-gray-400">
                     <span>{dirs.size} dirs</span>
                     <span>{fmt(files.reduce((s, f) => s + f.size, 0))}</span>
                   </div>
-                  {/* Mini file preview */}
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {files.slice(0, 5).map((f, j) => (
-                      <span key={j} className="text-[9px] px-1.5 py-0.5 rounded bg-gray-50 text-gray-500 font-mono truncate max-w-[100px]">
-                        {f.name}
-                      </span>
+                  <div className="mt-1.5 flex flex-wrap gap-1">
+                    {files.slice(0, 4).map((f, j) => (
+                      <span key={j} className="text-[9px] px-1.5 py-0.5 rounded bg-gray-50 text-gray-500 font-mono truncate max-w-[90px]">{f.name}</span>
                     ))}
-                    {files.length > 5 && <span className="text-[9px] text-gray-400 self-center">+{files.length - 5}</span>}
+                    {files.length > 4 && <span className="text-[9px] text-gray-400 self-center">+{files.length - 4}</span>}
                   </div>
                 </div>
-                {/* Hover indicator */}
                 <div className={`absolute inset-y-0 right-0 w-1 bg-gradient-to-b ${t.gradient} opacity-0 group-hover:opacity-100 transition-opacity rounded-r-2xl`} />
               </button>
+    );
+  }
+
+  const Arrow = () => (
+    <div className="flex flex-col items-center my-1">
+      <div className="w-0.5 h-4 bg-gradient-to-b from-gray-300 to-gray-400" />
+      <svg className="w-3 h-2 text-gray-400" viewBox="0 0 12 8" fill="currentColor"><path d="M6 8L0 0h12z"/></svg>
+    </div>
+  );
+
+  return (
+    <div className="flex gap-6 justify-center py-2">
+      {/* Main flow */}
+      <div className="flex flex-col items-center">
+
+        {/* Parallel entry points: API + Events side by side */}
+        {entryLayers.length > 0 && (
+          <>
+            <div className="flex items-start gap-4 mb-1">
+              {entryLayers.includes('API') && (
+                <div className="flex flex-col items-center">
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <div className="w-7 h-7 rounded-full bg-gray-800 text-white flex items-center justify-center text-[8px] font-bold">IN</div>
+                    <span className="text-[9px] text-gray-400">REST</span>
+                  </div>
+                  <Arrow />
+                  <LayerBox layer="API" />
+                </div>
+              )}
+              {entryLayers.includes('Events') && (
+                <div className="flex flex-col items-center">
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <div className="w-7 h-7 rounded-full bg-teal-700 text-white flex items-center justify-center text-[8px] font-bold">MQ</div>
+                    <span className="text-[9px] text-gray-400">Kafka / MQ</span>
+                  </div>
+                  <Arrow />
+                  <LayerBox layer="Events" />
+                </div>
+              )}
             </div>
-          );
-        })}
+            {/* Converge arrows */}
+            {entryLayers.length > 1 && coreFlow.length > 0 && (
+              <div className="flex items-center justify-center gap-16 my-1">
+                <div className="w-16 h-0.5 bg-gray-300 rounded" />
+                <svg className="w-3 h-2 text-gray-400 -ml-14" viewBox="0 0 12 8" fill="currentColor"><path d="M6 8L0 0h12z"/></svg>
+              </div>
+            )}
+            {entryLayers.length === 1 && coreFlow.length > 0 && <Arrow />}
+          </>
+        )}
+
+        {/* Core flow: Middleware → Service */}
+        {coreFlow.map((layer, i) => (
+          <div key={layer} className="flex flex-col items-center">
+            {(i > 0 || entryLayers.length === 0) && <Arrow />}
+            <LayerBox layer={layer} />
+          </div>
+        ))}
+
+        {/* Data + External (can be parallel outbound) */}
+        {dataLayers.length > 1 ? (
+          <>
+            <Arrow />
+            <div className="flex items-start gap-4">
+              {dataLayers.map(layer => (
+                <div key={layer} className="flex flex-col items-center">
+                  <LayerBox layer={layer} compact />
+                </div>
+              ))}
+            </div>
+          </>
+        ) : dataLayers.length === 1 ? (
+          <div className="flex flex-col items-center">
+            <Arrow />
+            <LayerBox layer={dataLayers[0]} />
+          </div>
+        ) : null}
+
+        {/* Background jobs */}
+        {bgLayers.length > 0 && bgLayers.map(layer => (
+          <div key={layer} className="flex flex-col items-center">
+            <Arrow />
+            <LayerBox layer={layer} compact />
+          </div>
+        ))}
 
         {/* Terminal */}
-        {mainFlow.length > 0 && (
+        {(dataLayers.length > 0 || coreFlow.length > 0) && (
           <div className="flex flex-col items-center mt-1">
-            <div className="w-0.5 h-4 bg-gradient-to-b from-gray-300 to-gray-400" />
-            <svg className="w-3 h-2 text-gray-400" viewBox="0 0 12 8" fill="currentColor"><path d="M6 8L0 0h12z"/></svg>
-            <div className="w-8 h-8 rounded-full bg-gray-200 text-gray-500 flex items-center justify-center text-[10px] font-bold mt-1">DB</div>
+            <Arrow />
+            <div className="w-8 h-8 rounded-full bg-gray-200 text-gray-500 flex items-center justify-center text-[10px] font-bold">DB</div>
           </div>
         )}
       </div>
@@ -201,20 +268,15 @@ function ArchDiagram({ layers, onSelect }: { layers: [string, FileTreeEntry[]][]
             const t = getTheme(layer);
             const files = layers.find(([n]) => n === layer)?.[1] || [];
             return (
-              <button
-                key={layer}
-                onClick={() => onSelect(layer)}
-                className={`group relative w-44 rounded-xl border ${t.border} bg-white hover:shadow-md transition-all duration-200 overflow-hidden`}
-              >
+              <button key={layer} onClick={() => onSelect(layer)}
+                className={`group relative w-40 rounded-xl border ${t.border} bg-white hover:shadow-md transition-all duration-200 overflow-hidden`}>
                 <div className={`h-1 bg-gradient-to-r ${t.gradient}`} />
-                <div className="px-3 py-2">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-sm">{t.icon}</span>
-                      <span className={`font-semibold text-xs ${t.text}`}>{layer}</span>
-                    </div>
-                    <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${t.badge}`}>{files.length}</span>
+                <div className="px-3 py-2 flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-sm">{t.icon}</span>
+                    <span className={`font-semibold text-xs ${t.text}`}>{layer}</span>
                   </div>
+                  <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${t.badge}`}>{files.length}</span>
                 </div>
               </button>
             );
@@ -458,17 +520,60 @@ function InfraPanel({ infra }: { infra: Infrastructure }) {
                       {/* Containers */}
                       {dep.containers && dep.containers.length > 0 && (
                         <div className="px-4 pb-3 space-y-2">
-                          {dep.containers.map((c, j) => (
-                            <div key={j} className="flex items-center gap-2 bg-white/70 rounded-lg px-3 py-2">
-                              <span className="text-sm">{'\uD83D\uDC33'}</span>
-                              <div className="flex-1 min-w-0">
-                                <div className="text-xs font-semibold text-gray-800">{c.name}</div>
-                                <div className="text-[10px] font-mono text-gray-500 truncate">{c.image}</div>
+                          {dep.containers.map((c: any, j: number) => (
+                            <div key={j} className="bg-white/70 rounded-lg px-3 py-2 space-y-1.5">
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm">{'\uD83D\uDC33'}</span>
+                                <div className="flex-1 min-w-0">
+                                  <div className="text-xs font-semibold text-gray-800">{c.name}</div>
+                                  <div className="text-[10px] font-mono text-gray-500 truncate">{c.image}</div>
+                                </div>
+                                {c.ports && c.ports.length > 0 && (
+                                  <div className="flex gap-1">
+                                    {c.ports.map((p: string, k: number) => (
+                                      <span key={k} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-blue-100 text-blue-600">:{p}</span>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
-                              {c.ports.length > 0 && (
-                                <div className="flex gap-1">
-                                  {c.ports.map((p, k) => (
-                                    <span key={k} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-blue-100 text-blue-600">:{p}</span>
+                              {/* Probes */}
+                              {c.probes && c.probes.length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {c.probes.map((probe: any, pi: number) => (
+                                    <span key={pi} className={`text-[8px] font-mono px-1.5 py-0.5 rounded ${
+                                      probe.type === 'liveness' ? 'bg-green-50 text-green-600 border border-green-200' :
+                                      probe.type === 'readiness' ? 'bg-blue-50 text-blue-600 border border-blue-200' :
+                                      'bg-amber-50 text-amber-600 border border-amber-200'
+                                    }`}>
+                                      {probe.type}: {probe.method}{probe.path ? ` ${probe.path}` : ''}{probe.port ? `:${probe.port}` : ''}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              {/* Resources */}
+                              {c.resources && (c.resources.requests || c.resources.limits) && (
+                                <div className="flex gap-3 text-[9px]">
+                                  {c.resources.requests && (
+                                    <span className="text-gray-500">Req: {c.resources.requests.cpu || '-'} CPU, {c.resources.requests.memory || '-'} RAM</span>
+                                  )}
+                                  {c.resources.limits && (
+                                    <span className="text-orange-500">Lim: {c.resources.limits.cpu || '-'} CPU, {c.resources.limits.memory || '-'} RAM</span>
+                                  )}
+                                </div>
+                              )}
+                              {/* Volume mounts */}
+                              {c.volume_mounts && c.volume_mounts.length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {c.volume_mounts.map((vm: any, vi: number) => (
+                                    <span key={vi} className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">{vm.name}:{vm.path}{vm.readOnly ? ' (ro)' : ''}</span>
+                                  ))}
+                                </div>
+                              )}
+                              {/* Security context */}
+                              {c.security_context && Object.keys(c.security_context).length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {Object.entries(c.security_context).map(([sk, sv]: [string, any], si: number) => (
+                                    <span key={si} className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-red-50 text-red-600">{sk}: {String(sv)}</span>
                                   ))}
                                 </div>
                               )}
@@ -608,7 +713,7 @@ function InfraPanel({ infra }: { infra: Infrastructure }) {
 // Main Component
 // ---------------------------------------------------------------------------
 
-export default function ArchitectureGraph({ repoId, symbols, fileTree, infrastructure, discoveredLayers }: ArchitectureGraphProps) {
+export default function ArchitectureGraph({ repoId, symbols, fileTree, infrastructure, discoveredLayers, sourceAnalysis }: ArchitectureGraphProps) {
   const files = fileTree || [];
   const [drillLayer, setDrillLayer] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -635,12 +740,16 @@ export default function ArchitectureGraph({ repoId, symbols, fileTree, infrastru
     return extra;
   }, [discoveredLayers]);
 
-  // Combined detectLayer: static rules + dynamic
+  // Combined detectLayer: source analysis (annotations) > dynamic rules > static regex
+  const backendLayers = sourceAnalysis?.file_layers || {};
   const detectLayerFull = useCallback((p: string): string => {
-    // Dynamic rules first (enterprise-specific take priority)
+    // 1. Backend annotation-based detection (most accurate)
+    if (backendLayers[p]) return backendLayers[p];
+    // 2. Dynamic rules from discovered patterns
     for (const r of dynamicDetect) { if (r.pattern.test(p)) return r.layer; }
+    // 3. Fallback to static regex
     return detectLayer(p);
-  }, [dynamicDetect]);
+  }, [dynamicDetect, backendLayers]);
 
   const layerData = useMemo(() => {
     const map = new Map<string, FileTreeEntry[]>();
@@ -701,6 +810,23 @@ export default function ArchitectureGraph({ repoId, symbols, fileTree, infrastru
           <div className="text-[10px] text-purple-400 font-medium uppercase tracking-wider mt-0.5">Total Size</div>
         </div>
       </div>
+
+      {/* Frameworks detected */}
+      {sourceAnalysis && Object.keys(sourceAnalysis.frameworks).length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 p-4">
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">Frameworks Detected</h4>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(sourceAnalysis.frameworks)
+              .sort((a, b) => b[1] - a[1])
+              .map(([fw, count]) => (
+                <span key={fw} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-100 text-xs">
+                  <span className="font-semibold text-indigo-700">{fw}</span>
+                  <span className="text-[10px] text-indigo-400 font-mono">{count} files</span>
+                </span>
+              ))}
+          </div>
+        </div>
+      )}
 
       {/* Layer distribution bar chart */}
       <div className="bg-white rounded-xl border border-gray-200 p-4">

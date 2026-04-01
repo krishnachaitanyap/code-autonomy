@@ -49,6 +49,7 @@ export default function RepoDetailPage() {
   const [fileTree, setFileTree] = useState<any[]>([]);
   const [infrastructure, setInfrastructure] = useState<any>(null);
   const [discoveredLayers, setDiscoveredLayers] = useState<any[]>([]);
+  const [sourceAnalysis, setSourceAnalysis] = useState<any>(null);
   const [skillsPreview, setSkillsPreview] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -61,7 +62,7 @@ export default function RepoDetailPage() {
           repos.branches(repoId).catch(() => ({ branches: [] })),
           repos.getSkills(repoId).catch(() => ({ content: '' })),
           repos.getClaudeMd(repoId).catch(() => ({ content: '' })),
-          repos.fileTree(repoId, 2000).catch(() => ({ files: [], total: 0, infrastructure: null, discovered_layers: [] })),
+          repos.fileTree(repoId, 2000).catch(() => ({ files: [], total: 0, infrastructure: null, discovered_layers: [], source_analysis: null })),
         ]);
         setRepo(repoData);
         setBranches(branchData.branches);
@@ -70,6 +71,7 @@ export default function RepoDetailPage() {
         setFileTree(fileTreeData.files || []);
         setInfrastructure(fileTreeData.infrastructure || null);
         setDiscoveredLayers(fileTreeData.discovered_layers || []);
+        setSourceAnalysis(fileTreeData.source_analysis || null);
         // Symbols require code index — load lazily only if file-tree is small
         // (indicates index might be built). Avoids noisy 500 errors in console.
         if (fileTreeData.total > 0 && fileTreeData.total < 100) {
@@ -235,7 +237,7 @@ export default function RepoDetailPage() {
         <p className="text-sm text-gray-500 mb-4">
           Explore the codebase structure — layers, directories, files, and their relationships.
         </p>
-        <ArchitectureGraph repoId={repoId} symbols={symbols} fileTree={fileTree} infrastructure={infrastructure} discoveredLayers={discoveredLayers} />
+        <ArchitectureGraph repoId={repoId} symbols={symbols} fileTree={fileTree} infrastructure={infrastructure} discoveredLayers={discoveredLayers} sourceAnalysis={sourceAnalysis} />
       </div>
 
       {/* Branches */}
