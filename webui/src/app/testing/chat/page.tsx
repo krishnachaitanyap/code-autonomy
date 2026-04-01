@@ -908,27 +908,54 @@ export default function ChatPage() {
       <div className="flex items-center gap-3 px-1 pb-3 border-b border-gray-200 flex-wrap">
         <h1 className="text-xl font-bold text-gray-900 mr-1">Chat</h1>
 
-        {/* Repo selector */}
-        <select
-          value={selectedRepoId}
-          onChange={(e) => setSelectedRepoId(e.target.value)}
-          className="px-3 py-1.5 border border-gray-300 rounded-md text-sm bg-white max-w-[260px] truncate"
-          disabled={loadingRepos}
-        >
-          <option value="">No repository (tool-only)</option>
-          {repoList.map((r) => (
-            <option key={r.id} value={r.id}>
-              {r.nickname || r.url || r.local_path || r.id}
-            </option>
-          ))}
-        </select>
+        {/* Context toggle: General / Repository */}
+        <div className="flex rounded-xl bg-gray-100 p-0.5">
+          <button
+            onClick={() => setSelectedRepoId('')}
+            className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+              !selectedRepoId
+                ? 'bg-white text-gray-900 shadow-sm'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            General
+          </button>
+          <button
+            onClick={() => { if (!selectedRepoId && repoList.length > 0) setSelectedRepoId(repoList[0].id); }}
+            className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+              selectedRepoId
+                ? 'bg-white text-gray-900 shadow-sm'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            Repository
+          </button>
+        </div>
 
-        {/* Branch selector */}
-        <div className="relative" ref={branchRef}>
+        {/* Repo selector — only when in Repository mode */}
+        {selectedRepoId || repoList.length > 0 ? (
+          <div className={`transition-all ${selectedRepoId ? 'opacity-100' : 'opacity-0 pointer-events-none w-0 overflow-hidden'}`}>
+            <select
+              value={selectedRepoId}
+              onChange={(e) => setSelectedRepoId(e.target.value)}
+              className="px-3 py-1.5 border border-gray-200 rounded-xl text-sm bg-white max-w-[240px] truncate focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400"
+              disabled={loadingRepos}
+            >
+              {repoList.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.nickname || r.url || r.local_path || r.id}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
+
+        {/* Branch selector — only in Repository mode */}
+        <div className={`relative transition-all ${selectedRepoId ? 'opacity-100' : 'opacity-0 pointer-events-none w-0 overflow-hidden'}`} ref={branchRef}>
           <button
             type="button"
             onClick={() => { setBranchDropdownOpen(!branchDropdownOpen); setBranchSearch(''); }}
-            className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 rounded-md text-sm bg-white hover:bg-gray-50 min-w-[140px]"
+            className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-200 rounded-xl text-sm bg-white hover:bg-gray-50 min-w-[140px]"
             disabled={!selectedRepoId}
           >
             <svg className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1004,15 +1031,15 @@ export default function ChatPage() {
         </div>
 
         {/* Mode selector */}
-        <div className="flex rounded-lg border border-gray-300 overflow-hidden ml-auto">
+        <div className="flex rounded-xl bg-gray-100 p-0.5 ml-auto">
           {(['ask', 'plan', 'agent'] as Mode[]).map((m) => (
             <button
               key={m}
               onClick={() => setMode(m)}
-              className={`px-3 py-1.5 text-sm font-medium transition-colors ${
+              className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all ${
                 mode === m
-                  ? `${MODE_META[m].bg} ${MODE_META[m].color}`
-                  : 'bg-white text-gray-500 hover:bg-gray-50'
+                  ? `bg-white ${MODE_META[m].color} shadow-sm`
+                  : 'text-gray-500 hover:text-gray-700'
               }`}
               title={MODE_META[m].desc}
             >
