@@ -24,7 +24,144 @@ interface Pipeline {
   name: string;
   description: string;
   steps: PipelineStep[];
+  isTemplate?: boolean;
+  category?: string;
+  tags?: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Pre-built Enterprise Pipeline Templates
+// ---------------------------------------------------------------------------
+
+function tpl(id: string, name: string, toolName: string, toolType: string, desc: string, outputKeys: string[]): PipelineStep {
+  return { id, tool_id: '', tool_name: toolName, tool_description: desc, tool_type: toolType, parallel_group: 0, input_mapping: {}, output_keys: outputKeys, config: {} };
+}
+
+const ENTERPRISE_TEMPLATES: Pipeline[] = [
+  {
+    id: 'tpl-jira-to-pr',
+    name: 'JIRA Story to PR',
+    description: 'End-to-end: analyze JIRA story, generate code, run tests, SonarQube gate, create PR',
+    isTemplate: true,
+    category: 'Engineering',
+    tags: ['jira', 'pr', 'testing', 'sonarqube'],
+    steps: [
+      { ...tpl('s1', 'Analyze Story', 'Reference', 'analyzer', 'Read JIRA story requirements and acceptance criteria', ['requirements', 'acceptance_criteria']), parallel_group: 0 },
+      { ...tpl('s2', 'Detect Dependencies', 'JISI_downstream_detector', 'analyzer', 'Identify downstream services impacted by changes', ['downstream_map', 'impacted_services']), parallel_group: 0 },
+      { ...tpl('s3', 'Generate Code', 'Code Generator', 'agent', 'Implement changes based on requirements and dependency analysis', ['files_changed', 'summary']), parallel_group: 1 },
+      { ...tpl('s4', 'Generate Tests', 'Test Generator', 'agent', 'Generate unit and integration tests for the changes', ['test_files', 'test_summary']), parallel_group: 2 },
+      { ...tpl('s5', 'Run Tests', 'Test Runner', 'validator', 'Execute test suite and verify all tests pass', ['test_results', 'pass_rate']), parallel_group: 3 },
+      { ...tpl('s6', 'Quality Gate', 'SonarQube Check', 'validator', 'Run SonarQube analysis and verify quality gate passes', ['gate_status', 'issues']), parallel_group: 4 },
+    ],
+  },
+  {
+    id: 'tpl-incident-response',
+    name: 'Production Incident Response',
+    description: 'Automated incident triage: query logs, analyze errors, identify root cause, suggest fix',
+    isTemplate: true,
+    category: 'Operations',
+    tags: ['incident', 'splunk', 'kubernetes', 'debugging'],
+    steps: [
+      { ...tpl('s1', 'Query Logs', 'Splunk', 'analyzer', 'Search production logs for errors, exceptions, and anomalies', ['error_logs', 'error_patterns']), parallel_group: 0 },
+      { ...tpl('s2', 'Check K8s Health', 'Kubernetes', 'agent', 'Inspect pod status, events, resource usage, and recent restarts', ['pod_status', 'events', 'resource_usage']), parallel_group: 0 },
+      { ...tpl('s3', 'Analyze Dependencies', 'JISI_downstream_detector', 'analyzer', 'Map downstream services to identify cascade failures', ['dependency_map']), parallel_group: 1 },
+      { ...tpl('s4', 'Root Cause Analysis', 'Code Analyzer', 'agent', 'Cross-reference logs, K8s state, and code to identify root cause', ['root_cause', 'affected_components']), parallel_group: 2 },
+      { ...tpl('s5', 'Generate Fix', 'Code Generator', 'agent', 'Propose a fix based on root cause analysis', ['fix_files', 'fix_summary']), parallel_group: 3 },
+    ],
+  },
+  {
+    id: 'tpl-spring-boot-migration',
+    name: 'Spring Boot 2 to 3 Migration',
+    description: 'Full migration pipeline: detect stack, run OpenRewrite, AI cleanup, test, quality gate',
+    isTemplate: true,
+    category: 'Migration',
+    tags: ['spring', 'java', 'migration', 'openrewrite'],
+    steps: [
+      { ...tpl('s1', 'Stack Detection', 'Enterprise Framework Detector', 'analyzer', 'Detect current Spring Boot version, dependencies, and framework usage', ['current_stack', 'spring_version', 'dependencies']), parallel_group: 0 },
+      { ...tpl('s2', 'Extract Skills', 'Skill_Extractor', 'analyzer', 'Learn framework contracts and migration patterns from source', ['framework_skills', 'migration_patterns']), parallel_group: 0 },
+      { ...tpl('s3', 'OpenRewrite Transform', 'OpenRewrite Runner', 'transformer', 'Apply mechanical Spring Boot 3 migration recipes via OpenRewrite', ['rewrite_diff', 'files_changed']), parallel_group: 1 },
+      { ...tpl('s4', 'AI Cleanup', 'Code Generator', 'agent', 'Fix compilation errors and update custom code that OpenRewrite cannot handle', ['cleanup_files', 'manual_fixes']), parallel_group: 2 },
+      { ...tpl('s5', 'Update Tests', 'Test Generator', 'agent', 'Update test imports (javax to jakarta), fix broken assertions', ['test_updates']), parallel_group: 3 },
+      { ...tpl('s6', 'Verify Build', 'Build Validator', 'validator', 'Run mvn clean verify to ensure build passes', ['build_result']), parallel_group: 4 },
+    ],
+  },
+  {
+    id: 'tpl-onboarding',
+    name: 'Codebase Onboarding',
+    description: 'Auto-generate developer onboarding docs: architecture diagram, skill docs, CLAUDE.md',
+    isTemplate: true,
+    category: 'Knowledge',
+    tags: ['onboarding', 'documentation', 'skills', 'architecture'],
+    steps: [
+      { ...tpl('s1', 'Analyze Architecture', 'Reference', 'analyzer', 'Scan repo structure, detect frameworks, build architecture overview', ['architecture_overview', 'tech_stack']), parallel_group: 0 },
+      { ...tpl('s2', 'Detect Dependencies', 'JISI_downstream_detector', 'analyzer', 'Map all downstream REST, SOAP, MQ, and DB dependencies', ['dependency_map']), parallel_group: 0 },
+      { ...tpl('s3', 'Extract Skills', 'Skill_Extractor', 'analyzer', 'Learn framework contracts, conventions, and patterns used in repo', ['skills_doc']), parallel_group: 1 },
+      { ...tpl('s4', 'Generate Onboarding', 'Documentation Generator', 'agent', 'Produce developer onboarding guide with architecture, key flows, and setup steps', ['onboarding_doc']), parallel_group: 2 },
+    ],
+  },
+  {
+    id: 'tpl-security-audit',
+    name: 'Security Audit Pipeline',
+    description: 'Automated security review: dependency scan, OWASP check, secret detection, K8s security',
+    isTemplate: true,
+    category: 'Security',
+    tags: ['security', 'audit', 'owasp', 'dependencies'],
+    steps: [
+      { ...tpl('s1', 'Dependency Scan', 'Dependency Compatibility Checker', 'analyzer', 'Check for vulnerable dependencies and outdated packages', ['vulnerable_deps', 'outdated_deps']), parallel_group: 0 },
+      { ...tpl('s2', 'Secret Detection', 'Code Analyzer', 'analyzer', 'Scan for hardcoded secrets, API keys, and credentials in source', ['secrets_found', 'files_with_secrets']), parallel_group: 0 },
+      { ...tpl('s3', 'K8s Security', 'Kubernetes', 'agent', 'Check K8s security: network policies, RBAC, pod security, secrets encryption', ['k8s_security_findings']), parallel_group: 0 },
+      { ...tpl('s4', 'OWASP Review', 'Code Analyzer', 'agent', 'Review code for OWASP Top 10 vulnerabilities (XSS, SQL injection, etc.)', ['owasp_findings']), parallel_group: 1 },
+      { ...tpl('s5', 'Generate Report', 'Report Generator', 'agent', 'Compile findings into a security audit report with severity ratings', ['audit_report']), parallel_group: 2 },
+    ],
+  },
+  {
+    id: 'tpl-api-test-gen',
+    name: 'API Test Generation',
+    description: 'Discover API endpoints, generate BDD feature files, step definitions, and test data',
+    isTemplate: true,
+    category: 'Testing',
+    tags: ['api', 'testing', 'bdd', 'cucumber'],
+    steps: [
+      { ...tpl('s1', 'Discover Endpoints', 'Reference', 'analyzer', 'Scan controllers/resources to discover all REST API endpoints', ['endpoints', 'request_response_models']), parallel_group: 0 },
+      { ...tpl('s2', 'Detect Dependencies', 'JISI_downstream_detector', 'analyzer', 'Identify downstream services each endpoint calls', ['endpoint_dependencies']), parallel_group: 0 },
+      { ...tpl('s3', 'Generate Features', 'BDD Generator', 'agent', 'Generate Cucumber .feature files with scenarios for each endpoint', ['feature_files']), parallel_group: 1 },
+      { ...tpl('s4', 'Generate Step Defs', 'Code Generator', 'agent', 'Generate Java step definition files matching the feature files', ['step_definitions']), parallel_group: 2 },
+      { ...tpl('s5', 'Generate Test Data', 'Data Generator', 'agent', 'Generate test data fixtures and factories for each scenario', ['test_data_files']), parallel_group: 2 },
+      { ...tpl('s6', 'Validate Tests', 'Build Validator', 'validator', 'Compile and run the generated tests to verify they pass', ['test_results']), parallel_group: 3 },
+    ],
+  },
+  {
+    id: 'tpl-database-migration',
+    name: 'Database Schema Migration',
+    description: 'Analyze schema changes, generate migration scripts, update DAOs, validate data integrity',
+    isTemplate: true,
+    category: 'Migration',
+    tags: ['database', 'schema', 'migration', 'sql'],
+    steps: [
+      { ...tpl('s1', 'Analyze Current Schema', 'Reference', 'analyzer', 'Read entity classes, Hibernate mappings, and SQL scripts to map current schema', ['current_schema', 'entity_map']), parallel_group: 0 },
+      { ...tpl('s2', 'Detect Data Access', 'JISI_downstream_detector', 'analyzer', 'Find all DAOs, repositories, and SQL queries accessing the database', ['data_access_map']), parallel_group: 0 },
+      { ...tpl('s3', 'Generate Migration', 'Code Generator', 'agent', 'Generate Flyway/Liquibase migration scripts for schema changes', ['migration_scripts']), parallel_group: 1 },
+      { ...tpl('s4', 'Update DAOs', 'Code Generator', 'agent', 'Update repository/DAO classes to match new schema', ['updated_daos']), parallel_group: 2 },
+      { ...tpl('s5', 'Validate Integrity', 'Build Validator', 'validator', 'Run build and tests to validate data access still works', ['validation_result']), parallel_group: 3 },
+    ],
+  },
+  {
+    id: 'tpl-k8s-deploy',
+    name: 'Kubernetes Deployment Pipeline',
+    description: 'Build, containerize, generate K8s manifests, deploy, verify health, and rollback if needed',
+    isTemplate: true,
+    category: 'Operations',
+    tags: ['kubernetes', 'deployment', 'docker', 'ci-cd'],
+    steps: [
+      { ...tpl('s1', 'Build & Test', 'Build Validator', 'validator', 'Run full build and test suite before deployment', ['build_status', 'test_results']), parallel_group: 0 },
+      { ...tpl('s2', 'Analyze Manifests', 'Reference', 'analyzer', 'Read existing K8s manifests, Dockerfiles, and Helm charts', ['current_manifests', 'config_map']), parallel_group: 0 },
+      { ...tpl('s3', 'Update Manifests', 'Code Generator', 'agent', 'Update K8s deployment manifests with new image tag and config changes', ['updated_manifests']), parallel_group: 1 },
+      { ...tpl('s4', 'Deploy', 'Kubernetes', 'agent', 'Apply updated manifests to the cluster', ['deploy_result']), parallel_group: 2 },
+      { ...tpl('s5', 'Verify Health', 'Kubernetes', 'agent', 'Check rollout status, pod health, and service endpoints', ['health_status']), parallel_group: 3 },
+      { ...tpl('s6', 'Monitor Logs', 'Kubernetes', 'agent', 'Watch logs for errors in the first 2 minutes post-deploy', ['log_analysis']), parallel_group: 3 },
+    ],
+  },
+];
 
 const TOOL_TYPE_THEME: Record<string, { icon: string; color: string; bg: string; border: string }> = {
   analyzer:    { icon: '\uD83D\uDD0D', color: 'text-purple-700',  bg: 'bg-purple-50',  border: 'border-purple-300' },
@@ -496,6 +633,18 @@ export default function PipelinesPage() {
       .finally(() => setLoading(false));
   }, []);
 
+  function cloneTemplate(template: Pipeline) {
+    const cloned: Pipeline = {
+      ...template,
+      id: `pipeline-${Date.now()}`,
+      name: `${template.name} (copy)`,
+      isTemplate: false,
+      steps: template.steps.map(s => ({ ...s, id: uid() })),
+    };
+    setEditingPipeline(cloned);
+    setSelectedStepId(null);
+  }
+
   function createPipeline() {
     setEditingPipeline({ id: `pipeline-${Date.now()}`, name: 'New Pipeline', description: '', steps: [] });
     setSelectedStepId(null);
@@ -588,59 +737,136 @@ export default function PipelinesPage() {
           </button>
         </div>
 
-        {pipelines.length > 0 ? (
-          <div className="grid gap-4">
-            {pipelines.map(p => (
-              <div key={p.id} className="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md transition-shadow">
-                <div className="flex items-center justify-between mb-3">
-                  <div>
-                    <h3 className="font-semibold text-gray-900">{p.name}</h3>
-                    {p.description && <p className="text-xs text-gray-500 mt-0.5">{p.description}</p>}
+        {/* My Pipelines */}
+        {pipelines.length > 0 && (
+          <div>
+            <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">My Pipelines</h2>
+            <div className="grid gap-3">
+              {pipelines.map(p => (
+                <div key={p.id} className="bg-white rounded-xl border border-gray-200 p-5 hover:shadow-md transition-shadow">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <h3 className="font-semibold text-gray-900">{p.name}</h3>
+                      {p.description && <p className="text-xs text-gray-500 mt-0.5">{p.description}</p>}
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={() => { setEditingPipeline(p); setSelectedStepId(null); }}
+                        className="px-3 py-1.5 text-xs bg-gray-100 rounded-lg hover:bg-gray-200 font-medium">Edit</button>
+                      <button className="px-3 py-1.5 text-xs bg-green-100 text-green-700 rounded-lg hover:bg-green-200 font-medium">Run</button>
+                    </div>
                   </div>
-                  <div className="flex gap-2">
-                    <button onClick={() => { setEditingPipeline(p); setSelectedStepId(null); }}
-                      className="px-3 py-1.5 text-xs bg-gray-100 rounded-lg hover:bg-gray-200 font-medium">Edit</button>
-                    <button className="px-3 py-1.5 text-xs bg-green-100 text-green-700 rounded-lg hover:bg-green-200 font-medium">Run</button>
+                  <div className="flex items-center gap-1.5 overflow-x-auto py-1">
+                    <div className="w-6 h-6 rounded-full bg-gray-800 text-white flex items-center justify-center text-[8px] font-bold flex-shrink-0">IN</div>
+                    {p.steps.map((step, i) => {
+                      const theme = getToolTheme(step.tool_type);
+                      return (
+                        <div key={i} className="flex items-center gap-1.5">
+                          <svg className="w-4 h-2 text-gray-300 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 16 8">
+                            <path strokeLinecap="round" strokeWidth={1.5} d="M1 4h12m0 0l-3-3m3 3l-3 3" />
+                          </svg>
+                          <span className={`text-[10px] font-medium px-2 py-1 rounded-lg ${theme.bg} ${theme.color} flex-shrink-0 border ${theme.border}`}>
+                            {theme.icon} {step.tool_name}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    <svg className="w-4 h-2 text-gray-300 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 16 8">
+                      <path strokeLinecap="round" strokeWidth={1.5} d="M1 4h12m0 0l-3-3m3 3l-3 3" />
+                    </svg>
+                    <div className="w-6 h-6 rounded-full bg-green-500 text-white flex items-center justify-center text-[10px] flex-shrink-0">{'\u2713'}</div>
                   </div>
+                  <p className="text-[10px] text-gray-400 mt-2">{p.steps.length} steps</p>
                 </div>
-                {/* Mini flow preview */}
-                <div className="flex items-center gap-1.5 overflow-x-auto py-1">
-                  <div className="w-6 h-6 rounded-full bg-gray-800 text-white flex items-center justify-center text-[8px] font-bold flex-shrink-0">IN</div>
-                  {p.steps.map((step, i) => {
-                    const theme = getToolTheme(step.tool_type);
-                    return (
-                      <div key={i} className="flex items-center gap-1.5">
-                        <svg className="w-4 h-2 text-gray-300 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 16 8">
-                          <path strokeLinecap="round" strokeWidth={1.5} d="M1 4h12m0 0l-3-3m3 3l-3 3" />
-                        </svg>
-                        <span className={`text-[10px] font-medium px-2 py-1 rounded-lg ${theme.bg} ${theme.color} flex-shrink-0 border ${theme.border}`}>
-                          {theme.icon} {step.tool_name}
-                        </span>
-                      </div>
-                    );
-                  })}
-                  <svg className="w-4 h-2 text-gray-300 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 16 8">
-                    <path strokeLinecap="round" strokeWidth={1.5} d="M1 4h12m0 0l-3-3m3 3l-3 3" />
-                  </svg>
-                  <div className="w-6 h-6 rounded-full bg-green-500 text-white flex items-center justify-center text-[10px] flex-shrink-0">{'\u2713'}</div>
-                </div>
-                <p className="text-[10px] text-gray-400 mt-2">{p.steps.length} steps</p>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-center py-16 bg-gradient-to-br from-indigo-50/50 to-white rounded-2xl border border-indigo-100">
-            <div className="text-5xl mb-4">{'\uD83D\uDD17'}</div>
-            <h3 className="text-lg font-semibold text-gray-900">Visual Pipeline Builder</h3>
-            <p className="text-sm text-gray-500 mt-1 max-w-md mx-auto">
-              Chain multiple agent tools into automated workflows. Each step passes its findings to the next.
-            </p>
-            <button onClick={createPipeline}
-              className="mt-5 px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-medium hover:bg-indigo-700 shadow-sm">
-              Create Your First Pipeline
-            </button>
+              ))}
+            </div>
           </div>
         )}
+
+        {/* Enterprise Templates */}
+        <div>
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">
+            Enterprise Templates
+          </h2>
+          <p className="text-xs text-gray-400 mb-4">Pre-built pipelines for common enterprise workflows. Clone and customize.</p>
+
+          {/* Group templates by category */}
+          {Array.from(new Set(ENTERPRISE_TEMPLATES.map(t => t.category || 'Other'))).map(category => (
+            <div key={category} className="mb-6">
+              <h3 className="text-xs font-bold text-gray-600 mb-2 flex items-center gap-1.5">
+                <span className="text-sm">
+                  {category === 'Engineering' ? '\u{1F527}' : category === 'Operations' ? '\u{1F6E0}\uFE0F' : category === 'Migration' ? '\u{1F504}' : category === 'Knowledge' ? '\u{1F4DA}' : category === 'Security' ? '\u{1F512}' : category === 'Testing' ? '\u{1F9EA}' : '\u{1F4C4}'}
+                </span>
+                {category}
+              </h3>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                {ENTERPRISE_TEMPLATES.filter(t => (t.category || 'Other') === category).map(template => (
+                  <div key={template.id} className="bg-gradient-to-br from-white to-gray-50/80 rounded-xl border border-gray-200 overflow-hidden hover:shadow-md transition-all group">
+                    {/* Color top bar */}
+                    <div className={`h-1 ${
+                      category === 'Engineering' ? 'bg-gradient-to-r from-blue-400 to-indigo-500' :
+                      category === 'Operations' ? 'bg-gradient-to-r from-orange-400 to-red-500' :
+                      category === 'Migration' ? 'bg-gradient-to-r from-green-400 to-emerald-500' :
+                      category === 'Knowledge' ? 'bg-gradient-to-r from-purple-400 to-violet-500' :
+                      category === 'Security' ? 'bg-gradient-to-r from-red-400 to-pink-500' :
+                      category === 'Testing' ? 'bg-gradient-to-r from-cyan-400 to-blue-500' :
+                      'bg-gradient-to-r from-gray-400 to-gray-500'
+                    }`} />
+
+                    <div className="p-4">
+                      <div className="flex items-start justify-between mb-2">
+                        <div>
+                          <h4 className="text-sm font-bold text-gray-900">{template.name}</h4>
+                          <p className="text-[11px] text-gray-500 mt-0.5 line-clamp-2">{template.description}</p>
+                        </div>
+                        <button
+                          onClick={() => cloneTemplate(template)}
+                          className="flex-shrink-0 ml-3 px-3 py-1.5 text-[10px] font-semibold bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100 border border-indigo-200 transition-colors"
+                        >
+                          Use Template
+                        </button>
+                      </div>
+
+                      {/* Step flow preview */}
+                      <div className="flex items-center gap-1 overflow-x-auto py-2">
+                        {template.steps.map((step, i) => {
+                          const theme = getToolTheme(step.tool_type);
+                          const prevGroup = i > 0 ? template.steps[i - 1].parallel_group : -1;
+                          const isParallel = step.parallel_group === prevGroup;
+                          return (
+                            <div key={i} className="flex items-center gap-1">
+                              {i > 0 && !isParallel && (
+                                <svg className="w-3 h-2 text-gray-300 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 12 8">
+                                  <path strokeLinecap="round" strokeWidth={1.5} d="M1 4h8m0 0l-2-2m2 2l-2 2" />
+                                </svg>
+                              )}
+                              {isParallel && (
+                                <span className="text-[8px] text-orange-400 font-bold flex-shrink-0">+</span>
+                              )}
+                              <span className={`text-[9px] font-medium px-1.5 py-0.5 rounded ${theme.bg} ${theme.color} flex-shrink-0 whitespace-nowrap`}>
+                                {step.tool_name}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Tags */}
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <span className="text-[9px] text-gray-400">{template.steps.length} steps</span>
+                        {template.tags?.slice(0, 3).map((tag, i) => (
+                          <span key={i} className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-gray-100 text-gray-500">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))
+          }
+        </div>
       </div>
     );
   }
