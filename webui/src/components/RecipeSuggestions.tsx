@@ -3,17 +3,11 @@
 import type { MigrationRecipe } from '@/lib/api';
 
 interface RecipeSuggestionsProps {
-  /** IDs of recipes that were auto-suggested */
   suggestedIds: string[];
-  /** All available recipes (for resolving names) */
   recipes: MigrationRecipe[];
-  /** Currently selected recipe IDs (includes both manual and auto) */
   selectedIds: string[];
-  /** Called when user toggles a suggested recipe */
   onToggle: (id: string) => void;
-  /** Whether auto-suggest is enabled */
   enabled: boolean;
-  /** Toggle auto-suggest on/off */
   onToggleEnabled: (enabled: boolean) => void;
 }
 
@@ -25,27 +19,10 @@ export default function RecipeSuggestions({
   enabled,
   onToggleEnabled,
 }: RecipeSuggestionsProps) {
-  // Always show the toggle; show chips only when enabled and there are suggestions
-  if (!enabled && suggestedIds.length === 0) {
-    return (
-      <div className="flex items-center gap-2 py-1">
-        <label className="inline-flex items-center gap-1.5 cursor-pointer text-xs text-gray-400">
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(e) => onToggleEnabled(e.target.checked)}
-            className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5"
-          />
-          Auto-suggest
-        </label>
-      </div>
-    );
-  }
-
+  // Single render path — no conditional branches that produce different DOM
   return (
-    <div className="flex items-center gap-2 py-1.5 overflow-x-auto">
-      {/* Toggle */}
-      <label className="inline-flex items-center gap-1.5 cursor-pointer text-xs text-gray-500 flex-shrink-0">
+    <div className="flex items-center gap-2 py-1 overflow-x-auto">
+      <label className="inline-flex items-center gap-1.5 cursor-pointer text-xs text-gray-400 flex-shrink-0">
         <input
           type="checkbox"
           checked={enabled}
