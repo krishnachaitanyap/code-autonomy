@@ -116,6 +116,9 @@ def init_db(url: str = "") -> None:
     # Seed default tools
     _seed_default_tools(engine)
 
+    # Seed default MCP server templates
+    _seed_default_mcp_servers(engine)
+
     # Backfill TestProject.repo_id → ensure every project points to a valid Repo
     _backfill_test_project_repos(engine)
 
@@ -576,6 +579,59 @@ def _seed_default_tools(engine) -> None:
             "timeout_seconds": 120,
             "is_active": False,
         },
+        {
+            "name": "Kubernetes",
+            "description": "Inspect, manage, and troubleshoot Kubernetes clusters — pods, deployments, services, logs, events, scaling, and rollouts",
+            "tool_type": "agent",
+            "enabled_for_migration": False,
+            "enabled_for_chat": True,
+            "enabled_for_testing": False,
+            "goal": (
+                "Help users inspect and manage Kubernetes clusters. Query pod status, "
+                "read logs, check events, describe resources, monitor deployments, "
+                "scale services, and diagnose issues."
+            ),
+            "agent_instructions": (
+                "You are a Kubernetes operations specialist with access to kubectl.\n\n"
+                "## Available K8s Tools\n"
+                "You have these Kubernetes tools available:\n"
+                "- **k8s_get_pods** — List pods (status, restarts, age)\n"
+                "- **k8s_get_services** — List services (type, IP, ports)\n"
+                "- **k8s_get_deployments** — List deployments (replicas)\n"
+                "- **k8s_describe** — Detailed resource description\n"
+                "- **k8s_logs** — Pod logs (tail, previous container)\n"
+                "- **k8s_get_events** — Cluster events (scheduling, errors)\n"
+                "- **k8s_get_nodes** — Node status and capacity\n"
+                "- **k8s_top_pods** — CPU/memory usage\n"
+                "- **k8s_get_configmap** — ConfigMap contents\n"
+                "- **k8s_get_ingress** — Ingress rules\n"
+                "- **k8s_rollout_status** — Deployment rollout status\n"
+                "- **k8s_scale** — Scale deployment replicas\n"
+                "- **k8s_rollout_restart** — Rolling restart\n"
+                "- **k8s_exec** — Execute command in pod\n"
+                "- **k8s_apply** — Apply YAML manifest\n"
+                "- **k8s_get_namespaces** — List namespaces\n"
+                "- **k8s_get_secrets** — List secret names (not values)\n\n"
+                "## Workflow\n"
+                "1. Start with get_pods/get_deployments to understand the current state\n"
+                "2. For issues: check events, then logs of affected pods\n"
+                "3. For debugging: describe the resource, check previous logs\n"
+                "4. For scaling: verify current state, scale, then verify rollout\n\n"
+                "## Safety\n"
+                "- Never delete namespaces, nodes, or persistent volumes\n"
+                "- Always confirm before scaling to 0 replicas\n"
+                "- Show current state before making changes\n"
+                "- Secrets values are never shown (only names)"
+            ),
+            "allowed_tools": '["Read", "Grep", "Bash"]',
+            "parameters": '{"kubeconfig": {"type": "string", "description": "Path to kubeconfig file", "default": ""}, "context": {"type": "string", "description": "Kubernetes context to use", "default": ""}, "namespace": {"type": "string", "description": "Default namespace", "default": "default"}}',
+            "tags": '["kubernetes", "k8s", "devops", "infrastructure", "default"]',
+            "prerequisites": "[]",
+            "max_turns": 25,
+            "model": "",
+            "timeout_seconds": 300,
+            "is_active": True,
+        },
     ]
 
     with engine.begin() as conn:
@@ -737,6 +793,57 @@ def _seed_default_recipes(conn) -> None:
             "target_framework": recipe_def["target_framework"],
             "tool_ids": tool_ids,
         })
+
+
+def _seed_default_mcp_servers(engine) -> None:
+    """Seed built-in MCP server templates on first run."""
+    from sqlalchemy import text
+
+    DEFAULT_MCP_SERVERS = [
+        {
+            "name": "Kubernetes (kubectl)",
+            "description": "Kubernetes cluster management via kubectl MCP server. Provides pod, deployment, service, and log inspection tools.",
+            "transport": "stdio",
+            "command": "npx -y @modelcontextprotocol/server-kubernetes",
+            "url": "",
+        },
+        {
+            "name": "Filesystem",
+            "description": "Local filesystem access via MCP. Read, write, search, and manage files and directories.",
+            "transport": "stdio",
+            "command": "npx -y @modelcontextprotocol/server-filesystem /workspace",
+            "url": "",
+        },
+        {
+            "name": "PostgreSQL",
+            "description": "PostgreSQL database access via MCP. Query tables, inspect schemas, run SQL.",
+            "transport": "stdio",
+            "command": "npx -y @modelcontextprotocol/server-postgres",
+            "url": "",
+        },
+    ]
+
+    with engine.begin() as conn:
+        for srv in DEFAULT_MCP_SERVERS:
+            existing = conn.execute(
+                text("SELECT id FROM mcp_servers WHERE name = :name"),
+                {"name": srv["name"]},
+            ).first()
+            if existing:
+                continue
+
+            from src.data.models import _uuid
+            conn.execute(text(
+                "INSERT INTO mcp_servers (id, name, description, transport, command, url, env_vars, auth_config, discovered_tools, status, last_error, is_active, created_at, updated_at) "
+                "VALUES (:id, :name, :description, :transport, :command, :url, '{}', '{}', '[]', 'pending', '', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ), {
+                "id": _uuid(),
+                "name": srv["name"],
+                "description": srv["description"],
+                "transport": srv["transport"],
+                "command": srv["command"],
+                "url": srv["url"],
+            })
 
 
 def _backfill_test_project_repos(engine) -> None:
