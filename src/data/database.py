@@ -113,6 +113,24 @@ def init_db(url: str = "") -> None:
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE custom_tools ADD COLUMN credential_config JSON DEFAULT '{}'"))
 
+    # Migrate custom_tools: add mcp_server_id and mcp_tool_names columns
+    if 'custom_tools' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('custom_tools')]
+        if 'mcp_server_id' not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE custom_tools ADD COLUMN mcp_server_id VARCHAR(64) REFERENCES mcp_servers(id)"))
+        if 'mcp_tool_names' not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE custom_tools ADD COLUMN mcp_tool_names JSON DEFAULT '[]'"))
+
+    # Migrate sessions: add team_id, cost_center, initiated_by columns
+    if 'sessions' in inspector.get_table_names():
+        columns = [c['name'] for c in inspector.get_columns('sessions')]
+        for col in ['team_id', 'cost_center', 'initiated_by']:
+            if col not in columns:
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE sessions ADD COLUMN {col} VARCHAR(256)"))
+
     # Seed default tools
     _seed_default_tools(engine)
 
