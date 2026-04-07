@@ -38,6 +38,45 @@ def _uuid() -> str:
 
 
 # ---------------------------------------------------------------------------
+# User — SSO-authenticated user
+# ---------------------------------------------------------------------------
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String(64), primary_key=True, default=_uuid)
+    email = Column(String(256), nullable=False, unique=True)
+    display_name = Column(String(256), nullable=False, default="")
+    sso_subject = Column(String(512), nullable=True, unique=True)
+    sso_provider = Column(String(64), nullable=False, default="")
+    role = Column(String(32), nullable=False, default="developer")  # admin | developer | viewer
+    team_id = Column(String(128), nullable=True)
+    cost_center = Column(String(128), nullable=True)
+    avatar_url = Column(String(1024), nullable=False, default="")
+    is_active = Column(Boolean, nullable=False, default=True)
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+
+    def __repr__(self) -> str:
+        return f"<User id={self.id!r} email={self.email!r} role={self.role!r}>"
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "email": self.email,
+            "display_name": self.display_name,
+            "sso_provider": self.sso_provider,
+            "role": self.role,
+            "team_id": self.team_id,
+            "cost_center": self.cost_center,
+            "avatar_url": self.avatar_url,
+            "is_active": self.is_active,
+            "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Repo — registered repository
 # ---------------------------------------------------------------------------
 

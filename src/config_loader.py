@@ -285,6 +285,27 @@ def load_config(config_path: str = "config.ini") -> dict:
             "project_key_pattern": get("sonarqube", "project_key_pattern", ""),
         },
         "tool_credentials": _load_tool_credential_profiles(parser),
+        # SSO / OIDC authentication. When provider = "none" the auth service
+        # short-circuits and the app runs in open-access mode. When set to
+        # "oidc", users authenticate via the configured IdP and are upserted
+        # into the local users table on first login.
+        "auth": {
+            "provider": get("auth", "provider", "none").lower() or "none",
+            "oidc_issuer_url": get("auth", "oidc_issuer_url"),
+            "oidc_client_id": get("auth", "oidc_client_id"),
+            "oidc_client_secret": get("auth", "oidc_client_secret") or os.environ.get("OIDC_CLIENT_SECRET", ""),
+            "oidc_redirect_uri": get("auth", "oidc_redirect_uri", "http://localhost:8000/api/auth/callback"),
+            "claim_email": get("auth", "claim_email", "email"),
+            "claim_name": get("auth", "claim_name", "name"),
+            "claim_groups": get("auth", "claim_groups", "groups"),
+            "admin_groups": get_list("auth", "admin_groups"),
+            "developer_groups": get_list("auth", "developer_groups"),
+            # session_secret: HMAC key for signing session JWTs. Falls back
+            # to AUTH_SESSION_SECRET env var; if both are empty, the auth
+            # service generates a random key at startup (dev mode).
+            "session_secret": get("auth", "session_secret") or os.environ.get("AUTH_SESSION_SECRET", ""),
+            "session_ttl_hours": get_int("auth", "session_ttl_hours", 24),
+        },
     }
 
 
