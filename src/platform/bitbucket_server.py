@@ -17,6 +17,12 @@ from urllib.parse import urlparse
 import requests
 
 from src.platform.pr_platform import PRPlatform
+from src.platform.token_provider import (
+    StaticTokenProvider,
+    TokenProvider,
+    TokenSource,
+    coerce_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,20 +30,33 @@ logger = logging.getLogger(__name__)
 class BitbucketServerClient:
     """Client for Bitbucket Server / Data Center REST API 1.0."""
 
-    def __init__(self, base_url: str, token: str, verify_ssl: bool = False):
+    def __init__(self, base_url: str, token: TokenSource, verify_ssl: bool = False):
         # Extract just scheme://host:port (strip any trailing path)
         parsed = urlparse(base_url.rstrip("/"))
         self.base_url = f"{parsed.scheme}://{parsed.hostname}"
         if parsed.port:
             self.base_url += f":{parsed.port}"
-        self.token = token
+        provider = coerce_provider(token)
+        if provider is None:
+            provider = StaticTokenProvider("")
+        self._provider: TokenProvider = provider
         self.verify_ssl = verify_ssl
         self._session = requests.Session()
-        self._session.headers.update({
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        })
+        self._session.headers.update({"Content-Type": "application/json"})
         self._session.verify = verify_ssl
+
+    @property
+    def token(self) -> str:
+        # Backwards-compat for any caller reading ``.token`` directly.
+        return self._provider.get_token()
+
+    def _auth_headers(self) -> dict:
+        """Resolve the Authorization header for a single request.
+
+        Called per-request so refreshing providers always hand out a fresh
+        token (no auth cached on the long-lived ``requests.Session``).
+        """
+        return {"Authorization": self._provider.get_auth_header()}
 
     def _api_url(self, project_key: str, repo_slug: str, path: str = "") -> str:
         """Build a REST API 1.0 URL for the given project/repo.
@@ -53,7 +72,7 @@ class BitbucketServerClient:
         """List branches for a repository."""
         url = self._api_url(project_key, repo_slug, "/branches")
         logger.debug("Fetching branches from: %s", url)
-        resp = self._session.get(url, params={"limit": 100})
+        resp = self._session.get(url, params={"limit": 100}, headers=self._auth_headers())
         resp.raise_for_status()
         data = resp.json()
         branches = [b["displayId"] for b in data.get("values", [])]
@@ -63,7 +82,7 @@ class BitbucketServerClient:
     def get_default_branch(self, project_key: str, repo_slug: str) -> str:
         """Get the default branch name for a repository."""
         url = self._api_url(project_key, repo_slug, "/default-branch")
-        resp = self._session.get(url)
+        resp = self._session.get(url, headers=self._auth_headers())
         if resp.status_code == 200:
             return resp.json().get("displayId", "main")
         return "main"
@@ -99,7 +118,7 @@ class BitbucketServerClient:
         }
         logger.debug("Creating PR at: %s", url)
         logger.debug("PR payload: %s", payload)
-        resp = self._session.post(url, json=payload)
+        resp = self._session.post(url, json=payload, headers=self._auth_headers())
         if resp.status_code in (200, 201):
             data = resp.json()
             pr_id = data.get("id")
@@ -121,7 +140,7 @@ class BitbucketServerClient:
             project_key, repo_slug, f"/pull-requests/{pr_id}/comments"
         )
         payload = {"text": comment}
-        resp = self._session.post(url, json=payload)
+        resp = self._session.post(url, json=payload, headers=self._auth_headers())
         return resp.status_code in (200, 201)
 
 
@@ -155,9 +174,15 @@ def parse_bitbucket_server_url(repo_url: str) -> tuple[str, str]:
 
 
 class BitbucketServerPR(PRPlatform):
-    """PRPlatform adapter for Bitbucket Server (wraps BitbucketServerClient)."""
+    """PRPlatform adapter for Bitbucket Server (wraps BitbucketServerClient).
 
-    def __init__(self, base_url: str, token: str, verify_ssl: bool = False):
+    ``token`` accepts a static token (legacy) or a ``TokenProvider``. Bitbucket
+    Server / Data Center has no GitHub-App equivalent — in practice this will
+    be a long-lived HTTP access token, but the provider abstraction lets us
+    plug in a future rotation mechanism without touching callers.
+    """
+
+    def __init__(self, base_url: str, token: TokenSource, verify_ssl: bool = False):
         self._client = BitbucketServerClient(base_url, token, verify_ssl)
         self._base_url = base_url
 

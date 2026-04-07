@@ -1,10 +1,23 @@
 """
 Pull Request creation for GitHub and Bitbucket.
+
+Authentication:
+    All PR adapters accept a ``TokenSource`` (TokenProvider, str, callable, or
+    None). When a refreshing provider is passed (GitHubAppTokenProvider,
+    BitbucketCloudOAuthProvider), each PR API call resolves a fresh token, so
+    long-lived service processes never operate on an expired credential.
 """
 
 from abc import ABC, abstractmethod
 from typing import Optional
 from urllib.parse import urlparse
+
+from src.platform.token_provider import (
+    StaticTokenProvider,
+    TokenProvider,
+    TokenSource,
+    coerce_provider,
+)
 
 
 class PRPlatform(ABC):
@@ -24,13 +37,28 @@ class PRPlatform(ABC):
 
 
 class GitHubPR(PRPlatform):
-    """GitHub PR creation via PyGithub."""
+    """GitHub PR creation via PyGithub.
 
-    def __init__(self, token: str):
+    Accepts either a static token (legacy) or a ``TokenProvider``. A new
+    PyGithub client is constructed per call so refreshing providers always
+    use a fresh installation token.
+    """
+
+    def __init__(self, token: TokenSource):
+        provider = coerce_provider(token)
+        if provider is None:
+            provider = StaticTokenProvider("")
+        self._provider: TokenProvider = provider
+
+    @property
+    def _token(self) -> str:
+        # Backwards-compat shim for callers that read ``.token`` directly.
+        return self._provider.get_token()
+
+    def _client(self):
         from github import Github
 
-        self._gh = Github(token)
-        self._token = token
+        return Github(self._provider.get_token())
 
     def _parse_repo(self, repo_url: str) -> str:
         # https://github.com/owner/repo.git -> owner/repo
@@ -48,7 +76,7 @@ class GitHubPR(PRPlatform):
     ) -> Optional[str]:
         try:
             repo_name = self._parse_repo(repo_url)
-            repo = self._gh.get_repo(repo_name)
+            repo = self._client().get_repo(repo_name)
             pr = repo.create_pull(
                 title=title,
                 body=description,
@@ -62,19 +90,33 @@ class GitHubPR(PRPlatform):
 
 
 class BitbucketPR(PRPlatform):
-    """Bitbucket PR creation via REST API.
+    """Bitbucket Cloud PR creation via REST API.
 
-    Supports two auth modes:
-    - HTTP access token (Bearer auth) — preferred, set via BITBUCKET_HTTP_ACCESS_TOKEN
-    - App password (Basic auth) — legacy, set via BITBUCKET_APP_PASSWORD with username
+    Auth modes (in priority order):
+    - ``TokenProvider`` (preferred): GitHub-App-style refreshing OAuth provider
+      from ``BitbucketCloudOAuthProvider``, or any other provider that yields
+      a Bearer token.
+    - HTTP access token (Bearer auth): pass the token string directly.
+    - App password (Basic auth): pass the password as ``token`` and the user
+      as ``username`` — uses HTTP Basic via ``BasicAuthTokenProvider``.
     """
 
-    def __init__(self, token: str, username: Optional[str] = None):
-        self._token = token
+    def __init__(self, token: TokenSource, username: Optional[str] = None):
+        # Username + token combo means legacy app-password (Basic auth).
+        if username and username != "x-token-auth" and isinstance(token, str):
+            from src.platform.token_provider import BasicAuthTokenProvider
+
+            self._provider: TokenProvider = BasicAuthTokenProvider(username, token)
+        else:
+            provider = coerce_provider(token)
+            if provider is None:
+                provider = StaticTokenProvider("")
+            self._provider = provider
         self._username = username or "x-token-auth"
-        # HTTP access tokens are typically longer than app passwords
-        # and don't require a username for API calls (use Bearer auth)
-        self._use_bearer = not username or username == "x-token-auth"
+
+    @property
+    def _token(self) -> str:
+        return self._provider.get_token()
 
     def _parse_repo(self, repo_url: str) -> tuple[str, str]:
         # https://bitbucket.org/workspace/repo.git -> workspace, repo
@@ -105,22 +147,16 @@ class BitbucketPR(PRPlatform):
             "destination": {"branch": {"name": target_branch}},
         }
 
-        if self._use_bearer:
-            resp = requests.post(
-                url,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {self._token}",
-                    "Content-Type": "application/json",
-                },
-            )
-        else:
-            resp = requests.post(
-                url,
-                json=payload,
-                auth=(self._username, self._token),
-                headers={"Content-Type": "application/json"},
-            )
+        # The provider owns the auth scheme (Bearer for OAuth/HTTP-token,
+        # Basic for legacy app-password) so we just inject the resolved header.
+        resp = requests.post(
+            url,
+            json=payload,
+            headers={
+                "Authorization": self._provider.get_auth_header(),
+                "Content-Type": "application/json",
+            },
+        )
 
         if resp.status_code in (200, 201):
             data = resp.json()
@@ -130,8 +166,12 @@ class BitbucketPR(PRPlatform):
         return None
 
 
-def get_pr_platform(platform: str, auth_token: str, **kwargs) -> PRPlatform:
+def get_pr_platform(platform: str, auth_token: TokenSource, **kwargs) -> PRPlatform:
     """Factory for PR platform.
+
+    ``auth_token`` may be a static token (legacy callers) or a
+    ``TokenProvider`` instance for refreshing GitHub App / Bitbucket OAuth
+    credentials.
 
     For ``bitbucket_server``, pass ``base_url`` and optionally ``verify_ssl``
     via *kwargs*.

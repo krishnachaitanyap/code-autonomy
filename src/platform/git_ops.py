@@ -1,6 +1,13 @@
 """
 Git operations for autonomous code generation.
 Handles clone, checkout, commit, and push via subprocess (no GitPython dependency).
+
+Authentication:
+    All credential-bearing functions accept ``auth_token`` as a ``TokenSource``,
+    which may be a ``TokenProvider`` instance, a plain string (legacy), a
+    zero-arg callable returning a string, or ``None``. This allows the caller
+    to pass either a static PAT or a refreshing GitHub App / Bitbucket OAuth
+    provider without git_ops.py needing to know the difference.
 """
 
 import logging
@@ -11,10 +18,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from src.platform.token_provider import TokenSource, coerce_provider
+
 logger = logging.getLogger(__name__)
 
 # Env overrides to suppress credential prompts (Windows CredentialHelperSelector, etc.)
 _GIT_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": ""}
+
+
+def _auth_header_args(auth_token: Optional[TokenSource]) -> list[str]:
+    """Return ``-c http.extraHeader=...`` args for an auth source, or ``[]``.
+
+    Resolves the token via the provider on every call so refreshing providers
+    (GitHub App, Bitbucket OAuth) hand out a fresh token each time. The
+    provider owns the auth scheme (Bearer / Basic) — we just inject the
+    resulting header verbatim.
+    """
+    provider = coerce_provider(auth_token)
+    if provider is None:
+        return []
+    header_value = provider.get_auth_header()
+    if not header_value or header_value.endswith(" "):
+        return []
+    return ["-c", f"http.extraHeader=Authorization: {header_value}"]
 
 
 def _git(repo_dir: str, *args: str, timeout: int = 300) -> subprocess.CompletedProcess:
@@ -51,7 +77,7 @@ def clone_repo(
     repo_url: str,
     target_dir: str,
     branch: str = "main",
-    auth_token: Optional[str] = None,
+    auth_token: Optional[TokenSource] = None,
 ) -> str:
     """Clone repository into target directory using subprocess.
 
@@ -64,8 +90,7 @@ def clone_repo(
     target.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = ["git", "-c", "core.longpaths=true"]
-    if auth_token:
-        cmd += ["-c", f"http.extraHeader=Authorization: Bearer {auth_token}"]
+    cmd += _auth_header_args(auth_token)
     cmd += ["clone", "--branch", branch, "--depth", "1", repo_url, str(target)]
 
     logger.info("Cloning %s (branch=%s)", repo_url, branch)
@@ -119,11 +144,28 @@ def stage_and_commit(
         raise RuntimeError(f"Commit failed: {r.stderr.strip()}")
 
 
-def push_branch(repo_dir: str, branch_name: str, remote: str = "origin") -> None:
-    """Push branch to remote."""
-    r = _git(repo_dir, "push", remote, branch_name)
-    if r.returncode != 0:
-        raise RuntimeError(f"Push failed: {r.stderr.strip()}")
+def push_branch(
+    repo_dir: str,
+    branch_name: str,
+    remote: str = "origin",
+    auth_token: Optional[TokenSource] = None,
+) -> None:
+    """Push branch to remote.
+
+    If ``auth_token`` is provided, it is injected as an HTTP Authorization
+    header for this single push (no credentials are persisted to git config or
+    the remote URL). This is required in containerized environments where no
+    credential helper or SSH agent is available.
+    """
+    auth_args = _auth_header_args(auth_token)
+    cmd = ["git"] + auth_args + ["push", remote, branch_name]
+    logger.debug("git push: %s (cwd=%s)", branch_name, repo_dir)
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=300, cwd=repo_dir, env=_GIT_ENV,
+    )
+    if result.returncode != 0:
+        logger.error("git push failed (exit %d): %s", result.returncode, result.stderr.strip())
+        raise RuntimeError(f"Push failed: {result.stderr.strip()}")
 
 
 def list_branches(repo_dir: str) -> list[str]:
@@ -151,11 +193,12 @@ def list_branches(repo_dir: str) -> list[str]:
     return sorted(branches)
 
 
-def list_remote_branches(repo_url: str, auth_token: Optional[str] = None) -> list[str]:
+def list_remote_branches(
+    repo_url: str, auth_token: Optional[TokenSource] = None
+) -> list[str]:
     """List branches from a remote repository URL without cloning."""
     cmd = ["git"]
-    if auth_token:
-        cmd += ["-c", f"http.extraHeader=Authorization: Bearer {auth_token}"]
+    cmd += _auth_header_args(auth_token)
     cmd += ["ls-remote", "--heads", repo_url]
 
     try:

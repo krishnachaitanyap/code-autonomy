@@ -89,6 +89,29 @@ def load_config(config_path: str = "config.ini") -> dict:
         "github_config": {
             "auth_token": auth_token,
         },
+        # GitHub App auth (preferred for production multi-user deployments).
+        # When enabled = true, get_token_provider() returns a refreshing
+        # GitHubAppTokenProvider instead of a static PAT.
+        "github_app": {
+            "enabled": get_bool("github_app", "enabled", False),
+            "app_id": get("github_app", "app_id", ""),
+            "installation_id": get("github_app", "installation_id", ""),
+            "private_key": get("github_app", "private_key", ""),  # inline PEM (rarely used)
+            "private_key_path": get("github_app", "private_key_path", ""),
+            "private_key_env": get("github_app", "private_key_env", "GITHUB_APP_PRIVATE_KEY"),
+            # Override for GitHub Enterprise Server (e.g. https://ghe.example.com/api/v3)
+            "api_base_url": get("github_app", "api_base_url", ""),
+        },
+        # Bitbucket Cloud OAuth 2.0 Consumer (closest analogue to a GitHub App).
+        # Uses the client-credentials grant — refreshes a 2-hour access token.
+        "bitbucket_oauth": {
+            "enabled": get_bool("bitbucket_oauth", "enabled", False),
+            "client_key": get("bitbucket_oauth", "client_key", ""),
+            "client_secret": get("bitbucket_oauth", "client_secret", ""),
+            "client_secret_env": get(
+                "bitbucket_oauth", "client_secret_env", "BITBUCKET_OAUTH_CLIENT_SECRET"
+            ),
+        },
         "ai": {
             "provider": provider,
             "api_key": api_key,
