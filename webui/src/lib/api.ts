@@ -1,6 +1,13 @@
 /**
  * API client — typed fetch wrapper for the Code Autonomy REST API.
+ *
+ * All requests go through `authedFetch` from `./auth`, which automatically
+ * injects `Authorization: Bearer <jwt>` from localStorage when SSO is on
+ * and triggers a re-login redirect on 401. The legacy X-API-Key header is
+ * still supported for the shared-secret deploy mode.
  */
+
+import { authedFetch } from './auth';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '/api';
 
@@ -16,7 +23,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers['X-API-Key'] = apiKey;
   }
 
-  const res = await fetch(url, { ...options, headers });
+  const res = await authedFetch(url, { ...options, headers });
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
@@ -25,6 +32,34 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   return res.json();
 }
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  display_name: string;
+  sso_provider: string;
+  role: string;
+  team_id: string | null;
+  cost_center: string | null;
+  avatar_url: string;
+  is_active: boolean;
+  last_login_at: string | null;
+  created_at: string | null;
+}
+
+export const auth = {
+  me: () => request<{ user: AuthUser | null; auth_enabled: boolean }>('/auth/me'),
+  logout: () => request<{ status: string }>('/auth/logout', { method: 'POST' }),
+  listUsers: () => request<{ users: AuthUser[]; total: number }>('/auth/users'),
+  updateUserRole: (userId: string, role: string) =>
+    request<AuthUser>(`/auth/users/${userId}/role?role=${role}`, { method: 'PUT' }),
+  toggleUserActive: (userId: string) =>
+    request<AuthUser>(`/auth/users/${userId}/toggle-active`, { method: 'PUT' }),
+};
 
 // ---------------------------------------------------------------------------
 // Repos
@@ -106,7 +141,7 @@ export const repos = {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const apiKey = process.env.NEXT_PUBLIC_API_KEY;
     if (apiKey) headers['X-API-Key'] = apiKey;
-    return fetch(url, { method: 'DELETE', headers }).then(res => {
+    return authedFetch(url, { method: 'DELETE', headers }).then(res => {
       if (!res.ok) throw new Error(`Delete failed: ${res.status}`);
     });
   },

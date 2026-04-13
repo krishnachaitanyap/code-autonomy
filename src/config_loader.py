@@ -189,6 +189,9 @@ def load_config(config_path: str = "config.ini") -> dict:
             "explore_budget_pct": get_float("agent", "explore_budget_pct", 0.30),
             "soft_deadline_pct": get_float("agent", "soft_deadline_pct", 0.60),
             "hard_deadline_pct": get_float("agent", "hard_deadline_pct", 0.80),
+            "sandbox_enabled": get_bool("agent", "sandbox_enabled", False),
+            "sandbox_image": get("agent", "sandbox_image", "code-autonomy-sandbox:latest"),
+            "sandbox_network": get_bool("agent", "sandbox_network", False),
         },
         "knowledge": {
             "backend": get("knowledge", "backend", "file").lower(),
@@ -229,6 +232,9 @@ def load_config(config_path: str = "config.ini") -> dict:
         "tracing": {
             "enabled": get_bool("tracing", "enabled", True),
             "storage_dir": get("tracing", "storage_dir", ""),
+            "otel_export_enabled": get_bool("tracing", "otel_export_enabled", False),
+            "otel_endpoint": get("tracing", "otel_endpoint", "http://localhost:4318"),
+            "otel_service_name": get("tracing", "otel_service_name", "code-autonomy-agent"),
         },
         "code_index": {
             "cache_dir": get("code_index", "cache_dir", ".code-index"),
@@ -285,26 +291,56 @@ def load_config(config_path: str = "config.ini") -> dict:
             "project_key_pattern": get("sonarqube", "project_key_pattern", ""),
         },
         "tool_credentials": _load_tool_credential_profiles(parser),
-        # SSO / OIDC authentication. When provider = "none" the auth service
-        # short-circuits and the app runs in open-access mode. When set to
-        # "oidc", users authenticate via the configured IdP and are upserted
-        # into the local users table on first login.
+        # Authentication: provider can be "none", "oidc", or "adfs".
+        #   none → open access (default)
+        #   oidc → generic OpenID Connect via discovery doc (Okta, Keycloak, ...)
+        #   adfs → on-prem ADFS browser-initiated flow (no client secret,
+        #          uses 'resource' parameter, custom claim mapping). See
+        #          docs/SSO.md for the architecture and ADFS setup steps.
         "auth": {
             "provider": get("auth", "provider", "none").lower() or "none",
+            # ── Generic OIDC (provider = oidc) ──
             "oidc_issuer_url": get("auth", "oidc_issuer_url"),
             "oidc_client_id": get("auth", "oidc_client_id"),
             "oidc_client_secret": get("auth", "oidc_client_secret") or os.environ.get("OIDC_CLIENT_SECRET", ""),
             "oidc_redirect_uri": get("auth", "oidc_redirect_uri", "http://localhost:8000/api/auth/callback"),
+            # ── ADFS (provider = adfs) — public client model, no secret ──
+            "adfs_client_id": get("auth", "adfs_client_id"),
+            "adfs_authorization_url": get("auth", "adfs_authorization_url"),
+            "adfs_token_url": get("auth", "adfs_token_url"),
+            "adfs_resource": get("auth", "adfs_resource"),
+            # Browser is redirected back HERE by ADFS — must exactly match
+            # the redirect URI registered in the ADFS Relying Party Trust.
+            "adfs_redirect_uri": get(
+                "auth",
+                "adfs_redirect_uri",
+                "http://localhost:8000/api/auth/sso/callback",
+            ),
+            # Where the backend redirects the browser AFTER successful
+            # callback handling. Token + user JSON are appended as query
+            # params. Defaults to the app root.
+            "adfs_frontend_url": get("auth", "adfs_frontend_url", "/"),
+            # ── Shared (both providers) ──
             "claim_email": get("auth", "claim_email", "email"),
             "claim_name": get("auth", "claim_name", "name"),
             "claim_groups": get("auth", "claim_groups", "groups"),
             "admin_groups": get_list("auth", "admin_groups"),
             "developer_groups": get_list("auth", "developer_groups"),
-            # session_secret: HMAC key for signing session JWTs. Falls back
-            # to AUTH_SESSION_SECRET env var; if both are empty, the auth
-            # service generates a random key at startup (dev mode).
             "session_secret": get("auth", "session_secret") or os.environ.get("AUTH_SESSION_SECRET", ""),
             "session_ttl_hours": get_int("auth", "session_ttl_hours", 24),
+        },
+        "governance": {
+            "max_tokens_per_session": get_int("governance", "max_tokens_per_session", 0),
+            "max_tokens_per_day": get_int("governance", "max_tokens_per_day", 0),
+            "allowed_models": get("governance", "allowed_models", ""),
+            "blocked_file_patterns": get("governance", "blocked_file_patterns", ""),
+            "require_quality_gate": get_bool("governance", "require_quality_gate", False),
+            "max_files_without_approval": get_int("governance", "max_files_without_approval", 0),
+            "require_approval_before_pr": get_bool("governance", "require_approval_before_pr", False),
+        },
+        "notifications": {
+            "slack_webhook_url": get("notifications", "slack_webhook_url", ""),
+            "teams_webhook_url": get("notifications", "teams_webhook_url", ""),
         },
     }
 

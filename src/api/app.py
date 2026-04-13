@@ -111,7 +111,12 @@ async def auth_middleware(request: Request, call_next):
     Priority:
     1. If CODE_AUTONOMY_API_KEY is set, validate X-API-Key header (shared key)
     2. If auth provider is "oidc", validate JWT from cookie or Authorization header
-    3. If auth provider is "none" and no API key, allow all (open access)
+    3. If auth provider is "adfs", validate JWT from Authorization: Bearer header
+       (the ADFS flow uses localStorage tokens, not cookies)
+    4. If auth provider is "none" and no API key, allow all (open access)
+
+    All /api/auth/* routes (login, callback, sso/*, me, users) are bypass-listed
+    so the auth flow itself is reachable to unauthenticated users.
     """
     path = request.url.path
 

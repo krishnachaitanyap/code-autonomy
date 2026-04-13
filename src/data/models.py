@@ -47,8 +47,17 @@ class User(Base):
     id = Column(String(64), primary_key=True, default=_uuid)
     email = Column(String(256), nullable=False, unique=True)
     display_name = Column(String(256), nullable=False, default="")
+    # ADFS SID claim — distinct unique key for ADFS deployments. For generic
+    # OIDC providers we copy the IdP's "sub" claim into both ``sso_subject``
+    # and ``sid`` so downstream code can rely on a single column.
+    sid = Column(String(256), nullable=True, unique=True, index=True)
     sso_subject = Column(String(512), nullable=True, unique=True)
     sso_provider = Column(String(64), nullable=False, default="")
+    # First / last / full name come from ADFS FirstName / LastName / name
+    # claims. For generic OIDC, only ``display_name`` is populated.
+    first_name = Column(String(128), nullable=False, default="")
+    last_name = Column(String(128), nullable=False, default="")
+    full_name = Column(String(256), nullable=False, default="")
     role = Column(String(32), nullable=False, default="developer")  # admin | developer | viewer
     team_id = Column(String(128), nullable=True)
     cost_center = Column(String(128), nullable=True)
@@ -65,6 +74,10 @@ class User(Base):
             "id": self.id,
             "email": self.email,
             "display_name": self.display_name,
+            "sid": self.sid,
+            "first_name": self.first_name,
+            "last_name": self.last_name,
+            "full_name": self.full_name,
             "sso_provider": self.sso_provider,
             "role": self.role,
             "team_id": self.team_id,

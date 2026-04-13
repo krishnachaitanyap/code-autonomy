@@ -21,6 +21,26 @@
 import { useEffect, useState } from 'react';
 import { useAuth, canManageUsers, listUsers, updateUserRole, toggleUserActive, type User } from '@/lib/auth';
 
+/**
+ * Safely render the SSO provider as a hostname.
+ *
+ * Different providers store different things in `sso_provider`:
+ *   OIDC → the issuer URL (e.g. "https://yourorg.okta.com/oauth2/default")
+ *   ADFS → the authorize URL (e.g. "https://adfs.example.com/adfs/oauth2/authorize")
+ *   Mock → a plain string like "mock" or "adfs-local"
+ *
+ * `new URL(...)` throws on plain strings, so we fall back to displaying the
+ * raw value (or "—") when it isn't parseable as a URL.
+ */
+function ssoProviderLabel(raw: string | null | undefined): string {
+  if (!raw) return '—';
+  try {
+    return new URL(raw).hostname;
+  } catch {
+    return raw;
+  }
+}
+
 const ROLE_BADGE_COLORS: Record<string, string> = {
   admin: 'bg-red-100 text-red-700',
   developer: 'bg-blue-100 text-blue-700',
@@ -144,7 +164,7 @@ export default function UsersPage() {
                     {u.team_id || '—'}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                    {u.sso_provider ? new URL(u.sso_provider).hostname : '—'}
+                    {ssoProviderLabel(u.sso_provider)}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-xs text-gray-500">
                     {u.last_login_at ? new Date(u.last_login_at).toLocaleString() : 'Never'}

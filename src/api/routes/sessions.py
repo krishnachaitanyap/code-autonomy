@@ -6,7 +6,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from src.api.schemas import SessionCreate, SessionListResponse, SessionResponse, SessionResumeRequest
 from src.api.websocket import session_manager
@@ -45,7 +45,7 @@ async def get_session(session_id: str):
 
 
 @router.post("", response_model=SessionResponse)
-async def create_session(body: SessionCreate):
+async def create_session(body: SessionCreate, request: Request):
     """Start a new agent/plan/ask session.
 
     Runs the agent in a background thread and returns the session immediately.
@@ -55,6 +55,9 @@ async def create_session(body: SessionCreate):
     from src.data.repositories import RepoRepository
 
     init_db()
+
+    # Extract authenticated user from middleware (may be None if auth disabled)
+    user = getattr(request.state, "user", None)
 
     # Resolve repo context (optional — None = workspace-free session)
     repo_path = ""
@@ -86,8 +89,8 @@ async def create_session(body: SessionCreate):
             detail="No LLM API key configured. Set OPENAI_API_KEY (or ANTHROPIC_API_KEY) in your environment.",
         )
 
-    # Create session record immediately
-    session_id = agent_service._create_session(body.repo_id or "__workspace_free__", body.mode, body.requirements)
+    # Create session record immediately (with user context for governance)
+    session_id = agent_service._create_session(body.repo_id or "__workspace_free__", body.mode, body.requirements, user=user)
     if session_id is None:
         raise HTTPException(status_code=500, detail="Could not create session")
 
@@ -143,6 +146,7 @@ async def create_session(body: SessionCreate):
                     session_id=session_id,
                     recipe_ids=body.recipe_ids or None,
                     workspace_free=not body.repo_id,
+                    user=user,
                 )
             elif body.mode == "plan":
                 agent_service.run_plan(
@@ -229,7 +233,11 @@ async def resume_session(session_id: str, body: Optional[SessionResumeRequest] =
 
 
 @router.websocket("/{session_id}/stream")
-async def session_stream(websocket: WebSocket, session_id: str):
+async def session_stream(
+    websocket: WebSocket,
+    session_id: str,
+    token: Optional[str] = None,
+):
     """WebSocket endpoint for live session streaming.
 
     Clients receive JSON messages:
@@ -237,7 +245,41 @@ async def session_stream(websocket: WebSocket, session_id: str):
     - {"type": "llm_response", "data": {"content": "..."}}
     - {"type": "file_changed", "data": {"path": "src/foo.py", "action": "edit"}}
     - {"type": "complete", "data": {"result": {...}}}
+
+    Authentication: when SSO is enabled (provider = oidc or adfs), the
+    client must pass a valid internal JWT as the ``?token=`` query param
+    on the WebSocket handshake URL — browsers cannot send custom headers
+    on WebSocket upgrades, so the query param is the standard workaround.
+    The token is the same JWT returned by the SSO callback flow and stored
+    in localStorage on the frontend.
+
+    When auth is disabled (provider = none), the token check is skipped.
     """
+    # SSO token check (only when SSO is enabled)
+    try:
+        from src.api.routes.auth import get_auth_service
+        auth_svc = get_auth_service()
+        if auth_svc.is_enabled:
+            from src.services.jwt_service import decode_access_token
+
+            claims = decode_access_token(token or "")
+            if not claims:
+                # 1008 = "policy violation" — standard for auth failure on WS
+                await websocket.close(code=1008, reason="invalid or missing token")
+                return
+            # Stash the user_id on the WebSocket scope so downstream
+            # session_manager hooks can use it for audit/permission checks.
+            websocket.scope["user_id"] = claims.get("sub", "")
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        logger.warning("WebSocket auth check failed: %s", exc)
+        # If the auth service itself is broken, fail closed when SSO was
+        # supposed to be on. We can't easily distinguish "auth disabled" from
+        # "auth service crashed" here, so favor safety.
+        await websocket.close(code=1011, reason="auth service unavailable")
+        return
+
     await session_manager.connect(session_id, websocket)
     try:
         while True:

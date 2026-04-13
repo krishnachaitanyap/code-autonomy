@@ -3,6 +3,7 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { withWsToken } from './auth';
 
 const MAX_RECONNECT_ATTEMPTS = 20;
 const MAX_BACKOFF_MS = 15_000;
@@ -65,7 +66,11 @@ export function useSessionStream(sessionId: string | null) {
 
     let ws: WebSocket;
     try {
-      ws = new WebSocket(`${getWsBase()}/sessions/${sessionId}/stream`);
+      // Append the JWT as ?token= so the backend can authenticate the
+      // upgrade — browsers cannot send custom headers on WebSocket
+      // handshakes, so a query param is the standard workaround.
+      // withWsToken() returns the URL unchanged when SSO is disabled.
+      ws = new WebSocket(withWsToken(`${getWsBase()}/sessions/${sessionId}/stream`));
     } catch {
       // Constructor can throw on invalid URL / blocked connections
       scheduleReconnect();
